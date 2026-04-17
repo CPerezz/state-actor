@@ -7,11 +7,12 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
-	"time"
 	"math/bits"
 	"runtime"
 	"sort"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -69,13 +70,20 @@ type groupChild struct {
 // trieNodeWriter batches serialized trie node writes to Pebble.
 // Each node is written at key "vA" + path, where path is one byte per
 // tree level (0x00=left, 0x01=right). Flushes when batch exceeds 256MB.
+//
+// bytes is atomic so external goroutines (e.g. SizeTracker) can read it
+// concurrently with writes. The batch itself is still single-threaded and
+// mutated only by the builder goroutine.
 type trieNodeWriter struct {
 	batch  ethdb.Batch
 	db     ethdb.KeyValueStore
 	nodes  int
-	bytes  int64
+	bytes  atomic.Int64
 	keyBuf []byte // reusable key buffer, grown as needed
 }
+
+// Bytes returns the cumulative bytes written; safe for concurrent reads.
+func (w *trieNodeWriter) Bytes() int64 { return w.bytes.Load() }
 
 func (w *trieNodeWriter) writeNode(path []byte, blob []byte) {
 	needed := len(verkleTrieNodeKeyPrefix) + len(path)
@@ -89,7 +97,7 @@ func (w *trieNodeWriter) writeNode(path []byte, blob []byte) {
 		log.Fatalf("failed to write trie node: %v", err)
 	}
 	w.nodes++
-	w.bytes += int64(len(key) + len(blob))
+	w.bytes.Add(int64(len(key) + len(blob)))
 	if w.batch.ValueSize() >= 256*1024*1024 {
 		if err := w.batch.Write(); err != nil {
 			log.Fatalf("failed to flush trie node batch: %v", err)
@@ -133,13 +141,18 @@ func serializeStemBlob(entries []trieEntry) []byte {
 // stemBlobWriter batches flat-state stem blob writes to Pebble.
 // Each blob is written at key "vX" + stem(31 bytes). Flushes when
 // batch exceeds 256MB (same threshold as trieNodeWriter).
+//
+// bytes is atomic for the same reason as trieNodeWriter.bytes.
 type stemBlobWriter struct {
 	batch  ethdb.Batch
 	db     ethdb.KeyValueStore
 	stems  int
-	bytes  int64
+	bytes  atomic.Int64
 	keyBuf []byte
 }
+
+// Bytes returns the cumulative bytes written; safe for concurrent reads.
+func (w *stemBlobWriter) Bytes() int64 { return w.bytes.Load() }
 
 func (w *stemBlobWriter) writeStemBlob(stem []byte, entries []trieEntry) {
 	blob := serializeStemBlob(entries)
@@ -156,7 +169,7 @@ func (w *stemBlobWriter) writeStemBlob(stem []byte, entries []trieEntry) {
 		log.Fatalf("failed to write stem blob: %v", err)
 	}
 	w.stems++
-	w.bytes += int64(len(key) + len(blob))
+	w.bytes.Add(int64(len(key) + len(blob)))
 	if w.batch.ValueSize() >= 256*1024*1024 {
 		if err := w.batch.Write(); err != nil {
 			log.Fatalf("failed to flush stem blob batch: %v", err)
@@ -756,8 +769,9 @@ func computeBinaryRootStreamingFromSlice(entries []trieEntry, db ethdb.KeyValueS
 	var tnStats trieNodeStats
 	if sb.w != nil {
 		sb.w.flush()
-		tnStats = trieNodeStats{Nodes: sb.w.nodes, Bytes: sb.w.bytes}
-		log.Printf("Wrote %d trie nodes (%d MB)", sb.w.nodes, sb.w.bytes/1024/1024)
+		tnBytes := sb.w.bytes.Load()
+		tnStats = trieNodeStats{Nodes: sb.w.nodes, Bytes: tnBytes}
+		log.Printf("Wrote %d trie nodes (%d MB)", sb.w.nodes, tnBytes/1024/1024)
 	}
 	return root, tnStats
 }
@@ -822,8 +836,9 @@ func computeBinaryRootStreaming(iter ethdb.Iterator, db ethdb.KeyValueStore, gro
 	var tnStats trieNodeStats
 	if sb.w != nil {
 		sb.w.flush()
-		tnStats = trieNodeStats{Nodes: sb.w.nodes, Bytes: sb.w.bytes}
-		log.Printf("Wrote %d trie nodes (%d MB)", sb.w.nodes, sb.w.bytes/1024/1024)
+		tnBytes := sb.w.bytes.Load()
+		tnStats = trieNodeStats{Nodes: sb.w.nodes, Bytes: tnBytes}
+		log.Printf("Wrote %d trie nodes (%d MB)", sb.w.nodes, tnBytes/1024/1024)
 	}
 
 	return root, tnStats
@@ -950,13 +965,15 @@ func computeBinaryRootStreamingParallel(
 		rootHash = sb.finish()
 		if sb.w != nil {
 			sb.w.flush()
-			tnStats = trieNodeStats{Nodes: sb.w.nodes, Bytes: sb.w.bytes}
-			log.Printf("Wrote %d trie nodes (%d MB)", sb.w.nodes, sb.w.bytes/1024/1024)
+			tnBytes := sb.w.bytes.Load()
+			tnStats = trieNodeStats{Nodes: sb.w.nodes, Bytes: tnBytes}
+			log.Printf("Wrote %d trie nodes (%d MB)", sb.w.nodes, tnBytes/1024/1024)
 		}
 		if sbw != nil {
 			sbw.flush()
-			sbStats = stemBlobStats{Stems: sbw.stems, Bytes: sbw.bytes}
-			log.Printf("Wrote %d stem blobs (%d MB)", sbw.stems, sbw.bytes/1024/1024)
+			sbBytes := sbw.bytes.Load()
+			sbStats = stemBlobStats{Stems: sbw.stems, Bytes: sbBytes}
+			log.Printf("Wrote %d stem blobs (%d MB)", sbw.stems, sbBytes/1024/1024)
 		}
 	}()
 
