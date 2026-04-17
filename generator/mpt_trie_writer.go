@@ -2,6 +2,7 @@ package generator
 
 import (
 	"log"
+	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
@@ -15,12 +16,18 @@ import (
 //
 // This mirrors the binary trie's trieNodeWriter in binary_stack_trie.go,
 // but uses geth's rawdb helpers for MPT-specific key layout.
+//
+// bytes is atomic so external goroutines (e.g. SizeTracker) can read it
+// concurrently with writes issued by the MPT builder.
 type mptTrieNodeWriter struct {
 	db    ethdb.KeyValueStore
 	batch ethdb.Batch
 	nodes int
-	bytes int64
+	bytes atomic.Int64
 }
+
+// Bytes returns the cumulative bytes written; safe for concurrent reads.
+func (w *mptTrieNodeWriter) Bytes() int64 { return w.bytes.Load() }
 
 func newMPTTrieNodeWriter(db ethdb.KeyValueStore) *mptTrieNodeWriter {
 	return &mptTrieNodeWriter{
@@ -41,7 +48,7 @@ func (w *mptTrieNodeWriter) accountCallback() trie.OnTrieNode {
 
 		rawdb.WriteAccountTrieNode(w.batch, p, b)
 		w.nodes++
-		w.bytes += int64(1 + len(p) + len(b)) // "A" prefix + path + blob
+		w.bytes.Add(int64(1 + len(p) + len(b))) // "A" prefix + path + blob
 		w.maybeFlush()
 	}
 }
@@ -57,7 +64,7 @@ func (w *mptTrieNodeWriter) storageCallback(accountHash common.Hash) trie.OnTrie
 
 		rawdb.WriteStorageTrieNode(w.batch, accountHash, p, b)
 		w.nodes++
-		w.bytes += int64(1 + common.HashLength + len(p) + len(b)) // "O" + hash + path + blob
+		w.bytes.Add(int64(1 + common.HashLength + len(p) + len(b))) // "O" + hash + path + blob
 		w.maybeFlush()
 	}
 }
@@ -83,5 +90,5 @@ func (w *mptTrieNodeWriter) flush() {
 
 // stats returns the number of trie nodes written and total bytes.
 func (w *mptTrieNodeWriter) stats() (nodes int, bytes int64) {
-	return w.nodes, w.bytes
+	return w.nodes, w.bytes.Load()
 }
