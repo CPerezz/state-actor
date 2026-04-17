@@ -819,12 +819,6 @@ func TestBinaryTrieCommitIntervalGoldenHash(t *testing.T) {
 }
 
 func TestTargetSizeStopsEarly(t *testing.T) {
-	// The bintrie target-size stop is landed in a later commit of this PR
-	// (C4 — Phase 2 size-based stop). On this commit the pre-existing
-	// dirSize×2.5 heuristic never fires for bintrie because main DB stays
-	// tiny during Phase 1. Skip until C4 rewires the stop.
-	t.Skip("bintrie target-size stop rewired in a later commit (C4)")
-
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "testdb")
 
@@ -861,8 +855,11 @@ func TestTargetSizeStopsEarly(t *testing.T) {
 	}
 
 	dbPath2 := filepath.Join(tmpDir, "testdb2")
-	// Use a target size (~500KB) that should cause early stopping well
-	// before all 5000 contracts are generated.
+	// Use a target size (5 MB) that is well below the ~10-20 MB a full
+	// 5000-contract run would produce, so the Phase 2 stop fires and
+	// ContractsCreated < baseline.ContractsCreated. 5 MB is large enough
+	// that Phase 1 code blobs don't exceed target and leave Phase 2
+	// with no room to write stems — at 500 KB they would.
 	configTarget := Config{
 		DBPath:       dbPath2,
 		NumAccounts:  20,
@@ -875,7 +872,7 @@ func TestTargetSizeStopsEarly(t *testing.T) {
 		Workers:      1,
 		CodeSize:     256,
 		TrieMode:     TrieModeBinary,
-		TargetSize:   500 * 1024, // 500 KB target
+		TargetSize:   5 * 1024 * 1024, // 5 MB target
 	}
 
 	genTarget, err := New(configTarget)
@@ -888,18 +885,32 @@ func TestTargetSizeStopsEarly(t *testing.T) {
 	}
 	genTarget.Close()
 
-	t.Logf("Full: %d contracts, %d slots", statsFull.ContractsCreated, statsFull.StorageSlotsCreated)
-	t.Logf("Target (500KB): %d contracts, %d slots", statsTarget.ContractsCreated, statsTarget.StorageSlotsCreated)
+	t.Logf("Full: %d contracts, %d slots, %s total", statsFull.ContractsCreated,
+		statsFull.StorageSlotsCreated, fmtBytes(statsFull.StemBlobBytes+statsFull.TrieNodeBytes+statsFull.CodeBytes))
+	t.Logf("Target (5MB): %d contracts, %d slots, %s total", statsTarget.ContractsCreated,
+		statsTarget.StorageSlotsCreated, fmtBytes(statsTarget.StemBlobBytes+statsTarget.TrieNodeBytes+statsTarget.CodeBytes))
 
-	if statsTarget.ContractsCreated >= statsFull.ContractsCreated {
-		t.Errorf("Target-size should have stopped early: created %d contracts (full run: %d)",
-			statsTarget.ContractsCreated, statsFull.ContractsCreated)
+	// Phase 1 generates contracts up to NumContracts (the safety cap);
+	// the factor-free Phase 2 stop only discards stem/trie work from the
+	// tail. So ContractsCreated may match the baseline — compare Phase-2
+	// output (stem blob + trie node bytes) and the actual on-disk size.
+	fullP2 := statsFull.StemBlobBytes + statsFull.TrieNodeBytes
+	targetP2 := statsTarget.StemBlobBytes + statsTarget.TrieNodeBytes
+	if targetP2 >= fullP2 {
+		t.Errorf("Target-size should have reduced Phase-2 output: got %d bytes (full: %d)",
+			targetP2, fullP2)
 	}
 
 	// The target run should still produce a valid state root.
 	if statsTarget.StateRoot == (common.Hash{}) {
 		t.Error("Target run produced empty state root")
 	}
+
+	// And the resulting DB should land within a loose tolerance of target.
+	// Small-scale Pebble overhead (WAL, MANIFEST, L0 min SST) dominates
+	// here so the tolerance is generous; the tight ±20% test lives in
+	// TestTargetSizeStopsAccurately_Bintrie at 50 MB.
+	assertDBSizeWithin(t, dbPath2, 5*1024*1024, 0.5)
 }
 
 // assertDBSizeWithin fails the test if the on-disk size of dbPath differs
@@ -923,6 +934,52 @@ func assertDBSizeWithin(t *testing.T, dbPath string, target uint64, tolerance fl
 		t.Errorf("DB size %.1f%% off target (%d vs %d), tolerance %.1f%%",
 			ratio*100, actual, target, tolerance*100)
 	}
+}
+
+// TestTargetSizeStopsAccurately_Bintrie is the primary regression fence
+// for the factor-free bintrie stop (C4). At a 50 MB target, the resulting
+// DB must land within ±20% — Pebble overhead (WAL + minimum L0 SST) is
+// still non-trivial at this scale, so the tolerance is looser than at
+// GB scales (±5% enforced in TestTargetSizeStopsAccurately_Bintrie_1GB,
+// added in C7 with testing.Short() skip).
+func TestTargetSizeStopsAccurately_Bintrie(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping long target-size test in -short mode")
+	}
+	const target uint64 = 50 * 1024 * 1024 // 50 MB
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "testdb")
+
+	config := Config{
+		DBPath:       dbPath,
+		NumAccounts:  20,
+		NumContracts: 1_000_000,
+		MaxSlots:     100,
+		MinSlots:     10,
+		Distribution: PowerLaw,
+		Seed:         42,
+		BatchSize:    1000,
+		Workers:      1,
+		CodeSize:     256,
+		TrieMode:     TrieModeBinary,
+		TargetSize:   target,
+	}
+
+	gen, err := New(config)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	stats, err := gen.Generate()
+	if err != nil {
+		gen.Close()
+		t.Fatalf("Generate: %v", err)
+	}
+	gen.Close()
+
+	t.Logf("bintrie target=%s: %d contracts, %d slots, root=%s",
+		fmtBytes(target), stats.ContractsCreated, stats.StorageSlotsCreated,
+		stats.StateRoot.Hex())
+	assertDBSizeWithin(t, dbPath, target, 0.20)
 }
 
 // fmtBytes formats a byte count for test logs.

@@ -1117,20 +1117,66 @@ func (g *Generator) generateStreamingBinary() (retStats *Stats, retErr error) {
 	}
 
 	hashStart := time.Now()
-	var nodeDB ethdb.KeyValueStore
-	// Trie node storage only supported for geth format
-	if g.config.WriteTrieNodes && g.config.OutputFormat == OutputGeth && g.db != nil {
-		nodeDB = g.db
-	}
 
-	// Create stem blob writer for bintrie flat-state.
-	// Writes stem blobs at "vX" + stem during Phase 2 (alongside trie nodes).
+	// Hoist trieNodeWriter + stemBlobWriter construction here so the
+	// SizeTracker can reference their live byte counters, and the
+	// stoppableIterator + afterStem callback can plug into the Phase 2
+	// pipeline (C4 of the factor-free target-size refactor).
+	var tnw *trieNodeWriter
+	if g.config.WriteTrieNodes && g.config.OutputFormat == OutputGeth && g.db != nil {
+		tnw = &trieNodeWriter{batch: g.db.NewBatch(), db: g.db}
+	}
 	var sbw *stemBlobWriter
 	if g.config.OutputFormat == OutputGeth && g.db != nil {
 		sbw = &stemBlobWriter{batch: g.db.NewBatch(), db: g.db}
 	}
 
-	iter := tempDB.NewIterator(nil, nil)
+	// Build the SizeTracker + stoppableIterator when --target-size is set.
+	// Logical bytes = stem-blob writer + trie-node writer + Phase-1 code blobs.
+	// Preamble/contract entry data is not yet on disk in main DB — it lives
+	// in the temp DB and only becomes main-DB bytes via stem blobs and trie
+	// nodes emitted here in Phase 2.
+	var tracker *SizeTracker
+	if g.config.TargetSize > 0 && g.config.OutputFormat == OutputGeth && g.db != nil {
+		tracker = NewSizeTracker(g.config.DBPath, g.config.TargetSize, func() int64 {
+			var logical int64
+			if sbw != nil {
+				logical += sbw.Bytes()
+			}
+			if tnw != nil {
+				logical += tnw.Bytes()
+			}
+			logical += int64(g.writer.Stats().CodeBytes)
+			return logical
+		})
+	}
+
+	var iter ethdb.Iterator = tempDB.NewIterator(nil, nil)
+	if tracker != nil {
+		iter = &stoppableIterator{
+			Iterator:   iter,
+			shouldStop: tracker.ShouldStop,
+		}
+	}
+
+	// afterStem runs in the builder goroutine (the goroutine that owns the
+	// sbw + tnw Pebble batches) so MaybeCalibrate's synchronous flush
+	// respects Pebble's single-threaded batch contract.
+	var afterStem func()
+	if tracker != nil {
+		afterStem = func() {
+			_ = tracker.MaybeCalibrate(func() error {
+				if sbw != nil {
+					sbw.flush()
+				}
+				if tnw != nil {
+					tnw.flush()
+				}
+				return nil
+			})
+		}
+	}
+
 	numWorkers := runtime.GOMAXPROCS(0) - 2
 	if numWorkers < 2 {
 		numWorkers = 2
@@ -1139,7 +1185,7 @@ func (g *Generator) generateStreamingBinary() (retStats *Stats, retErr error) {
 		log.Printf("Phase 2: using %d parallel workers", numWorkers)
 	}
 	stateRoot, tnStats, sbStats, err := computeBinaryRootStreamingParallel(
-		context.Background(), iter, nodeDB, g.config.GroupDepth, numWorkers, sbw,
+		context.Background(), iter, tnw, sbw, g.config.GroupDepth, numWorkers, afterStem,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compute binary root: %w", err)
