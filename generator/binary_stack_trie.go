@@ -111,6 +111,10 @@ func (w *trieNodeWriter) flush() {
 		if err := w.batch.Write(); err != nil {
 			log.Fatalf("failed to flush trie node batch: %v", err)
 		}
+		// Reset so subsequent writeNode calls reuse a fresh batch. The
+		// factor-free target-size refactor calls flush() mid-phase for
+		// live-size calibration, so the batch must be ready for more Puts.
+		w.batch.Reset()
 	}
 }
 
@@ -183,6 +187,8 @@ func (w *stemBlobWriter) flush() {
 		if err := w.batch.Write(); err != nil {
 			log.Fatalf("failed to flush stem blob batch: %v", err)
 		}
+		// Reset so subsequent writeStemBlob calls reuse a fresh batch.
+		w.batch.Reset()
 	}
 }
 
@@ -916,10 +922,11 @@ type stemResult struct {
 func computeBinaryRootStreamingParallel(
 	ctx context.Context,
 	iter ethdb.Iterator,
-	db ethdb.KeyValueStore,
+	tnw *trieNodeWriter, // nil to skip trie node persistence
+	sbw *stemBlobWriter, // nil to skip flat-state stem blob writes
 	groupDepth int,
 	numWorkers int,
-	sbw *stemBlobWriter, // nil to skip flat-state stem blob writes
+	afterStem func(), // nil = no-op. Called from builder goroutine after each stem.
 ) (common.Hash, trieNodeStats, stemBlobStats, error) {
 	if numWorkers < 1 {
 		numWorkers = 1
@@ -951,14 +958,20 @@ func computeBinaryRootStreamingParallel(
 		if groupDepth > 0 {
 			sb.groupBuf = make(map[int][]groupChild)
 		}
-		if db != nil {
-			sb.w = &trieNodeWriter{batch: db.NewBatch(), db: db}
-		}
+		// Use caller-provided writer so the SizeTracker (or any other
+		// observer) can reference the same instance for live byte counts.
+		sb.w = tnw
 
 		for r := range builderCh {
 			sb.feedStem(r.stem[:], r.hash, r.entries)
 			if sbw != nil {
 				sbw.writeStemBlob(r.stem[:], r.entries)
+			}
+			// afterStem runs in this goroutine (same goroutine that owns
+			// the tnw + sbw batches) so calibration's synchronous flush
+			// respects Pebble's single-threaded batch contract.
+			if afterStem != nil {
+				afterStem()
 			}
 		}
 
