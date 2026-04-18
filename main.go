@@ -16,7 +16,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"math"
 	"math/big"
 	"os"
 	"os/signal"
@@ -144,7 +143,20 @@ func main() {
 	// Contracts is the derived "solver" variable that reconciles both.
 	// Explicit flags always override auto-computed values.
 	if parsedTargetSize > 0 {
-		const bytesPerEntry uint64 = 80 // empirical after Pebble compression
+		// Reject --target-size with --output-format erigon at parse time.
+		// ErigonWriter buffers all writes in in-memory maps until Flush(),
+		// so dirSize(mainDB) is meaningless during generation and there is
+		// no safe stop signal. A silent run would loop until OOM.
+		if generator.ParseOutputFormat(*outputFormat) == generator.OutputErigon {
+			log.Fatalf("--target-size is not supported with --output-format erigon " +
+				"(Erigon buffers writes in memory until close; direct on-disk sizing is impossible)")
+		}
+		// bytesPerEntry is used only by auto-scaling to shape
+		// --accounts/--contracts/--slots defaults; the actual stop
+		// condition is driven by the Phase 1/2 SizeTracker or dirSize check,
+		// so this constant does not need to be exact — 130 matches the
+		// observed GB-scale bintrie density (22.4M entries → 2.9 GB).
+		const bytesPerEntry uint64 = 130
 		totalEntries := parsedTargetSize / bytesPerEntry
 		chunksPerContract := uint64(((*codeSize) + 30) / 31)
 
@@ -226,14 +238,20 @@ func main() {
 		// Log computed parameters.
 		log.Printf("Auto-scaled for %s target (70/20/10 ratio):", *targetSize)
 		log.Printf("  accounts:     %d", *accounts)
-		log.Printf("  contracts:    %d (unlimited, stops at target)", userContracts)
+		log.Printf("  contracts:    %d (soft cap, stops earlier at target)", userContracts)
 		log.Printf("  min-slots:    %d", *minSlots)
 		log.Printf("  max-slots:    %d", *maxSlots)
 		log.Printf("  code-size:    %d", *codeSize)
 		log.Printf("  distribution: %s", *distribution)
 
-		// Set contracts to MaxInt32 — dirSize() is the real stopping condition.
-		*contracts = math.MaxInt32
+		// Phase 1 safety cap: the SizeTracker / dirSize check is the
+		// real stop condition, but a generous finite cap protects against
+		// the stop check misbehaving (e.g. Pebble silently not growing
+		// the mainDB). autoScaleEstimate × 5 gives plenty of headroom for
+		// workloads where compression or overhead happens to push the
+		// actual stop point later than the estimate; if the cap is ever
+		// hit in practice, a warning at end-of-generation flags it.
+		*contracts = userContracts * 5
 	}
 
 	// Validate deep-branch flags
@@ -307,8 +325,8 @@ func main() {
 		log.Printf("  Database:     %s", config.DBPath)
 		log.Printf("  Output Format: %s", config.OutputFormat)
 		log.Printf("  Accounts:     %d", config.NumAccounts)
-		if config.NumContracts >= math.MaxInt32 {
-			log.Printf("  Contracts:    unlimited (governed by --target-size)")
+		if parsedTargetSize > 0 {
+			log.Printf("  Contracts:    %d (Phase 1 safety cap, target-size stops earlier)", config.NumContracts)
 		} else {
 			log.Printf("  Contracts:    %d", config.NumContracts)
 		}
