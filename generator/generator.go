@@ -883,28 +883,15 @@ func (g *Generator) generateStreamingBinary() (retStats *Stats, retErr error) {
 	}
 
 	var lastLogTime = time.Now()
-	var lastProjectedSize uint64 // cached from most recent dirSize check
 	logProgress := func(phase string, current, total int, slots int64) {
 		if time.Since(lastLogTime) < 20*time.Second {
 			return
 		}
 		lastLogTime = time.Now()
 		totalEntries := preambleEntries + contractEntries
-		if g.config.TargetSize > 0 && g.config.NumContracts >= math.MaxInt32 {
-			pct := float64(lastProjectedSize) / float64(g.config.TargetSize) * 100
-			if pct > 100 {
-				pct = 100
-			}
-			log.Printf("[%s] %.1f%% of target (%s / %s), %d contracts, %d storage slots, %d trie entries",
-				phase, pct,
-				formatBytesInternal(lastProjectedSize),
-				formatBytesInternal(g.config.TargetSize),
-				current, slots, totalEntries)
-		} else {
-			pct := float64(current) / float64(total) * 100
-			log.Printf("[%s] %d/%d (%.1f%%), %d storage slots, %d trie entries",
-				phase, current, total, pct, slots, totalEntries)
-		}
+		pct := float64(current) / float64(total) * 100
+		log.Printf("[%s] %d/%d (%.1f%%), %d storage slots, %d trie entries",
+			phase, current, total, pct, slots, totalEntries)
 	}
 
 	// Track genesis addresses for collision avoidance.
@@ -1050,10 +1037,6 @@ func (g *Generator) generateStreamingBinary() (retStats *Stats, retErr error) {
 	if g.config.LiveStats != nil {
 		g.config.LiveStats.SetPhase("contracts")
 	}
-	targetCheckInterval := 500
-	if g.config.NumContracts < 500*5 {
-		targetCheckInterval = max(1, g.config.NumContracts/5)
-	}
 	contractIdx := 0
 	targetReached := false
 	for contract := range contractCh {
@@ -1083,29 +1066,26 @@ func (g *Generator) generateStreamingBinary() (retStats *Stats, retErr error) {
 		contractIdx++
 		logProgress("Contract", contractIdx, g.config.NumContracts, int64(stats.StorageSlotsCreated))
 
-		// Check target size periodically using actual disk measurement.
-		if g.config.TargetSize > 0 && contractIdx%targetCheckInterval == 0 {
-			mainDBSize, err := dirSize(g.config.DBPath)
-			if err == nil {
-				// Project trie node overhead: empirically, trie nodes add
-				// ~1.5× the snapshot data, so total ≈ 2.5× snapshot.
-				projected := mainDBSize
-				if g.config.WriteTrieNodes {
-					projected = mainDBSize * 5 / 2
-				}
-				lastProjectedSize = projected
-				if projected >= g.config.TargetSize {
-					if g.config.Verbose {
-						log.Printf("Target size reached: DB %s × 2.5 = %s (target: %s)",
-							formatBytesInternal(mainDBSize),
-							formatBytesInternal(projected),
-							formatBytesInternal(g.config.TargetSize))
-					}
-					targetReached = true
-					close(done)
-					break
-				}
+		// Phase 1 raw-byte safety cap: stop generating more entries once
+		// the temp DB's raw bytes (each entry is 32B key + 32B value = 64B)
+		// reach TargetSize. This prevents Phase 1 from producing more raw
+		// data than target can hold on disk after Phase 2 transformation.
+		// The fine-grained factor-free stop runs in Phase 2 via the
+		// SizeTracker; this cap keeps Phase 1 bounded for workloads where
+		// NumContracts is set generously (test fixtures, or main.go's
+		// userContracts×5 safety cap). No compression-ratio assumption —
+		// the cap is "never write more raw entries than the target can
+		// hold if it were a 1:1 mapping".
+		rawBytes := 64 * (preambleEntries + contractEntries)
+		if g.config.TargetSize > 0 && uint64(rawBytes) >= g.config.TargetSize {
+			if g.config.Verbose {
+				log.Printf("Phase 1 raw-byte cap: %s raw entries >= target %s — Phase 2 will trim to target",
+					formatBytesInternal(uint64(rawBytes)),
+					formatBytesInternal(g.config.TargetSize))
 			}
+			targetReached = true
+			close(done)
+			break
 		}
 	}
 	// Drain producer if we broke early.
