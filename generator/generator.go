@@ -515,7 +515,6 @@ func (g *Generator) generateStreamingMPT() (*Stats, error) {
 		g.config.LiveStats.SetPhase("contracts")
 	}
 
-	targetCheckInterval := 500
 	targetReached := false
 	contractIdx := 0
 
@@ -575,13 +574,34 @@ func (g *Generator) generateStreamingMPT() (*Stats, error) {
 		contractIdx++
 		logProgress("contracts", contractIdx)
 
-		// Check target size periodically.
-		if g.config.TargetSize > 0 && contractIdx%targetCheckInterval == 0 {
-			mainDBSize, err := dirSize(g.config.DBPath)
-			if err == nil && mainDBSize >= g.config.TargetSize {
+		// Factor-free target-size stop for MPT: direct dirSize measurement
+		// every 500 contracts. Unlike bintrie (where most data lands only
+		// in Phase 2 after temp-DB transformation), MPT's flat state,
+		// storage trie nodes, and code blobs all hit main DB synchronously
+		// in Phase 1 — so dirSize is the authoritative answer.
+		//
+		// We flush three things before sampling disk:
+		//   1. nodeWriter's owned batch (synchronous, single-goroutine)
+		//   2. The writer's currently-buffered batch (non-shutdown partial
+		//      flush) so flat-state/code writes land on disk before dirSize
+		//      walks the filesystem — otherwise we'd under-sample by up to
+		//      BatchSize × item-size.
+		// The in-flight snapCh queue (≤64 items ≈ ~0.5 MB) remains unseen
+		// but is bounded and small relative to any practical target.
+		if g.config.TargetSize > 0 && contractIdx%500 == 0 {
+			if nodeWriter != nil {
+				nodeWriter.flush()
+			}
+			if gw, ok := g.writer.(*GethWriter); ok {
+				if err := gw.FlushBatch(); err != nil {
+					return nil, fmt.Errorf("MPT target-size flush: %w", err)
+				}
+			}
+			ms, err := dirSize(g.config.DBPath)
+			if err == nil && ms >= g.config.TargetSize {
 				if g.config.Verbose {
-					log.Printf("Target size reached: DB %s (target: %s)",
-						formatBytesInternal(mainDBSize),
+					log.Printf("Target size reached: %s on disk (target: %s)",
+						formatBytesInternal(ms),
 						formatBytesInternal(g.config.TargetSize))
 				}
 				targetReached = true
@@ -710,6 +730,13 @@ func (g *Generator) generateStreamingMPT() (*Stats, error) {
 	}
 	accountTrie := trie.NewStackTrie(acctCallback)
 
+	// Phase 2 runs to completion: for MPT, the account trie is small (~5%
+	// of final DB at GB scale) so letting it finish adds a bounded amount
+	// beyond target. Stopping mid-Phase-2 with an iterator wrapper would
+	// produce a state root that doesn't correspond to any complete subset
+	// of the written flat accounts — unlike bintrie where Phase 2 discards
+	// entries from the temp DB, MPT Phase 2 reads from acctTrieDB written
+	// lockstep with the flat-state writes the user already sees on disk.
 	iter := acctTrieDB.NewIterator(nil, nil)
 	acctTrieCount := 0
 	for iter.Next() {

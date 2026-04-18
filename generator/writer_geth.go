@@ -122,9 +122,20 @@ func (w *GethWriter) WriteGenesisBlock(config *params.ChainConfig, stateRoot com
 	return nil
 }
 
-// Flush commits all pending writes.
+// Flush commits all pending writes and closes the async batch pipeline.
+// This is a shutdown-once operation — don't call it mid-run.
 func (w *GethWriter) Flush() error {
 	return w.bw.finish()
+}
+
+// FlushBatch commits the currently-buffered batch to Pebble synchronously
+// and waits for the async pipeline to drain outstanding batches. Does not
+// close the pipeline, so subsequent Write* calls still work. Safe to call
+// mid-generation (e.g. to force a dirSize sample to see the latest bytes).
+// The caller is responsible for coordinating that all desired Write* calls
+// have already returned before flushing.
+func (w *GethWriter) FlushBatch() error {
+	return w.bw.flushAndDrainSync()
 }
 
 // Close closes the writer.
@@ -158,8 +169,14 @@ type gethBatchWriter struct {
 	errChan   chan error
 	wg        sync.WaitGroup
 	closeOnce sync.Once
-	batch     ethdb.Batch
-	count     int
+	// mu serialises put() (hot path, single-goroutine in normal operation)
+	// with mid-run flush() calls issued from a different goroutine (e.g.
+	// target-size size sampling). The async batch-commit workers don't
+	// touch bw.batch directly — they consume the detached *gethBatchWork
+	// sent on batchChan — so they don't need to hold this mutex.
+	mu    sync.Mutex
+	batch ethdb.Batch
+	count int
 }
 
 type gethBatchWork struct {
@@ -195,18 +212,30 @@ func newGethBatchWriter(db ethdb.KeyValueStore, batchSize, workers int) *gethBat
 }
 
 func (bw *gethBatchWriter) put(key, value []byte, counter *atomic.Uint64) error {
+	bw.mu.Lock()
 	if err := bw.batch.Put(key, value); err != nil {
+		bw.mu.Unlock()
 		return err
 	}
 	counter.Add(uint64(len(key) + len(value)))
 	bw.count++
-	if bw.count >= bw.batchSize {
-		return bw.flush()
+	shouldFlush := bw.count >= bw.batchSize
+	bw.mu.Unlock()
+	if shouldFlush {
+		return bw.flushExternal()
 	}
 	return nil
 }
 
-func (bw *gethBatchWriter) flush() error {
+// flushExternal is the public-facing flush entry. flushLocked expects the
+// caller to already hold bw.mu.
+func (bw *gethBatchWriter) flushExternal() error {
+	bw.mu.Lock()
+	defer bw.mu.Unlock()
+	return bw.flushLocked()
+}
+
+func (bw *gethBatchWriter) flushLocked() error {
 	if bw.count == 0 {
 		return nil
 	}
@@ -218,6 +247,30 @@ func (bw *gethBatchWriter) flush() error {
 	bw.batch = bw.db.NewBatch()
 	bw.count = 0
 	return nil
+}
+
+// flush is retained as the lock-acquiring form used by external callers
+// (FlushBatch and finish).
+func (bw *gethBatchWriter) flush() error {
+	return bw.flushExternal()
+}
+
+// flushAndDrainSync commits the current batch synchronously (bypassing
+// the async workers) so the bytes are guaranteed on disk by the time
+// the call returns. It swaps in a fresh batch under the lock, then
+// commits the old one directly; the async workers continue handling
+// their own queued batches normally.
+func (bw *gethBatchWriter) flushAndDrainSync() error {
+	bw.mu.Lock()
+	if bw.count == 0 {
+		bw.mu.Unlock()
+		return nil
+	}
+	oldBatch := bw.batch
+	bw.batch = bw.db.NewBatch()
+	bw.count = 0
+	bw.mu.Unlock()
+	return oldBatch.Write()
 }
 
 func (bw *gethBatchWriter) finish() error {

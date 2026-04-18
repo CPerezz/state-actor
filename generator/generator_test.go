@@ -982,6 +982,55 @@ func TestTargetSizeStopsAccurately_Bintrie(t *testing.T) {
 	assertDBSizeWithin(t, dbPath, target, 0.20)
 }
 
+// TestTargetSizeStopsAccurately_MPT mirrors _Bintrie for the MPT path.
+// Runs at a 500 MB target because MPT's small-scale Pebble overhead
+// (WAL + MANIFEST + SST metadata on hot-path items) is a significant
+// fraction of a ~50 MB budget — the bintrie Phase-2 tracker sidesteps
+// this because its calibration ratio absorbs the overhead, but MPT
+// uses a direct dirSize check and therefore needs a larger target to
+// amortise the fixed costs. At 500 MB the overshoot from last-checkpoint
+// + Phase-2 account-trie additions is well inside ±20%.
+func TestTargetSizeStopsAccurately_MPT(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping long target-size test in -short mode")
+	}
+	const target uint64 = 500 * 1024 * 1024 // 500 MB
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "testdb")
+
+	config := Config{
+		DBPath:         dbPath,
+		NumAccounts:    20,
+		NumContracts:   1_000_000,
+		MaxSlots:       100,
+		MinSlots:       10,
+		Distribution:   PowerLaw,
+		Seed:           43,
+		BatchSize:      1000,
+		Workers:        1,
+		CodeSize:       256,
+		TrieMode:       TrieModeMPT,
+		WriteTrieNodes: true,
+		TargetSize:     target,
+	}
+
+	gen, err := New(config)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	stats, err := gen.Generate()
+	if err != nil {
+		gen.Close()
+		t.Fatalf("Generate: %v", err)
+	}
+	gen.Close()
+
+	t.Logf("MPT target=%s: %d contracts, %d slots, root=%s",
+		fmtBytes(target), stats.ContractsCreated, stats.StorageSlotsCreated,
+		stats.StateRoot.Hex())
+	assertDBSizeWithin(t, dbPath, target, 0.20)
+}
+
 // fmtBytes formats a byte count for test logs.
 func fmtBytes(n uint64) string {
 	switch {
