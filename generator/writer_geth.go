@@ -112,6 +112,12 @@ func (w *GethWriter) SetStateRoot(root common.Hash) error {
 	rawdb.WriteStateID(w.db, root, 0)
 	rawdb.WritePersistentStateID(w.db, 0)
 	rawdb.WriteSnapshotRoot(w.db, root)
+	// Mark the snapshot generator as Done so geth doesn't try to regenerate
+	// the snapshot from scratch on first open. See genesis.WriteCompletedSnapshotGenerator
+	// for the full rationale.
+	if err := genesis.WriteCompletedSnapshotGenerator(w.db); err != nil {
+		return fmt.Errorf("write snapshot generator: %w", err)
+	}
 	return nil
 }
 

@@ -15,6 +15,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/trie"
 	"github.com/holiman/uint256"
 )
@@ -265,6 +266,9 @@ func WriteGenesisBlock(db ethdb.KeyValueStore, genesis *Genesis, stateRoot commo
 	rawdb.WriteStateID(metadataWriter, stateRoot, 0)
 	rawdb.WritePersistentStateID(metadataWriter, 0)
 	rawdb.WriteSnapshotRoot(metadataWriter, stateRoot)
+	if err := WriteCompletedSnapshotGenerator(metadataWriter); err != nil {
+		return nil, fmt.Errorf("failed to write snapshot generator: %w", err)
+	}
 
 	if err := batch.Write(); err != nil {
 		return nil, fmt.Errorf("failed to write genesis block: %w", err)
@@ -283,4 +287,38 @@ func WriteGenesisBlock(db ethdb.KeyValueStore, genesis *Genesis, stateRoot commo
 	}
 
 	return block, nil
+}
+
+// snapshotGenerator mirrors the wire format of pathdb's unexported
+// journalGenerator. The field order, types, and naming must match
+// triedb/pathdb/journal.go exactly so RLP-encoded blobs round-trip.
+type snapshotGenerator struct {
+	Wiping   bool // deprecated, kept for backward compatibility
+	Done     bool
+	Marker   []byte
+	Accounts uint64
+	Slots    uint64
+	Storage  uint64
+}
+
+// WriteCompletedSnapshotGenerator persists a SnapshotGenerator entry marking
+// the snapshot as fully generated (Done=true, nil marker).
+//
+// Without this entry, pathdb's loadGenerator returns a nil generator on open,
+// and setStateGenerator constructs a fresh one with an empty (non-nil) marker.
+// The disk layer's genComplete() then reports false, which:
+//   - in MPT mode (noBuild=false), triggers a full snapshot regeneration
+//     from scratch, and
+//   - in binary trie mode (noBuild=true via isVerkle), prevents AccountIterator
+//     and SnapshotCompleted from succeeding.
+//
+// The generator's binary-trie-ness is encoded by writing under the "v"
+// (rawdb.VerklePrefix) namespace via a prefixWriter, not by a struct field.
+func WriteCompletedSnapshotGenerator(w ethdb.KeyValueWriter) error {
+	blob, err := rlp.EncodeToBytes(snapshotGenerator{Done: true})
+	if err != nil {
+		return fmt.Errorf("encode snapshot generator: %w", err)
+	}
+	rawdb.WriteSnapshotGenerator(w, blob)
+	return nil
 }
