@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb/pebble"
 	"github.com/ethereum/go-ethereum/rlp"
@@ -156,6 +157,28 @@ func TestDatabaseContent(t *testing.T) {
 	}
 	if snapshotRoot != stats.StateRoot {
 		t.Errorf("Snapshot root mismatch: got %s, want %s", snapshotRoot.Hex(), stats.StateRoot.Hex())
+	}
+
+	// Verify SnapshotGenerator was written with Done=true. Without this,
+	// geth's pathdb would reconstruct an empty-marker generator on first
+	// open and trigger a full snapshot regeneration from scratch.
+	genBlob := rawdb.ReadSnapshotGenerator(db)
+	if len(genBlob) == 0 {
+		t.Fatal("SnapshotGenerator blob missing — geth would re-generate snapshot from scratch")
+	}
+	var genEntry struct {
+		Wiping   bool
+		Done     bool
+		Marker   []byte
+		Accounts uint64
+		Slots    uint64
+		Storage  uint64
+	}
+	if err := rlp.DecodeBytes(genBlob, &genEntry); err != nil {
+		t.Fatalf("decode SnapshotGenerator: %v", err)
+	}
+	if !genEntry.Done {
+		t.Errorf("SnapshotGenerator.Done = false, want true")
 	}
 
 	// Count account snapshots

@@ -11,9 +11,38 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/holiman/uint256"
 )
+
+// readSnapshotGeneratorEntry reads and decodes the SnapshotGenerator blob,
+// optionally under a key prefix (used for binary trie mode's "v" namespace).
+func readSnapshotGeneratorEntry(t *testing.T, db ethdb.KeyValueReader, prefix []byte) snapshotGenerator {
+	t.Helper()
+	// rawdb.ReadSnapshotGenerator uses a fixed key, so for the prefixed case
+	// we read directly from the DB.
+	var blob []byte
+	if len(prefix) == 0 {
+		blob = rawdb.ReadSnapshotGenerator(db)
+	} else {
+		key := append(append([]byte{}, prefix...), []byte("SnapshotGenerator")...)
+		var err error
+		blob, err = db.Get(key)
+		if err != nil {
+			t.Fatalf("SnapshotGenerator missing under prefix %q: %v", prefix, err)
+		}
+	}
+	if len(blob) == 0 {
+		t.Fatal("SnapshotGenerator blob is empty")
+	}
+	var gen snapshotGenerator
+	if err := rlp.DecodeBytes(blob, &gen); err != nil {
+		t.Fatalf("decode SnapshotGenerator: %v", err)
+	}
+	return gen
+}
 
 // sampleGenesis creates a minimal genesis configuration for testing.
 func sampleGenesis() *Genesis {
@@ -320,6 +349,59 @@ func TestWriteGenesisBlockBinaryTrie(t *testing.T) {
 	}
 	if storedBlock.Root() != stateRoot {
 		t.Errorf("State root mismatch: got %s, want %s", storedBlock.Root().Hex(), stateRoot.Hex())
+	}
+}
+
+// TestWriteGenesisBlockSnapshotGeneratorMPT verifies that WriteGenesisBlock
+// persists a SnapshotGenerator blob with Done=true under the top-level
+// (no-prefix) namespace when binaryTrie=false.
+//
+// Without this entry, geth's pathdb.loadGenerator returns nil, which causes
+// setStateGenerator to construct a fresh empty-marker generator. In MPT mode
+// (noBuild=false) this triggers a full snapshot regeneration from scratch.
+func TestWriteGenesisBlockSnapshotGeneratorMPT(t *testing.T) {
+	db := rawdb.NewMemoryDatabase()
+	defer db.Close()
+
+	stateRoot := common.HexToHash("0xfeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface")
+	if _, err := WriteGenesisBlock(db, sampleGenesis(), stateRoot, false, ""); err != nil {
+		t.Fatalf("WriteGenesisBlock: %v", err)
+	}
+
+	gen := readSnapshotGeneratorEntry(t, db, nil)
+	if !gen.Done {
+		t.Errorf("SnapshotGenerator.Done = false, want true")
+	}
+	// Marker is intentionally not asserted: RLP-decoded []byte fields lose
+	// nil-ness and round-trip as empty slices. pathdb's setStateGenerator
+	// short-circuits on Done==true before inspecting Marker, so its value
+	// is immaterial to the regeneration-prevention behavior we care about.
+}
+
+// TestWriteGenesisBlockSnapshotGeneratorBinaryTrie verifies that the
+// SnapshotGenerator blob is written under the "v" (rawdb.VerklePrefix)
+// namespace in binary trie mode, where pathdb opens the diskdb wrapped
+// by rawdb.NewTable(diskdb, "v").
+//
+// We additionally assert the blob is NOT present at the top level — leaking
+// it there would be harmless but indicates wiring drift.
+func TestWriteGenesisBlockSnapshotGeneratorBinaryTrie(t *testing.T) {
+	db := rawdb.NewMemoryDatabase()
+	defer db.Close()
+
+	stateRoot := common.HexToHash("0xc0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ff")
+	if _, err := WriteGenesisBlock(db, sampleGenesis(), stateRoot, true, ""); err != nil {
+		t.Fatalf("WriteGenesisBlock: %v", err)
+	}
+
+	gen := readSnapshotGeneratorEntry(t, db, []byte("v"))
+	if !gen.Done {
+		t.Errorf("SnapshotGenerator.Done = false under v-prefix, want true")
+	}
+
+	// Top-level key must be empty in binary trie mode.
+	if blob := rawdb.ReadSnapshotGenerator(db); len(blob) != 0 {
+		t.Errorf("top-level SnapshotGenerator unexpectedly written in binary trie mode: %x", blob)
 	}
 }
 
