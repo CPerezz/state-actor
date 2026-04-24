@@ -13,13 +13,10 @@ import (
 // RethBinaryPath is the resolved path to the reth binary. Callers can
 // override it by setting RethBinaryPath before calling Populate (useful
 // for tests pointing at a specific build).
-//
-// Default resolution: look up "reth" in PATH.
 var RethBinaryPath string
 
 // findRethBinary returns a path to reth, preferring RethBinaryPath if set
-// and non-empty, else falling back to exec.LookPath. Returns a clear error
-// when neither is available so the user knows to install reth.
+// and non-empty, else falling back to exec.LookPath.
 func findRethBinary() (string, error) {
 	if RethBinaryPath != "" {
 		if _, err := os.Stat(RethBinaryPath); err != nil {
@@ -34,17 +31,28 @@ func findRethBinary() (string, error) {
 	return p, nil
 }
 
-// runRethInit invokes `reth init --chain <chainSpecPath> --datadir <datadir>`,
-// which parses the chainspec's alloc, computes the genesis state root, and
-// writes the full MDBX DB (state + genesis block + stage checkpoints).
+// runRethInitState invokes `reth init-state --without-evm --header <hdr>
+// --header-hash <hash> --chain <chainspec> --datadir <dir> <dump>`.
 //
-// Output is routed to stdout/stderr when verbose; otherwise stderr is
-// captured and only the tail is surfaced on failure.
-func runRethInit(ctx context.Context, rethBin, chainSpecPath, datadir string, verbose bool) error {
+// `--without-evm` + `--header` skips Reth's chainspec→state-root derivation,
+// letting us provide both the state (as a streamed JSONL dump) and the
+// genesis header ourselves. This is the only scalable path: Reth's default
+// `init` parses the entire chainspec alloc into memory, which OOMs at
+// multi-hundred-GB state sizes.
+func runRethInitState(
+	ctx context.Context,
+	rethBin, dumpPath, chainSpecPath, datadir, headerPath, headerHash string,
+	verbose bool,
+) error {
 	args := []string{
-		"init",
+		"init-state",
 		"--chain", chainSpecPath,
 		"--datadir", datadir,
+		"--without-evm",
+		"--header", headerPath,
+		"--header-hash", headerHash,
+		"--total-difficulty", "0",
+		dumpPath,
 	}
 	cmd := exec.CommandContext(ctx, rethBin, args...)
 
@@ -59,14 +67,13 @@ func runRethInit(ctx context.Context, rethBin, chainSpecPath, datadir string, ve
 
 	if err := cmd.Run(); err != nil {
 		tail := lastLines(stderrBuf.String(), 20)
-		return fmt.Errorf("reth init failed: %w\n--- last 20 lines of stderr ---\n%s", err, tail)
+		return fmt.Errorf("reth init-state failed: %w\n--- last 20 lines of stderr ---\n%s", err, tail)
 	}
 	return nil
 }
 
-// lastLines returns the last n lines of s (newline-separated), or s if it
-// has fewer than n lines. Used to surface the tail of reth's stderr on
-// failure without spewing the whole log.
+// lastLines returns the last n lines of s, or s if fewer than n. Used to
+// surface the tail of reth's stderr on failure without spewing the whole log.
 func lastLines(s string, n int) string {
 	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
 	if len(lines) <= n {
