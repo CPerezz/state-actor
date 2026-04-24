@@ -10,9 +10,9 @@ import (
 	"strings"
 )
 
-// RethBinaryPath is the resolved path to the reth binary used for init-state.
-// Callers can override it by setting RethBinaryPath before calling Populate
-// (useful for tests pointing at a specific build).
+// RethBinaryPath is the resolved path to the reth binary. Callers can
+// override it by setting RethBinaryPath before calling Populate (useful
+// for tests pointing at a specific build).
 //
 // Default resolution: look up "reth" in PATH.
 var RethBinaryPath string
@@ -34,18 +34,15 @@ func findRethBinary() (string, error) {
 	return p, nil
 }
 
-// runRethInitState invokes `reth init-state <dumpPath> --chain <chainSpecPath>
-// --datadir <datadir>` with output routed to stdout/stderr when verbose is
-// true. Returns the captured stderr tail on error so failures are readable
-// without the user hunting logs.
+// runRethInit invokes `reth init --chain <chainSpecPath> --datadir <datadir>`,
+// which parses the chainspec's alloc, computes the genesis state root, and
+// writes the full MDBX DB (state + genesis block + stage checkpoints).
 //
-// Reth's init-state prints the genesis hash to stderr as an INFO log line
-// when successful; we don't attempt to parse it (the caller already knows
-// the state root because we computed it).
-func runRethInitState(ctx context.Context, rethBin, dumpPath, chainSpecPath, datadir string, verbose bool) error {
+// Output is routed to stdout/stderr when verbose; otherwise stderr is
+// captured and only the tail is surfaced on failure.
+func runRethInit(ctx context.Context, rethBin, chainSpecPath, datadir string, verbose bool) error {
 	args := []string{
-		"init-state",
-		dumpPath,
+		"init",
 		"--chain", chainSpecPath,
 		"--datadir", datadir,
 	}
@@ -62,7 +59,7 @@ func runRethInitState(ctx context.Context, rethBin, dumpPath, chainSpecPath, dat
 
 	if err := cmd.Run(); err != nil {
 		tail := lastLines(stderrBuf.String(), 20)
-		return fmt.Errorf("reth init-state failed: %w\n--- last 20 lines of stderr ---\n%s", err, tail)
+		return fmt.Errorf("reth init failed: %w\n--- last 20 lines of stderr ---\n%s", err, tail)
 	}
 	return nil
 }

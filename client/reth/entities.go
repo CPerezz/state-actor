@@ -150,6 +150,13 @@ func (s *entitySource) nextContract(numSlots int) *accountData {
 	codeSize := s.cfg.CodeSize + s.rng.Intn(s.cfg.CodeSize)
 	code := make([]byte, codeSize)
 	s.rng.Read(code)
+	// EIP-3541 forbids contract code starting with 0xEF (reserved since
+	// London); EIP-7702 repurposes 0xEF01 as a delegation marker. Reth's
+	// init rejects non-conforming 0xEF-prefixed bytecode. Mask the first
+	// byte to a safe PUSH1 opcode so random bytecode is always valid.
+	if len(code) > 0 && code[0] == 0xEF {
+		code[0] = 0x60
+	}
 	codeHash := crypto.Keccak256Hash(code)
 
 	bal := new(uint256.Int).Mul(
