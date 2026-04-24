@@ -13,6 +13,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -27,6 +28,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/nerolation/state-actor/client/reth"
 	"github.com/nerolation/state-actor/generator"
 	"github.com/nerolation/state-actor/genesis"
 )
@@ -66,6 +68,10 @@ var (
 
 	// Stats server
 	statsPort = flag.Int("stats-port", 0, "Port for live stats HTTP server (0 = disabled)")
+
+	// Client selection (multi-client support). Each client uses its own
+	// self-contained machinery inside client/<name>/; only the CLI is shared.
+	client = flag.String("client", "geth", "Target Ethereum client: 'geth' (default) or 'reth'. Other clients (erigon, besu, nethermind) are planned in follow-up PRs.")
 )
 
 func main() {
@@ -83,6 +89,31 @@ func main() {
 
 	if *seed == 0 {
 		*seed = time.Now().UnixNano()
+	}
+
+	// Validate --client value and its compatibility with other flags. Doing
+	// this at CLI parse time (before any generation work) means misconfigured
+	// runs fail fast instead of burning minutes producing a wrong output.
+	switch *client {
+	case "geth", "reth":
+		// supported
+	case "erigon", "besu", "nethermind":
+		log.Fatalf("--client=%s is not yet implemented (planned in a follow-up PR); use --client=geth or --client=reth", *client)
+	default:
+		log.Fatalf("--client=%s is not recognized; valid values: geth, reth", *client)
+	}
+	if *client == "reth" {
+		// Reth doesn't implement EIP-7864; surface the mismatch here rather
+		// than letting reth init-state fail opaquely later.
+		if *binaryTrie {
+			log.Fatalf("--binary-trie is not supported with --client=reth (Reth does not implement EIP-7864)")
+		}
+		if *targetSize != "" {
+			log.Fatalf("--target-size is not yet supported with --client=reth; set --accounts / --contracts explicitly")
+		}
+		if *deepBranchAccounts > 0 {
+			log.Fatalf("--deep-branch-accounts is not yet supported with --client=reth")
+		}
 	}
 
 	trieMode := generator.TrieModeMPT
@@ -351,38 +382,58 @@ func main() {
 
 	start := time.Now()
 
-	gen, err := generator.New(config)
-	if err != nil {
-		log.Fatalf("Failed to create generator: %v", err)
-	}
-	defer gen.Close()
-
-	stats, err := gen.Generate()
-	if err != nil {
-		log.Fatalf("Failed to generate state: %v", err)
-	}
-
-	// Update live stats with final state
-	if liveStats != nil {
-		liveStats.AddBytes(int64(stats.AccountBytes), int64(stats.StorageBytes), int64(stats.CodeBytes))
-		liveStats.SetStateRoot(stats.StateRoot.Hex())
-	}
-
-	// Write genesis block if genesis was provided
-	if genesisConfig != nil {
-		if *verbose {
-			log.Printf("Writing genesis block with state root: %s", stats.StateRoot.Hex())
-		}
-
-		ancientDir := filepath.Join(config.DBPath, "ancient")
-		block, err := genesis.WriteGenesisBlock(gen.DB(), genesisConfig, stats.StateRoot, config.TrieMode == generator.TrieModeBinary, ancientDir)
+	// Dispatch to the selected client's machinery. Each client owns its full
+	// pipeline (writer, trie, genesis) inside client/<name>/; main.go only
+	// decides who runs. The stats return shape is intentionally identical so
+	// the summary prints below work uniformly for any client.
+	var stats *generator.Stats
+	switch *client {
+	case "geth":
+		gen, err := generator.New(config)
 		if err != nil {
-			log.Fatalf("Failed to write genesis block: %v", err)
+			log.Fatalf("Failed to create generator: %v", err)
+		}
+		defer gen.Close()
+
+		stats, err = gen.Generate()
+		if err != nil {
+			log.Fatalf("Failed to generate state: %v", err)
 		}
 
-		if *verbose {
-			log.Printf("Genesis block hash: %s", block.Hash().Hex())
-			log.Printf("Genesis block number: %d", block.NumberU64())
+		if liveStats != nil {
+			liveStats.AddBytes(int64(stats.AccountBytes), int64(stats.StorageBytes), int64(stats.CodeBytes))
+			liveStats.SetStateRoot(stats.StateRoot.Hex())
+		}
+
+		// Write genesis block if genesis was provided (geth-specific).
+		if genesisConfig != nil {
+			if *verbose {
+				log.Printf("Writing genesis block with state root: %s", stats.StateRoot.Hex())
+			}
+			ancientDir := filepath.Join(config.DBPath, "ancient")
+			block, err := genesis.WriteGenesisBlock(gen.DB(), genesisConfig, stats.StateRoot, config.TrieMode == generator.TrieModeBinary, ancientDir)
+			if err != nil {
+				log.Fatalf("Failed to write genesis block: %v", err)
+			}
+			if *verbose {
+				log.Printf("Genesis block hash: %s", block.Hash().Hex())
+				log.Printf("Genesis block number: %d", block.NumberU64())
+			}
+		}
+
+	case "reth":
+		// Reth's machinery streams a JSONL state dump and shells out to
+		// `reth init-state`, which writes the genesis block itself — no
+		// separate WriteGenesisBlock call here.
+		reth.GenesisFilePath = *genesisPath
+		reth.ChainIDOverride = *chainID
+		var err error
+		stats, err = reth.Populate(context.Background(), config, reth.Options{})
+		if err != nil {
+			log.Fatalf("Failed to populate Reth DB: %v", err)
+		}
+		if liveStats != nil {
+			liveStats.SetStateRoot(stats.StateRoot.Hex())
 		}
 	}
 
