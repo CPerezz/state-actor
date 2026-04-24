@@ -72,20 +72,17 @@ func Populate(ctx context.Context, cfg generator.Config, opts Options) (*generat
 		rethBin = resolved
 	}
 
-	// 1. Prepare the chainspec output path.
-	chainSpecPath := opts.ChainSpecPath
-	chainSpecTemp := false
-	if chainSpecPath == "" {
-		chainSpecTemp = true
-		f, err := os.CreateTemp("", "reth-chainspec-*.json")
-		if err != nil {
-			return nil, fmt.Errorf("create chainspec temp: %w", err)
-		}
-		chainSpecPath = f.Name()
-		f.Close()
+	// 1. Prepare the chainspec output path. Default: alongside the DB
+	// directory so `reth node --chain <dbPath>/chainspec.json --datadir
+	// <dbPath>` works out of the box — the user's genesis hash is baked
+	// into the DB and must match the chainspec at every subsequent boot,
+	// so silently deleting it would break the common workflow.
+	if err := os.MkdirAll(cfg.DBPath, 0o755); err != nil {
+		return nil, fmt.Errorf("create datadir: %w", err)
 	}
-	if chainSpecTemp && !opts.KeepChainSpec && !opts.SkipRethInvocation {
-		defer os.Remove(chainSpecPath)
+	chainSpecPath := opts.ChainSpecPath
+	if chainSpecPath == "" {
+		chainSpecPath = filepath.Join(cfg.DBPath, "chainspec.json")
 	}
 
 	g, err := loadGenesisForReth(genesisPathFromCfg(cfg))
