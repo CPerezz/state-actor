@@ -51,7 +51,6 @@ func runRethInitState(
 		"--without-evm",
 		"--header", headerPath,
 		"--header-hash", headerHash,
-		"--total-difficulty", "0",
 		dumpPath,
 	}
 	cmd := exec.CommandContext(ctx, rethBin, args...)
