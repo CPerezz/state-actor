@@ -2,9 +2,9 @@ package reth
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
-	"io"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -37,9 +37,9 @@ func defaultTestConfig(tmpDir string) generator.Config {
 	}
 }
 
-// TestValidateConfigRejectsUnsupported proves that the Reth path fails fast
-// on flags it doesn't support — the alternative (silent fallback / partial
-// execution) would let users waste minutes generating a wrong database.
+// TestValidateConfigRejectsUnsupported proves that the Reth path fails
+// fast on flags it doesn't support — the alternative (silent fallback /
+// partial execution) would let users waste minutes generating a wrong DB.
 func TestValidateConfigRejectsUnsupported(t *testing.T) {
 	base := defaultTestConfig(t.TempDir())
 
@@ -71,8 +71,8 @@ func TestValidateConfigRejectsUnsupported(t *testing.T) {
 }
 
 // TestDeriveChainID covers the priority ordering (override > genesis >
-// default). The ordering is load-bearing: when both a --chain-id override
-// and a genesis config are present, the override wins.
+// default). When both a --chain-id override and a genesis config are
+// present, the override wins.
 func TestDeriveChainID(t *testing.T) {
 	g := &genesis.Genesis{Config: &params.ChainConfig{ChainID: big.NewInt(5)}}
 
@@ -91,13 +91,12 @@ func TestDeriveChainID(t *testing.T) {
 	}
 }
 
-// TestWriteChainSpecDefaults asserts the no-genesis path produces a
-// well-formed JSON chainspec with the expected chainId and the crucial
-// empty alloc. Empty alloc is a contract with `reth init-state` — the
-// state dump is the source of truth.
-func TestWriteChainSpecDefaults(t *testing.T) {
+// TestWriteChainSpecEmptyAlloc asserts the no-genesis path produces a
+// well-formed JSON chainspec with the expected chainId and an empty alloc
+// block when the callback writes nothing.
+func TestWriteChainSpecEmptyAlloc(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "chainspec.json")
-	if err := writeChainSpec("", out, 0); err != nil {
+	if err := writeChainSpec("", out, 0, func(*bufio.Writer) error { return nil }); err != nil {
 		t.Fatalf("writeChainSpec: %v", err)
 	}
 
@@ -115,9 +114,8 @@ func TestWriteChainSpecDefaults(t *testing.T) {
 		t.Fatalf("expected alloc object, got %T", spec["alloc"])
 	}
 	if len(alloc) != 0 {
-		t.Errorf("alloc must be empty (state comes from dump), got %d entries", len(alloc))
+		t.Errorf("alloc must be empty, got %d entries", len(alloc))
 	}
-	// Spot-check a few header fields so regressions in buildChainSpec are caught.
 	for _, k := range []string{"nonce", "gasLimit", "extraData", "difficulty", "baseFeePerGas"} {
 		if _, ok := spec[k]; !ok {
 			t.Errorf("chainspec missing %q", k)
@@ -126,8 +124,8 @@ func TestWriteChainSpecDefaults(t *testing.T) {
 }
 
 // TestWriteChainSpecWithGenesis proves that user-supplied genesis header
-// fields flow through verbatim (except alloc, which we zero out) and that
-// chainID override wins over the value inside the genesis config.
+// fields flow through verbatim (except alloc, which comes from our
+// callback) and that the chainID override wins over the genesis chainId.
 func TestWriteChainSpecWithGenesis(t *testing.T) {
 	dir := t.TempDir()
 	genPath := filepath.Join(dir, "genesis.json")
@@ -147,7 +145,7 @@ func TestWriteChainSpecWithGenesis(t *testing.T) {
 	}
 
 	out := filepath.Join(dir, "chainspec.json")
-	if err := writeChainSpec(genPath, out, 42); err != nil {
+	if err := writeChainSpec(genPath, out, 42, func(*bufio.Writer) error { return nil }); err != nil {
 		t.Fatalf("writeChainSpec: %v", err)
 	}
 	spec := decodeChainSpec(t, out)
@@ -167,119 +165,75 @@ func TestWriteChainSpecWithGenesis(t *testing.T) {
 	}
 	alloc := spec["alloc"].(map[string]any)
 	if len(alloc) != 0 {
-		t.Errorf("alloc must always be empty, got %d entries", len(alloc))
+		t.Errorf("alloc must not include genesis file's accounts (we stream our own): got %d", len(alloc))
 	}
 }
 
-// TestWriteDumpJSONLFormat checks that writeDump + writeFinalDump together
-// produce the exact JSONL layout `reth init-state` expects: line 1 is the
-// {"root":"0x.."} header, subsequent lines are one account per line. This
-// is the thinnest end-to-end shape test — the state root value itself is
-// covered by TestWriteDumpReproducibility.
-func TestWriteDumpJSONLFormat(t *testing.T) {
+// TestStreamAllocProducesValidJSON feeds streamAlloc into a chainspec and
+// re-parses the whole chainspec to prove the emitted alloc is valid JSON.
+// This catches mis-quoted strings, trailing commas, missing separators.
+func TestStreamAllocProducesValidJSON(t *testing.T) {
 	cfg := defaultTestConfig(t.TempDir())
+	out := filepath.Join(t.TempDir(), "chainspec.json")
 
-	dir := t.TempDir()
-	accountsPath := filepath.Join(dir, "accounts.jsonl")
-	dumpPath := filepath.Join(dir, "dump.jsonl")
-
-	root, stats, err := streamToTempDump(cfg, accountsPath)
-	if err != nil {
-		t.Fatalf("streamToTempDump: %v", err)
-	}
-	if err := writeFinalDump(dumpPath, accountsPath, root); err != nil {
-		t.Fatalf("writeFinalDump: %v", err)
+	var stats generator.Stats
+	allocFn := func(w *bufio.Writer) error { return streamAlloc(cfg, w, &stats) }
+	if err := writeChainSpec("", out, 0, allocFn); err != nil {
+		t.Fatalf("writeChainSpec: %v", err)
 	}
 
-	f, err := os.Open(dumpPath)
-	if err != nil {
-		t.Fatal(err)
+	spec := decodeChainSpec(t, out)
+	alloc := spec["alloc"].(map[string]any)
+	if len(alloc) == 0 {
+		t.Fatal("alloc unexpectedly empty")
 	}
-	defer f.Close()
-
-	br := bufio.NewReader(f)
-	firstLine, err := br.ReadString('\n')
-	if err != nil {
-		t.Fatal(err)
+	expected := cfg.NumAccounts + cfg.NumContracts
+	if len(alloc) != expected {
+		t.Errorf("want %d alloc entries, got %d", expected, len(alloc))
 	}
-	var header struct {
-		Root string `json:"root"`
+	if stats.AccountsCreated != cfg.NumAccounts {
+		t.Errorf("accounts: want %d got %d", cfg.NumAccounts, stats.AccountsCreated)
 	}
-	if err := json.Unmarshal([]byte(firstLine), &header); err != nil {
-		t.Fatalf("first line must be JSON header, got %q (err %v)", firstLine, err)
-	}
-	if header.Root != root.Hex() {
-		t.Errorf("header root %q != computed %q", header.Root, root.Hex())
+	if stats.ContractsCreated != cfg.NumContracts {
+		t.Errorf("contracts: want %d got %d", cfg.NumContracts, stats.ContractsCreated)
 	}
 
-	// Count subsequent account lines; must equal stats.AccountsCreated +
-	// ContractsCreated. EOFs are fine.
-	accountLines := 0
-	for {
-		line, err := br.ReadString('\n')
-		line = strings.TrimSpace(line)
-		if line != "" {
-			accountLines++
-			var acc struct {
-				Address string `json:"address"`
-				Balance string `json:"balance"`
-			}
-			if uerr := json.Unmarshal([]byte(line), &acc); uerr != nil {
-				t.Fatalf("account line must be JSON: %q (err %v)", line, uerr)
-			}
-			if !strings.HasPrefix(acc.Address, "0x") || len(acc.Address) != 42 {
-				t.Errorf("malformed address %q", acc.Address)
+	for addr, entry := range alloc {
+		if !strings.HasPrefix(addr, "0x") {
+			t.Errorf("address should start with 0x, got %q", addr)
+		}
+		e := entry.(map[string]any)
+		if _, ok := e["balance"]; !ok {
+			t.Errorf("entry %s missing balance", addr)
+		}
+		if code, ok := e["code"]; ok {
+			if !strings.HasPrefix(code.(string), "0x") {
+				t.Errorf("code should be 0x-prefixed: %q", code)
 			}
 		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	expected := stats.AccountsCreated + stats.ContractsCreated
-	if accountLines != expected {
-		t.Errorf("want %d account lines, got %d", expected, accountLines)
 	}
 }
 
-// TestWriteDumpReproducibility guards determinism: running the generator
-// twice with the same seed MUST produce identical dumps (byte-for-byte) and
-// identical state roots. If a future change introduces non-determinism
-// (e.g. map iteration in the RNG path), this fails loudly.
-func TestWriteDumpReproducibility(t *testing.T) {
-	var roots [2]common.Hash
-	var dumps [2][]byte
-
+// TestStreamAllocReproducibility guards determinism: running streamAlloc
+// twice with the same seed MUST produce byte-identical chainspecs.
+func TestStreamAllocReproducibility(t *testing.T) {
+	var outs [2][]byte
 	for i := range 2 {
 		cfg := defaultTestConfig(t.TempDir())
-		// Use the same seed across both runs (already set in default); the
-		// DBPath and temp paths must differ so both runs have independent
-		// filesystem state.
-		dir := t.TempDir()
-		accountsPath := filepath.Join(dir, "accounts.jsonl")
-		dumpPath := filepath.Join(dir, "dump.jsonl")
-
-		root, _, err := streamToTempDump(cfg, accountsPath)
-		if err != nil {
+		path := filepath.Join(t.TempDir(), "chainspec.json")
+		var stats generator.Stats
+		allocFn := func(w *bufio.Writer) error { return streamAlloc(cfg, w, &stats) }
+		if err := writeChainSpec("", path, 0, allocFn); err != nil {
 			t.Fatalf("run %d: %v", i, err)
 		}
-		if err := writeFinalDump(dumpPath, accountsPath, root); err != nil {
-			t.Fatalf("run %d finalize: %v", i, err)
-		}
-		roots[i] = root
-		dumps[i], err = os.ReadFile(dumpPath)
+		var err error
+		outs[i], err = os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
 		}
 	}
-
-	if roots[0] != roots[1] {
-		t.Errorf("state roots differ across runs: %s vs %s", roots[0].Hex(), roots[1].Hex())
-	}
-	if string(dumps[0]) != string(dumps[1]) {
-		t.Errorf("dump bytes differ across runs (len %d vs %d)", len(dumps[0]), len(dumps[1]))
+	if !bytes.Equal(outs[0], outs[1]) {
+		t.Errorf("chainspec bytes differ between runs (len %d vs %d)", len(outs[0]), len(outs[1]))
 	}
 }
 
@@ -289,10 +243,11 @@ func TestWriteDumpReproducibility(t *testing.T) {
 // binary dependency.
 func TestPopulateSkipReth(t *testing.T) {
 	cfg := defaultTestConfig(t.TempDir())
+	chainSpecPath := filepath.Join(t.TempDir(), "chainspec.json")
 	opts := Options{
 		SkipRethInvocation: true,
-		KeepDumpFile:       true,
-		DumpDir:            t.TempDir(),
+		KeepChainSpec:      true,
+		ChainSpecPath:      chainSpecPath,
 	}
 
 	stats, err := Populate(context.Background(), cfg, opts)
@@ -302,9 +257,6 @@ func TestPopulateSkipReth(t *testing.T) {
 	if stats == nil {
 		t.Fatal("stats nil")
 	}
-	if stats.StateRoot == (common.Hash{}) {
-		t.Error("state root not populated")
-	}
 	if stats.AccountsCreated != cfg.NumAccounts {
 		t.Errorf("want %d accounts, got %d", cfg.NumAccounts, stats.AccountsCreated)
 	}
@@ -312,20 +264,23 @@ func TestPopulateSkipReth(t *testing.T) {
 		t.Errorf("want %d contracts, got %d", cfg.NumContracts, stats.ContractsCreated)
 	}
 
-	// The datadir should exist and be empty-of-db (we didn't invoke reth).
+	spec := decodeChainSpec(t, chainSpecPath)
+	if _, ok := spec["alloc"].(map[string]any); !ok {
+		t.Errorf("chainspec alloc unexpectedly missing / wrong type: %T", spec["alloc"])
+	}
+
 	if _, err := os.Stat(cfg.DBPath); err != nil {
 		t.Errorf("datadir should have been created: %v", err)
 	}
 }
 
 // TestPopulateRejectsExistingDatabase ensures we don't silently clobber a
-// pre-existing Reth DB. The detection is best-effort (scans for
-// <datadir>/*/db/mdbx.dat) but catches the common case.
+// pre-existing Reth DB. Detection covers both <datadir>/db/mdbx.dat and
+// <datadir>/<chain>/db/mdbx.dat layouts.
 func TestPopulateRejectsExistingDatabase(t *testing.T) {
 	cfg := defaultTestConfig(t.TempDir())
 
-	// Simulate a pre-existing reth DB layout.
-	dbDir := filepath.Join(cfg.DBPath, "dev", "db")
+	dbDir := filepath.Join(cfg.DBPath, "db")
 	if err := os.MkdirAll(dbDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -342,10 +297,10 @@ func TestPopulateRejectsExistingDatabase(t *testing.T) {
 	}
 }
 
-// TestGenesisAccountsIncludedInDump validates that --genesis-alloc accounts
-// make it into the JSONL dump. Without this the generated DB would be
-// missing the pre-funded accounts the user expects post `init-state`.
-func TestGenesisAccountsIncludedInDump(t *testing.T) {
+// TestGenesisAccountsIncludedInChainspec validates that --genesis-alloc
+// accounts make it into the chainspec's alloc. Without this the generated
+// DB would be missing the pre-funded accounts the user expects.
+func TestGenesisAccountsIncludedInChainspec(t *testing.T) {
 	cfg := defaultTestConfig(t.TempDir())
 	genAddr := common.HexToAddress("0x1234567890123456789012345678901234567890")
 	bal := new(uint256.Int).SetUint64(1_000_000_000)
@@ -358,23 +313,19 @@ func TestGenesisAccountsIncludedInDump(t *testing.T) {
 		},
 	}
 
-	dir := t.TempDir()
-	accountsPath := filepath.Join(dir, "accounts.jsonl")
-	dumpPath := filepath.Join(dir, "dump.jsonl")
-	root, _, err := streamToTempDump(cfg, accountsPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := writeFinalDump(dumpPath, accountsPath, root); err != nil {
+	path := filepath.Join(t.TempDir(), "chainspec.json")
+	var stats generator.Stats
+	allocFn := func(w *bufio.Writer) error { return streamAlloc(cfg, w, &stats) }
+	if err := writeChainSpec("", path, 0, allocFn); err != nil {
 		t.Fatal(err)
 	}
 
-	body, err := os.ReadFile(dumpPath)
+	body, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(body), strings.ToLower(genAddr.Hex())) {
-		t.Errorf("dump missing genesis address %s:\n%s", genAddr.Hex(), body)
+	if !strings.Contains(strings.ToLower(string(body)), strings.ToLower(genAddr.Hex())) {
+		t.Errorf("chainspec missing genesis address %s", genAddr.Hex())
 	}
 }
 
