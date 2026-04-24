@@ -32,6 +32,7 @@ import (
 	"github.com/nerolation/state-actor/client/besu"
 	"github.com/nerolation/state-actor/client/geth"
 	"github.com/nerolation/state-actor/client/nethermind"
+	"github.com/nerolation/state-actor/client/reth"
 	"github.com/nerolation/state-actor/generator"
 	"github.com/nerolation/state-actor/genesis"
 )
@@ -72,10 +73,9 @@ var (
 	// Stats server
 	statsPort = flag.Int("stats-port", 0, "Port for live stats HTTP server (0 = disabled)")
 
-	// Client dispatch — selects which on-disk format the writer produces.
-	// Default 'geth' preserves the historical behavior; 'nethermind' is
-	// implemented progressively (see PR#3 in the deep-feature-planning plan).
-	client = flag.String("client", "geth", "Target Ethereum client: 'geth' (default), 'nethermind', 'besu'. Other clients (reth, erigon) are tracked in follow-up PRs.")
+	// Client selection (multi-client support). Each client uses its own
+	// self-contained machinery inside client/<name>/; only the CLI is shared.
+	client = flag.String("client", "geth", "Target Ethereum client: 'geth' (default), 'nethermind', 'besu', or 'reth'. Other clients (erigon) are planned in follow-up PRs.")
 )
 
 func main() {
@@ -99,12 +99,12 @@ func main() {
 	// this at CLI parse time (before any generation work) means misconfigured
 	// runs fail fast instead of burning minutes producing a wrong output.
 	switch *client {
-	case "geth", "nethermind", "besu":
+	case "geth", "nethermind", "besu", "reth":
 		// supported
-	case "reth", "erigon":
-		log.Fatalf("--client=%s is not yet implemented on this branch (planned in a follow-up PR); use --client=geth, --client=nethermind, or --client=besu", *client)
+	case "erigon":
+		log.Fatalf("--client=%s is not yet implemented (planned in a follow-up PR); use --client=geth, --client=nethermind, --client=besu, or --client=reth", *client)
 	default:
-		log.Fatalf("--client=%s is not recognized; valid values: geth, nethermind, besu", *client)
+		log.Fatalf("--client=%s is not recognized; valid values: geth, nethermind, besu, reth", *client)
 	}
 	if *client == "nethermind" {
 		// Nethermind doesn't implement EIP-7864 (binary trie) and the
@@ -127,6 +127,19 @@ func main() {
 		}
 		if *deepBranchAccounts > 0 {
 			log.Fatalf("--deep-branch-accounts is geth-specific and not supported with --client=besu")
+		}
+	}
+	if *client == "reth" {
+		// Reth doesn't implement EIP-7864; surface the mismatch here rather
+		// than letting reth init-state fail opaquely later.
+		if *binaryTrie {
+			log.Fatalf("--binary-trie is not supported with --client=reth (Reth does not implement EIP-7864)")
+		}
+		if *targetSize != "" {
+			log.Fatalf("--target-size is not yet supported with --client=reth; set --accounts / --contracts explicitly")
+		}
+		if *deepBranchAccounts > 0 {
+			log.Fatalf("--deep-branch-accounts is not yet supported with --client=reth")
 		}
 	}
 
@@ -321,7 +334,7 @@ func main() {
 			KnownSlots:  *deepBranchKnownSlots,
 		},
 		LiveStats:       liveStats,
-		GroupDepth:       *groupDepth,
+		GroupDepth:      *groupDepth,
 		PebbleBlockSize: *pebbleBlockSize,
 	}
 
@@ -468,6 +481,21 @@ func main() {
 			log.Fatalf("Failed to populate Besu DB: %v", err)
 		}
 		if liveStats != nil && stats != nil {
+			liveStats.SetStateRoot(stats.StateRoot.Hex())
+		}
+
+	case "reth":
+		// Reth's machinery streams a JSONL state dump and shells out to
+		// `reth init-state`, which writes the genesis block itself — no
+		// separate WriteGenesisBlock call here.
+		reth.GenesisFilePath = *genesisPath
+		reth.ChainIDOverride = *chainID
+		var err error
+		stats, err = reth.Populate(context.Background(), config, reth.Options{})
+		if err != nil {
+			log.Fatalf("Failed to populate Reth DB: %v", err)
+		}
+		if liveStats != nil {
 			liveStats.SetStateRoot(stats.StateRoot.Hex())
 		}
 	}
