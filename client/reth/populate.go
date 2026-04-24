@@ -1,6 +1,7 @@
 package reth
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log"
@@ -8,53 +9,46 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/ethereum/go-ethereum/common"
 	"github.com/nerolation/state-actor/generator"
 )
 
 // Options gives tests and library users fine-grained control over the
 // population workflow. The zero value is the Populate CLI default: resolve
-// reth via PATH, clean up the temp JSONL, log only when cfg.Verbose is set.
+// reth via PATH, clean up temp files, log only when cfg.Verbose is set.
 type Options struct {
 	// RethBinaryPath overrides the resolution of the `reth` binary. When
 	// empty, PATH lookup is used.
 	RethBinaryPath string
 
-	// KeepDumpFile, when true, leaves the generated JSONL state dump file
-	// on disk after a successful run. Useful for debugging. The path is
-	// returned in Stats.DumpPath.
-	KeepDumpFile bool
-
-	// DumpDir specifies the directory for the intermediate JSONL file.
-	// When empty, os.TempDir() is used. The file itself is named
-	// reth-statedump-<nanos>.jsonl.
-	DumpDir string
-
-	// SkipRethInvocation, when true, skips the final reth init-state call.
-	// The JSONL dump and chainspec are still produced (so unit tests can
-	// assert on their contents without needing the reth binary). In this
-	// mode Stats.StateRoot is still populated.
+	// SkipRethInvocation, when true, skips the final `reth init` call. The
+	// chainspec is still produced (so unit tests can assert on its shape
+	// without needing the reth binary).
 	SkipRethInvocation bool
 
 	// ChainSpecPath, when non-empty, causes the produced chainspec to be
 	// written to this path (normally a caller-chosen stable location).
-	// When empty, a temporary file is used and removed after success.
+	// When empty, a temp file is used and removed after success unless
+	// KeepChainSpec is set.
 	ChainSpecPath string
+
+	// KeepChainSpec, when true, leaves the generated chainspec on disk
+	// after a successful run. Useful for debugging and for running reth
+	// outside of state-actor against the same chain config.
+	KeepChainSpec bool
 }
 
-// Populate is the entry point for --client=reth. It generates state
-// deterministically from cfg, writes a JSONL state dump, computes the MPT
-// state root, and invokes `reth init-state` to create a Reth-compatible
-// MDBX database at cfg.DBPath.
+// Populate is the entry point for --client=reth. It streams every generated
+// account into a chainspec alloc, then invokes `reth init` to let Reth
+// build its own MDBX database + genesis block from that chainspec.
 //
 // On success returns a populated generator.Stats (matching the shape the
-// geth path returns, so main.go can summarize both uniformly).
+// geth path returns, so main.go can summarize both uniformly). StateRoot
+// is left zero: Reth computes it from alloc, and reading it back from MDBX
+// is out of scope for this package. Users can verify via RPC after boot.
 //
 // Limitations vs the geth path:
-//   - cfg.TargetSize is ignored (no way to mid-generation stop; feature-flag
-//     this at the CLI).
-//   - cfg.DeepBranch is ignored (the deep-branch encoding relies on
-//     hash-scheme trie nodes in the DB that Reth won't accept).
+//   - cfg.TargetSize is ignored (no way to mid-generation stop).
+//   - cfg.DeepBranch is ignored (encoding relies on hash-scheme trie nodes).
 //   - cfg.TrieMode must be MPT; binary-trie is rejected.
 //   - cfg.WriteTrieNodes is irrelevant (Reth writes its own trie).
 //
@@ -65,110 +59,73 @@ func Populate(ctx context.Context, cfg generator.Config, opts Options) (*generat
 		return nil, err
 	}
 
-	// Resolve reth binary up-front so callers fail fast if it's missing,
-	// rather than after spending minutes generating a multi-GB dump.
+	// Resolve reth binary up-front so callers fail fast if it's missing.
 	var rethBin string
 	if !opts.SkipRethInvocation {
-		override := RethBinaryPath
 		if opts.RethBinaryPath != "" {
-			override = opts.RethBinaryPath
+			RethBinaryPath = opts.RethBinaryPath
 		}
-		resolved, err := func() (string, error) {
-			if override != "" {
-				RethBinaryPath = override
-				return findRethBinary()
-			}
-			return findRethBinary()
-		}()
+		resolved, err := findRethBinary()
 		if err != nil {
 			return nil, err
 		}
 		rethBin = resolved
 	}
 
-	// 1. Build the chainspec file.
+	// 1. Prepare the chainspec output path.
 	chainSpecPath := opts.ChainSpecPath
 	chainSpecTemp := false
 	if chainSpecPath == "" {
 		chainSpecTemp = true
-		f, err := os.CreateTemp(opts.DumpDir, "reth-chainspec-*.json")
+		f, err := os.CreateTemp("", "reth-chainspec-*.json")
 		if err != nil {
 			return nil, fmt.Errorf("create chainspec temp: %w", err)
 		}
 		chainSpecPath = f.Name()
 		f.Close()
 	}
-	gen, err := loadGenesisForReth(genesisPathFromCfg(cfg))
-	if err != nil {
-		return nil, err
-	}
-	chainID := deriveChainID(chainIDFromCfg(cfg), gen)
-	if err := writeChainSpec(genesisPathFromCfg(cfg), chainSpecPath, chainID); err != nil {
-		return nil, err
-	}
-	if chainSpecTemp {
+	if chainSpecTemp && !opts.KeepChainSpec && !opts.SkipRethInvocation {
 		defer os.Remove(chainSpecPath)
 	}
 
-	// 2. Stream accounts to a temp JSONL file; compute the MPT state root.
-	dumpDir := opts.DumpDir
-	if dumpDir == "" {
-		dumpDir = os.TempDir()
-	}
-	accountsTempPath := filepath.Join(dumpDir, fmt.Sprintf("reth-accounts-%d.jsonl", time.Now().UnixNano()))
-	finalDumpPath := filepath.Join(dumpDir, fmt.Sprintf("reth-statedump-%d.jsonl", time.Now().UnixNano()))
-
-	start := time.Now()
-	root, stats, err := streamToTempDump(cfg, accountsTempPath)
+	g, err := loadGenesisForReth(genesisPathFromCfg(cfg))
 	if err != nil {
-		os.Remove(accountsTempPath)
 		return nil, err
 	}
-	// Join root header line with the accounts body.
-	if err := writeFinalDump(finalDumpPath, accountsTempPath, root); err != nil {
-		os.Remove(accountsTempPath)
-		os.Remove(finalDumpPath)
-		return nil, err
+	chainID := deriveChainID(chainIDFromCfg(cfg), g)
+
+	// 2. Stream all accounts into the chainspec's alloc. stats is built up
+	// as the walk proceeds.
+	var stats generator.Stats
+	start := time.Now()
+	allocFn := func(w *bufio.Writer) error {
+		return streamAlloc(cfg, w, &stats)
 	}
-	os.Remove(accountsTempPath) // always clean temp; keep only final
+	if err := writeChainSpec(genesisPathFromCfg(cfg), chainSpecPath, chainID, allocFn); err != nil {
+		return nil, fmt.Errorf("write chainspec: %w", err)
+	}
 	stats.GenerationTime = time.Since(start)
 
-	if !opts.KeepDumpFile && !opts.SkipRethInvocation {
-		defer os.Remove(finalDumpPath)
-	}
-
-	// 3. Ensure the target datadir exists and is empty (reth init-state
-	// refuses to overwrite an existing state).
+	// 3. Ensure the target datadir exists and is empty (reth init refuses
+	// to overwrite an existing state).
 	if err := prepareDatadir(cfg.DBPath); err != nil {
 		return nil, err
 	}
 
-	// 4. Invoke reth init-state unless the caller asked to skip (tests).
+	// 4. Invoke `reth init` unless the caller asked to skip (tests).
 	if !opts.SkipRethInvocation {
 		if cfg.Verbose {
-			log.Printf("[reth] invoking: %s init-state %s --chain %s --datadir %s",
-				rethBin, finalDumpPath, chainSpecPath, cfg.DBPath)
+			log.Printf("[reth] invoking: %s init --chain %s --datadir %s",
+				rethBin, chainSpecPath, cfg.DBPath)
 		}
 		writeStart := time.Now()
-		if err := runRethInitState(ctx, rethBin, finalDumpPath, chainSpecPath, cfg.DBPath, cfg.Verbose); err != nil {
+		if err := runRethInit(ctx, rethBin, chainSpecPath, cfg.DBPath, cfg.Verbose); err != nil {
 			return nil, err
 		}
 		stats.DBWriteTime = time.Since(writeStart)
 	}
 
-	stats.StateRoot = common.BytesToHash(root[:])
 	return &stats, nil
-}
-
-// streamToTempDump is a thin shim so the temp-file lifecycle is owned in one
-// place: it opens the file, passes the writer to writeDump, and closes.
-func streamToTempDump(cfg generator.Config, path string) (common.Hash, generator.Stats, error) {
-	f, err := os.Create(path)
-	if err != nil {
-		return common.Hash{}, generator.Stats{}, fmt.Errorf("create temp dump: %w", err)
-	}
-	defer f.Close()
-	return writeDump(cfg, f)
 }
 
 // validateConfig enforces the Reth-path's supported subset of Config fields.
@@ -191,16 +148,19 @@ func validateConfig(cfg generator.Config) error {
 }
 
 // prepareDatadir ensures cfg.DBPath exists and does not already contain a
-// Reth MDBX database. Reth's init-state refuses to overwrite, so we
-// fail fast with a clear error instead of letting reth's internal check
-// fire.
+// Reth MDBX database. Reth's init refuses to overwrite, so we fail fast
+// with a clear error instead of letting reth's internal check fire.
 func prepareDatadir(dbPath string) error {
 	if err := os.MkdirAll(dbPath, 0o755); err != nil {
 		return fmt.Errorf("create datadir: %w", err)
 	}
-	// Reth puts its MDBX under <datadir>/<chain>/db/mdbx.dat. We can't
-	// easily know the chain subdir name up front, so we do a shallow scan:
-	// if the datadir contains any subdirectory with a mdbx.dat, refuse.
+	// Reth puts its MDBX under <datadir>/db/mdbx.dat OR
+	// <datadir>/<chain>/db/mdbx.dat depending on whether the datadir is
+	// chain-specific. Cover both: direct /db/mdbx.dat and any
+	// <subdir>/db/mdbx.dat.
+	if _, err := os.Stat(filepath.Join(dbPath, "db", "mdbx.dat")); err == nil {
+		return fmt.Errorf("reth database already present at %s/db/mdbx.dat; remove it before re-running with --client=reth", dbPath)
+	}
 	entries, err := os.ReadDir(dbPath)
 	if err != nil {
 		return fmt.Errorf("read datadir: %w", err)
@@ -220,20 +180,11 @@ func prepareDatadir(dbPath string) error {
 // --- Config helpers ----------------------------------------------------
 //
 // generator.Config carries no explicit "genesis file path" or "chain id
-// override" fields (they're resolved by main.go into the Genesis* maps
-// before Config reaches the generator). To integrate with --client=reth
-// without expanding Config, we route the two values through metadata
-// fields we're adding on the Config struct. For this first iteration
-// we recover them from the Config's derived state:
-//
-//   - genesisPath: empty when GenesisAccounts is empty; otherwise
-//     inferred from the upstream caller via a package-level var
-//     (GenesisFilePath) set from main.go.
-//   - chainIDOverride: passed via ChainIDOverride (also a package-level
-//     var set from main.go).
-//
-// This keeps generator.Config backward-compatible. Future PRs can fold
-// these into the Config struct if another client needs them.
+// override" fields; they're resolved by main.go into the Genesis* maps
+// before Config reaches the generator. To integrate with --client=reth
+// without expanding Config, we route the two values through package-level
+// variables set from main.go. Future PRs can fold these into Config if
+// another client needs them.
 
 // GenesisFilePath is set by main.go when --client=reth is selected, so
 // the Reth chainspec can mirror the user's genesis.json verbatim. Empty
