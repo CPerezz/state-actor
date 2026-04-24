@@ -241,11 +241,15 @@ func TestBuildGenesisHeader(t *testing.T) {
 	for i := range root {
 		root[i] = byte(i)
 	}
-	h1, err := buildGenesisHeader(nil, 1337, root)
+	b0, err := buildBlock0Header(nil, 1337)
 	if err != nil {
 		t.Fatal(err)
 	}
-	h2, err := buildGenesisHeader(nil, 1337, root)
+	h1, err := buildBlock1Header(nil, 1337, root, b0.Hash())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h2, err := buildBlock1Header(nil, 1337, root, b0.Hash())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,14 +259,18 @@ func TestBuildGenesisHeader(t *testing.T) {
 	if h1.Root != root {
 		t.Errorf("header root not set: want %s got %s", root.Hex(), h1.Root.Hex())
 	}
-	if h1.Number.Sign() != 0 {
-		t.Errorf("genesis header number must be 0, got %s", h1.Number)
+	if h1.Number.Uint64() != 1 {
+		t.Errorf("block 1 header number must be 1, got %s", h1.Number)
+	}
+	if h1.ParentHash != b0.Hash() {
+		t.Errorf("block 1 ParentHash=%s != block 0 hash=%s",
+			h1.ParentHash.Hex(), b0.Hash().Hex())
 	}
 
 	// Different stateRoot → different hash.
 	var root2 common.Hash
 	root2[0] = 0xFF
-	h3, err := buildGenesisHeader(nil, 1337, root2)
+	h3, err := buildBlock1Header(nil, 1337, root2, b0.Hash())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +283,11 @@ func TestBuildGenesisHeader(t *testing.T) {
 func TestWriteHeaderFile(t *testing.T) {
 	var root common.Hash
 	root[0] = 0xAB
-	h, err := buildGenesisHeader(nil, 1337, root)
+	b0, err := buildBlock0Header(nil, 1337)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := buildBlock1Header(nil, 1337, root, b0.Hash())
 	if err != nil {
 		t.Fatal(err)
 	}
