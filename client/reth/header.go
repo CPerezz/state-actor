@@ -13,25 +13,40 @@ import (
 	"github.com/nerolation/state-actor/genesis"
 )
 
-// buildGenesisHeader constructs the genesis block header with the given
-// stateRoot. All other fields come from the chainspec/genesis file (or
-// defaults via buildChainSpec when no genesis file is provided).
+// buildBlock0Header builds the chainspec-derived genesis block header
+// (Number=0, Root=emptyTrieHash). Used to compute the parent_hash that
+// block 1 must carry — Reth's init-state writes block 0 from the chainspec
+// first, then appends our block 1, so the two must link up.
+func buildBlock0Header(g *genesis.Genesis, chainID int64) (*types.Header, error) {
+	return buildHeaderFromGenesis(g, chainID, 0, common.Hash{}, types.EmptyRootHash)
+}
+
+// buildBlock1Header builds block 1 carrying our generated state. Block 1
+// is what `reth init-state --without-evm --header` appends on top of the
+// chainspec-derived block 0.
 //
-// This header, RLP-encoded and paired with its keccak256 hash, is passed to
-// `reth init-state --without-evm --header <path> --header-hash <hex>` so
-// Reth uses our pre-computed state root for the genesis block instead of
-// recomputing it from a chainspec alloc we'd rather not materialize.
+// Why block 1 and not block 0: Reth v2.1.0's `setup_without_evm` has a
+// u64 underflow (`header.number() - 1`) when number=0, which sends
+// `append_dummy_chain` into an infinite loop that eventually OOMs. Using
+// number=1 makes the range `1..=0` empty — no dummy chain is built, and
+// our block is appended directly. The resulting state is queryable at
+// block 1, which the dev node immediately mines on top of.
 //
-// The header must match, field-for-field, what Reth would compute from the
-// chainspec if we HAD included alloc — otherwise the genesis hash Reth
-// stores in the DB won't agree with the hash we feed it, and subsequent
-// `reth node` boots will reject the DB. Fields are mirrored from the
-// WriteGenesisBlock path in genesis/genesis.go:165-232, which is known to
-// produce a header geth accepts.
-func buildGenesisHeader(g *genesis.Genesis, chainID int64, stateRoot common.Hash) (*types.Header, error) {
-	// Synthesize a Genesis when the caller has none (the "no --genesis"
-	// flow). Values mirror buildChainSpec's defaults so the two paths produce
-	// byte-equivalent headers when alloc is the only differentiator.
+// parent_hash is computed from the chainspec's block 0 header so the
+// chain links up.
+func buildBlock1Header(g *genesis.Genesis, chainID int64, stateRoot, parentHash common.Hash) (*types.Header, error) {
+	return buildHeaderFromGenesis(g, chainID, 1, parentHash, stateRoot)
+}
+
+// buildHeaderFromGenesis constructs a header from a chainspec/Genesis at
+// an arbitrary block number, with a given stateRoot + parentHash.
+//
+// Fields mirror the WriteGenesisBlock path in genesis/genesis.go:165-232
+// (EIP-1559 base fee, Shanghai withdrawals hash, Cancun blob fields,
+// Prague requests hash). The key invariant is that running this on
+// number=0 with emptyRoot produces the same hash Reth's chainspec parser
+// computes for block 0 — otherwise block 1's parent_hash won't link up.
+func buildHeaderFromGenesis(g *genesis.Genesis, chainID int64, number uint64, parentHash, stateRoot common.Hash) (*types.Header, error) {
 	if g == nil {
 		g = defaultGenesisForReth(chainID)
 	} else if chainID != 0 {
@@ -41,10 +56,10 @@ func buildGenesisHeader(g *genesis.Genesis, chainID int64, stateRoot common.Hash
 	}
 
 	header := &types.Header{
-		Number:     new(big.Int).SetUint64(uint64(g.Number)),
+		Number:     new(big.Int).SetUint64(number),
 		Nonce:      types.EncodeNonce(uint64(g.Nonce)),
 		Time:       uint64(g.Timestamp),
-		ParentHash: g.ParentHash,
+		ParentHash: parentHash,
 		Extra:      g.ExtraData,
 		GasLimit:   uint64(g.GasLimit),
 		GasUsed:    uint64(g.GasUsed),
@@ -63,10 +78,10 @@ func buildGenesisHeader(g *genesis.Genesis, chainID int64, stateRoot common.Hash
 		header.Extra = []byte{}
 	}
 
-	num := big.NewInt(int64(g.Number))
+	num := new(big.Int).SetUint64(number)
 	ts := uint64(g.Timestamp)
 
-	if g.Config.IsLondon(common.Big0) {
+	if g.Config.IsLondon(num) {
 		if g.BaseFee != nil {
 			header.BaseFee = (*big.Int)(g.BaseFee)
 		} else {
@@ -96,12 +111,11 @@ func buildGenesisHeader(g *genesis.Genesis, chainID int64, stateRoot common.Hash
 		emptyRequestsHash := types.EmptyRequestsHash
 		header.RequestsHash = &emptyRequestsHash
 	}
-
 	return header, nil
 }
 
 // writeHeaderFile writes the RLP-encoded header to outPath and returns
-// keccak256(rlp) — the genesis block hash that Reth will use.
+// keccak256(rlp) — the hash Reth expects via --header-hash.
 func writeHeaderFile(header *types.Header, outPath string) (common.Hash, error) {
 	encoded, err := rlp.EncodeToBytes(header)
 	if err != nil {
@@ -110,14 +124,12 @@ func writeHeaderFile(header *types.Header, outPath string) (common.Hash, error) 
 	if err := os.WriteFile(outPath, encoded, 0o644); err != nil {
 		return common.Hash{}, fmt.Errorf("write header file: %w", err)
 	}
-	// types.Header.Hash() is keccak(rlp(header)); we compute directly to
-	// avoid an extra encode.
 	return header.Hash(), nil
 }
 
 // defaultGenesisForReth mirrors buildChainSpec(chainID). Used when the
-// caller did not pass a --genesis file; the resulting header is consistent
-// with the tiny "dev-like" chainspec we emit in that case.
+// caller did not pass a --genesis file; produces a header consistent
+// with the tiny "dev-like" chainspec.
 func defaultGenesisForReth(chainID int64) *genesis.Genesis {
 	if chainID == 0 {
 		chainID = 1337
@@ -153,5 +165,4 @@ func defaultGenesisForReth(chainID int64) *genesis.Genesis {
 	}
 }
 
-// ptrU64 is a helper for setting optional *uint64 fork activation times.
 func ptrU64(v uint64) *uint64 { return &v }

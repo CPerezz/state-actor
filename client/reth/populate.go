@@ -127,17 +127,28 @@ func Populate(ctx context.Context, cfg generator.Config, opts Options) (*generat
 		defer os.Remove(finalDumpPath)
 	}
 
-	// 2. Build + write the genesis header with our computed root.
-	header, err := buildGenesisHeader(gen, chainID, root)
+	// 2. Compute block 0's hash from the chainspec so block 1 can link to
+	// it via parent_hash. We work around reth v2.1.0's `setup_without_evm`
+	// underflow (header.number() - 1 = u64::MAX when number=0) by passing
+	// number=1; dev mode mines on top of block 1 immediately after boot,
+	// so latest state queries return our data.
+	block0, err := buildBlock0Header(gen, chainID)
 	if err != nil {
-		return nil, fmt.Errorf("build genesis header: %w", err)
+		return nil, fmt.Errorf("build block 0 header: %w", err)
+	}
+	block0Hash := block0.Hash()
+
+	header, err := buildBlock1Header(gen, chainID, root, block0Hash)
+	if err != nil {
+		return nil, fmt.Errorf("build block 1 header: %w", err)
 	}
 	headerHash, err := writeHeaderFile(header, headerPath)
 	if err != nil {
 		return nil, err
 	}
 	if cfg.Verbose {
-		log.Printf("[reth] state_root=%s header_hash=%s", root.Hex(), headerHash.Hex())
+		log.Printf("[reth] state_root=%s block0_hash=%s block1_hash=%s",
+			root.Hex(), block0Hash.Hex(), headerHash.Hex())
 	}
 
 	if err := prepareDatadir(cfg.DBPath); err != nil {
