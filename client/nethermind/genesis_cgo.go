@@ -64,7 +64,7 @@ func blockNumKeyWithoutLeadingZeros(n uint64) []byte {
 //
 //	headers/      key = numBE(8)||hash(32)   value = RLP(header)
 //	blocks/       key = numBE(8)||hash(32)   value = RLP(block)
-//	blockNumbers/ key = hash(32)             value = numBE(no leading zeros, ≥1 byte)
+//	blockNumbers/ key = hash(32)             value = numBE(8) fixed-width
 //	blockInfos/   key = numBE(no leading zeros, ≥1 byte)
 //	              value = RLP(ChainLevelInfo{HasBlockOnMainChain=true,
 //	                                          BlockInfos=[BlockInfo{
@@ -89,6 +89,15 @@ func writeGenesisBlockToDBs(dbs *nethDBs, header *types.Header) (common.Hash, er
 	compositeKey := blockNumPrefixedKey(blockNumber, headerHash)
 	numKey := blockNumKeyWithoutLeadingZeros(blockNumber)
 
+	// blockNumbers/ stores the FULL 8-byte big-endian number, not the
+	// no-leading-zeros variant. Nethermind's HeaderStore.GetBlockNumberFromBlockNumberDb
+	// throws InvalidDataException("Unexpected number span length: ...") if
+	// the value is anything other than exactly 8 bytes — see
+	// HeaderStore.cs:103. The blockInfos key uses no-leading-zeros, but the
+	// blockNumbers value is always 8 bytes.
+	var numBE8 [8]byte
+	binary.BigEndian.PutUint64(numBE8[:], blockNumber)
+
 	// 1. headers/ — composite key → RLP(header)
 	headerRLP, err := nethrlp.EncodeHeader(header)
 	if err != nil {
@@ -109,8 +118,8 @@ func writeGenesisBlockToDBs(dbs *nethDBs, header *types.Header) (common.Hash, er
 		return common.Hash{}, fmt.Errorf("write blocks/: %w", err)
 	}
 
-	// 3. blockNumbers/ — hash(32) → numBE(no leading zeros)
-	if err := dbs.blockNumbers.Put(wo, headerHash[:], numKey); err != nil {
+	// 3. blockNumbers/ — hash(32) → numBE(8) fixed
+	if err := dbs.blockNumbers.Put(wo, headerHash[:], numBE8[:]); err != nil {
 		return common.Hash{}, fmt.Errorf("write blockNumbers/: %w", err)
 	}
 
