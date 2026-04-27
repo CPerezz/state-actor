@@ -427,9 +427,11 @@ func main() {
 
 	case "nethermind":
 		// Nethermind path: the writer in client/nethermind/ owns the full
-		// pipeline (entitygen → trie.Builder → grocksdb). Currently a
-		// scaffold returning errNotImplemented; the cgo+grocksdb wiring
-		// lands in PR#3 stage 2.
+		// pipeline (entitygen → trie.Builder → grocksdb). Phase A
+		// (empty-alloc genesis only) lands behind the cgo_neth build tag;
+		// vanilla local builds get a stub redirecting users at Docker.
+		nethermind.GenesisFilePath = *genesisPath
+		nethermind.ChainIDOverride = *chainID
 		var err error
 		stats, err = nethermind.Run(context.Background(), config, nethermind.Options{})
 		if err != nil {

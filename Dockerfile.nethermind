@@ -1,81 +1,91 @@
 # Dockerfile.nethermind — builds state-actor with the cgo_neth tag so
 # --client=nethermind works.
 #
-# Project decision: state-actor's Nethermind path is Docker-only. Local
-# Go builds without the tag don't pull in librocksdb or cgo at all. This
-# image is the *only* supported way to produce a Nethermind-bootable
-# state-actor binary.
+# RocksDB strategy: build from source. Distro packages
+# (debian: 7.8, ubuntu: 8.9) lag the rocksdb release line; grocksdb
+# v1.10.x needs RocksDB 10.x. We pin both versions together at the top
+# of this file.
 #
-# Build:
+# Run:
 #   docker build -f Dockerfile.nethermind -t state-actor-nethermind:latest .
-#
-# Run (writes the produced datadir to a host volume):
 #   docker run --rm -v $(pwd)/_artifacts/neth:/data state-actor-nethermind:latest \
-#     --client=nethermind --db=/data --accounts=1000 --contracts=100 --seed=42
-#
-# B6's Tier 3 boot smoke test extends this image to also carry a
-# Nethermind.Runner build at the pinned upstream/master SHA 09bd5a2d.
+#     --client=nethermind --db=/data --accounts=0 --contracts=0
 
-# ---------- Stage 1: build state-actor with cgo + librocksdb ----------
-FROM ubuntu:24.04 AS builder
+# grocksdb's build.sh pins this exact version. If you bump grocksdb in
+# go.mod, sync ROCKSDB_VERSION here to whatever its build.sh expects
+# (look for `rocksdb_version=` in the grocksdb repo at that tag).
+ARG ROCKSDB_VERSION=10.10.1
 
-# Pinned Go toolchain version. Bump alongside go.mod if upgrading.
-ARG GO_VERSION=1.24.0
+# ---------- Stage 1: builder (rocksdb + state-actor in one stage) ----------
+# Single stage to avoid cross-stage header/lib path drift. The runtime
+# image carries only the .so + state-actor binary.
+FROM golang:1.24-bookworm AS builder
 
-# RocksDB and its compression deps. apt's librocksdb-dev pulls in
-# a recent enough version for grocksdb v1.10.x; if grocksdb's required
-# RocksDB ABI moves ahead of Ubuntu's package, we'll need to either
-# bump the base image or compile RocksDB from source here.
+ARG ROCKSDB_VERSION
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     git \
     build-essential \
+    cmake \
     pkg-config \
-    librocksdb-dev \
+    libgflags-dev \
+    libsnappy-dev \
     liblz4-dev \
     libzstd-dev \
-    libsnappy-dev \
     libbz2-dev \
+    zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Go. Using the official tarball rather than apt's stale package.
-RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" \
-    | tar -C /usr/local -xz
-ENV PATH=/usr/local/go/bin:/root/go/bin:$PATH \
-    GOPATH=/root/go \
-    CGO_ENABLED=1
+# Build RocksDB from source. -j2 keeps peak memory under ~4GB; rocksdb's
+# larger C++ files need 1-2GB per gcc instance and Docker Desktop's
+# default 8GB can't sustain $(nproc) parallel compiles on Apple Silicon.
+RUN mkdir -p /src && cd /src \
+    && curl -fsSL "https://github.com/facebook/rocksdb/archive/refs/tags/v${ROCKSDB_VERSION}.tar.gz" \
+       | tar xz \
+    && cd rocksdb-${ROCKSDB_VERSION} \
+    && PORTABLE=1 USE_RTTI=1 DISABLE_WARNING_AS_ERROR=1 make -j2 shared_lib \
+    && make install-shared INSTALL_PATH=/usr/local \
+    && ldconfig \
+    && cd /src && rm -rf rocksdb-${ROCKSDB_VERSION}
+# DISABLE_WARNING_AS_ERROR=1 is needed because gcc 12 (debian bookworm)
+# tags a -Wrestrict warning in rocksdb 10.10.1's table/unique_id.cc as
+# an error. Building without -Werror is the standard workaround; gcc 13+
+# fixes the false positive.
 
-WORKDIR /src
+ENV CGO_ENABLED=1 \
+    CGO_CFLAGS="-I/usr/local/include" \
+    CGO_LDFLAGS="-L/usr/local/lib -lrocksdb -lstdc++ -lm -lz -lbz2 -lsnappy -llz4 -lzstd"
 
-# Cache go.mod / go.sum dependency download as its own layer so source
-# changes don't bust the dependency cache.
+WORKDIR /app
+
+# Cache go.mod / go.sum dependency layer.
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy the rest of the source.
 COPY . .
 
-# Build state-actor with the cgo_neth tag so client/nethermind/run_cgo.go
-# is included and grocksdb is linked. -ldflags "-s -w" trims debug info
-# for a smaller final binary.
 RUN go build -tags cgo_neth -ldflags "-s -w" -o /out/state-actor .
 
 # ---------- Stage 2: minimal runtime image ----------
-FROM ubuntu:24.04 AS runtime
+FROM debian:bookworm-slim AS runtime
 
-# Runtime needs the rocksdb shared library plus its compression deps.
-# Static-linking RocksDB is feasible but doubles the image build time
-# and complicates upstream upgrades; dynamic-link is the simpler default
-# for an internal tool image.
+# Compression libs (rocksdb runtime links against these). RocksDB's own
+# .so comes from the builder stage.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
-    librocksdb9.10 \
+    libsnappy1v5 \
     liblz4-1 \
     libzstd1 \
-    libsnappy1v5 \
     libbz2-1.0 \
+    libstdc++6 \
+    libgflags2.2 \
+    zlib1g \
     && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /usr/local/lib/librocksdb.so* /usr/local/lib/
+RUN ldconfig
 
 COPY --from=builder /out/state-actor /usr/local/bin/state-actor
 

@@ -36,3 +36,15 @@ var errNotImplemented = errors.New(
 func Run(ctx context.Context, cfg generator.Config, opts Options) (*generator.Stats, error) {
 	return runImpl(ctx, cfg, opts)
 }
+
+// GenesisFilePath / ChainIDOverride are package-level vars set from main.go
+// before Run is called, mirroring the reth-branch pattern. They surface
+// the --genesis and --chain-id CLI flags into the package without
+// threading them through the Config struct.
+//
+// Declared here (no build tag) so both cgo and stub builds see them.
+// The cgo runImpl reads them; the stub runImpl ignores them.
+var (
+	GenesisFilePath string
+	ChainIDOverride int64
+)
