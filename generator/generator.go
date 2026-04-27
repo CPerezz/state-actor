@@ -28,36 +28,63 @@ import (
 // Generator handles state generation.
 type Generator struct {
 	config Config
-	db     ethdb.KeyValueStore // Pebble DB for geth format or temp operations
-	writer *GethWriter         // Geth Pebble writer (only format supported)
+	// db is the geth-style ethdb exposed by the writer (via Writer.DB()).
+	// May be nil for backends that don't expose one (e.g. nethermind via
+	// grocksdb). The MPT and binary-trie pipelines below check for nil
+	// before using it.
+	db     ethdb.KeyValueStore
+	writer Writer // Pluggable backend (geth, future: nethermind, reth)
 	rng    *mrand.Rand
 }
 
-// New creates a new state generator.
+// New creates a new state generator using the writer factory registered via
+// RegisterDefaultWriterFactory (typically by a client package's init()).
+//
+// Importing a client package as a side effect activates its factory:
+//
+//	import _ "github.com/nerolation/state-actor/client/geth"
+//	gen, err := generator.New(cfg)
+//
+// If no factory is registered, returns a clear error pointing at the missing
+// import.
 func New(config Config) (*Generator, error) {
-	// Validate trie mode
-	switch config.TrieMode {
-	case TrieModeMPT, TrieModeBinary, "":
-		// valid
-	default:
-		return nil, fmt.Errorf("unsupported trie mode: %q", config.TrieMode)
-	}
-
-	gethWriter, err := NewGethWriter(config.DBPath, config.BatchSize, config.Workers)
+	factory, err := resolveDefaultWriterFactory()
 	if err != nil {
-		return nil, fmt.Errorf("failed to create geth writer: %w", err)
+		return nil, err
 	}
+	return NewWithWriter(config, factory)
+}
 
+// NewWithWriter creates a Generator using an explicit WriterFactory. Use this
+// when multiple client packages are imported and the default registration is
+// ambiguous, or in tests that want to bypass the global factory.
+func NewWithWriter(config Config, factory WriterFactory) (*Generator, error) {
+	if err := validateTrieMode(config.TrieMode); err != nil {
+		return nil, err
+	}
+	writer, err := factory(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create writer: %w", err)
+	}
 	return &Generator{
 		config: config,
-		db:     gethWriter.DB(), // Shared for genesis / trie operations.
-		writer: gethWriter,
+		db:     writer.DB(), // Shared for genesis / trie operations; nil for non-geth backends.
+		writer: writer,
 		rng:    mrand.New(mrand.NewSource(config.Seed)),
 	}, nil
 }
 
-// Close closes the generator and its database. GethWriter.Close already
-// closes the underlying Pebble DB; g.db shares that instance.
+func validateTrieMode(mode TrieMode) error {
+	switch mode {
+	case TrieModeMPT, TrieModeBinary, "":
+		return nil
+	default:
+		return fmt.Errorf("unsupported trie mode: %q", mode)
+	}
+}
+
+// Close closes the generator and its database. The Writer is responsible for
+// closing the underlying database (geth: Pebble); g.db shares that instance.
 func (g *Generator) Close() error {
 	if g.writer == nil {
 		return nil

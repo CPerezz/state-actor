@@ -245,6 +245,33 @@ Deep-branch accounts use phantom entries to force branch nodes at every nibble d
 
 Pebble performs best with parallel batch commits. We use a worker pool to maximize throughput while maintaining ordering within batches.
 
+## Client Adapters
+
+State writers are pluggable via the `generator.Writer` interface. Each
+client/<name>/ package owns its target client's on-disk format end-to-end:
+key encoding, batching, genesis-block wire format, and any client-specific
+metadata. The generator core only sees the abstract Writer surface
+(WriteAccount, WriteStorage, WriteCode, SetStateRoot, …).
+
+Clients register themselves as the default writer factory via init():
+
+```go
+import _ "github.com/nerolation/state-actor/client/geth"
+gen, err := generator.New(cfg) // uses geth's Pebble writer
+```
+
+To select a factory explicitly (or to support future clients alongside geth):
+
+```go
+import "github.com/nerolation/state-actor/client/geth"
+gen, err := generator.NewWithWriter(cfg, geth.NewWriterFactory())
+```
+
+Today the only client adapter is `client/geth/`. Future adapters
+(`client/nethermind/`, `client/reth/`) follow the same shape: a `Writer`
+implementing `generator.Writer`, plus a `NewWriterFactory()` and an init()
+registration.
+
 ## File Structure
 
 ```
@@ -254,10 +281,16 @@ state-actor/
 │   ├── config.go              # Configuration types
 │   ├── generator.go           # Core generation logic
 │   ├── deep_branch.go         # Deep-branch phantom key construction
-│   ├── writer_geth.go         # Geth/Pebble snapshot writer
+│   ├── writer.go              # Pluggable Writer interface + factory registration
 │   └── generator_test.go      # Unit tests
+├── client/
+│   └── geth/
+│       ├── doc.go             # Package overview
+│       ├── writer.go          # Geth/Pebble snapshot writer
+│       ├── factory.go         # Default-factory init() registration
+│       └── genesis_block.go   # Geth genesis-block + PathDB metadata writer
 ├── genesis/
-│   ├── genesis.go             # Genesis loading and writing
+│   ├── genesis.go             # Client-neutral genesis JSON parser
 │   └── genesis_test.go        # Unit tests
 ├── integration/
 │   ├── stategen_launcher.star # Kurtosis integration

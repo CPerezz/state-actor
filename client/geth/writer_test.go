@@ -1,4 +1,4 @@
-package generator
+package geth
 
 import (
 	"os"
@@ -8,24 +8,28 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/holiman/uint256"
+
+	"github.com/nerolation/state-actor/generator"
 )
 
-func TestGethWriterBasic(t *testing.T) {
-	// Create temp directory
+// Compile-time assertion that *Writer satisfies the generator.Writer interface.
+// If this line fails to compile, geth.Writer is missing a method or has a
+// signature mismatch with the interface.
+var _ generator.Writer = (*Writer)(nil)
+
+func TestWriterBasic(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "geth-writer-test-*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// Create writer
-	w, err := NewGethWriter(tmpDir, 1000, 4)
+	w, err := NewWriter(tmpDir, 1000, 4)
 	if err != nil {
-		t.Fatalf("Failed to create Geth writer: %v", err)
+		t.Fatalf("Failed to create geth writer: %v", err)
 	}
 	defer w.Close()
 
-	// Write an account
 	addr := common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678")
 	acc := &types.StateAccount{
 		Nonce:    42,
@@ -38,7 +42,6 @@ func TestGethWriterBasic(t *testing.T) {
 		t.Fatalf("Failed to write account: %v", err)
 	}
 
-	// Write storage
 	slot := common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000001")
 	value := common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000002a")
 
@@ -46,12 +49,10 @@ func TestGethWriterBasic(t *testing.T) {
 		t.Fatalf("Failed to write storage: %v", err)
 	}
 
-	// Flush
 	if err := w.Flush(); err != nil {
 		t.Fatalf("Failed to flush: %v", err)
 	}
 
-	// Check stats
 	stats := w.Stats()
 	if stats.AccountBytes == 0 {
 		t.Error("Expected non-zero account bytes")
@@ -60,6 +61,6 @@ func TestGethWriterBasic(t *testing.T) {
 		t.Error("Expected non-zero storage bytes")
 	}
 
-	t.Logf("Geth writer stats: accounts=%d, storage=%d, code=%d",
+	t.Logf("geth writer stats: accounts=%d, storage=%d, code=%d",
 		stats.AccountBytes, stats.StorageBytes, stats.CodeBytes)
 }

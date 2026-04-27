@@ -1,5 +1,13 @@
-// Package genesis handles reading, merging, and writing genesis configurations
-// with generated state.
+// Package genesis handles reading, parsing, and converting genesis JSON
+// configurations into client-neutral Go types.
+//
+// The package is deliberately client-neutral: it parses the genesis.json
+// format used by ethereum-package and devnets and exposes the alloc as
+// Go data structures (types.StateAccount maps, raw storage maps, raw code
+// maps). It does NOT write genesis blocks to any client database — that
+// responsibility lives in client/<name>/ packages, each producing the on-disk
+// shape its target client expects (e.g. client/geth.WriteGenesisBlock for
+// geth's Pebble + freezer layout).
 package genesis
 
 import (
@@ -10,30 +18,11 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
-	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/params"
-	"github.com/ethereum/go-ethereum/rlp"
-	"github.com/ethereum/go-ethereum/trie"
 	"github.com/holiman/uint256"
 )
-
-// prefixWriter wraps a KeyValueWriter to prepend a fixed prefix to all keys.
-// Used to write PathDB metadata into the "v" (verkle) namespace.
-type prefixWriter struct {
-	prefix []byte
-	w      ethdb.KeyValueWriter
-}
-
-func (pw *prefixWriter) Put(key, value []byte) error {
-	return pw.w.Put(append(pw.prefix, key...), value)
-}
-
-func (pw *prefixWriter) Delete(key []byte) error {
-	return pw.w.Delete(append(pw.prefix, key...))
-}
 
 // Genesis represents the genesis block configuration.
 // This is a simplified version of go-ethereum's Genesis struct
@@ -139,186 +128,4 @@ func (g *Genesis) GetAllocCode() map[common.Address][]byte {
 	}
 
 	return code
-}
-
-// WriteGenesisBlock writes the genesis block and associated metadata to the database.
-// This is called after state generation with the computed state root.
-// When binaryTrie is true, EnableVerkleAtGenesis is set in the chain config
-// (legacy field name — it actually enables binary trie mode per EIP-7864).
-// The ancientDir is the path for the freezer/ancient database (e.g. "<chaindata>/ancient").
-func WriteGenesisBlock(db ethdb.KeyValueStore, genesis *Genesis, stateRoot common.Hash, binaryTrie bool, ancientDir string) (*types.Block, error) {
-	if genesis.Config == nil {
-		return nil, fmt.Errorf("genesis has no chain config")
-	}
-
-	// Determine the chain config to persist. When binaryTrie is true, we
-	// enable EIP-7864 binary trie mode (legacy field name: EnableVerkleAtGenesis).
-	// We work on a copy so the caller's *Genesis is never mutated.
-	chainCfg := genesis.Config
-	if binaryTrie {
-		cfgCopy := *genesis.Config
-		cfgCopy.EnableVerkleAtGenesis = true
-		chainCfg = &cfgCopy
-	}
-
-	// Build the genesis block header
-	header := &types.Header{
-		Number:     new(big.Int).SetUint64(uint64(genesis.Number)),
-		Nonce:      types.EncodeNonce(uint64(genesis.Nonce)),
-		Time:       uint64(genesis.Timestamp),
-		ParentHash: genesis.ParentHash,
-		Extra:      genesis.ExtraData,
-		GasLimit:   uint64(genesis.GasLimit),
-		GasUsed:    uint64(genesis.GasUsed),
-		Difficulty: (*big.Int)(genesis.Difficulty),
-		MixDigest:  genesis.Mixhash,
-		Coinbase:   genesis.Coinbase,
-		Root:       stateRoot,
-	}
-
-	// Set defaults
-	if header.GasLimit == 0 {
-		header.GasLimit = params.GenesisGasLimit
-	}
-	if header.Difficulty == nil {
-		if genesis.Config.Ethash == nil {
-			header.Difficulty = big.NewInt(0)
-		} else {
-			header.Difficulty = params.GenesisDifficulty
-		}
-	}
-
-	// Handle EIP-1559 base fee
-	if genesis.Config.IsLondon(common.Big0) {
-		if genesis.BaseFee != nil {
-			header.BaseFee = (*big.Int)(genesis.BaseFee)
-		} else {
-			header.BaseFee = new(big.Int).SetUint64(params.InitialBaseFee)
-		}
-	}
-
-	var withdrawals []*types.Withdrawal
-	num := big.NewInt(int64(genesis.Number))
-	timestamp := uint64(genesis.Timestamp)
-
-	// Handle Shanghai
-	if genesis.Config.IsShanghai(num, timestamp) {
-		emptyWithdrawalsHash := types.EmptyWithdrawalsHash
-		header.WithdrawalsHash = &emptyWithdrawalsHash
-		withdrawals = make([]*types.Withdrawal, 0)
-	}
-
-	// Handle Cancun
-	if genesis.Config.IsCancun(num, timestamp) {
-		header.ParentBeaconRoot = new(common.Hash)
-		if genesis.ExcessBlobGas != nil {
-			excess := uint64(*genesis.ExcessBlobGas)
-			header.ExcessBlobGas = &excess
-		} else {
-			header.ExcessBlobGas = new(uint64)
-		}
-		if genesis.BlobGasUsed != nil {
-			used := uint64(*genesis.BlobGasUsed)
-			header.BlobGasUsed = &used
-		} else {
-			header.BlobGasUsed = new(uint64)
-		}
-	}
-
-	// Handle Prague
-	if genesis.Config.IsPrague(num, timestamp) {
-		emptyRequestsHash := types.EmptyRequestsHash
-		header.RequestsHash = &emptyRequestsHash
-	}
-
-	// Create the block
-	block := types.NewBlock(header, &types.Body{Withdrawals: withdrawals}, nil, trie.NewStackTrie(nil))
-
-	// Write to database
-	batch := db.NewBatch()
-
-	// Marshal genesis alloc for storage (geth expects this)
-	allocBlob, err := json.Marshal(genesis.Alloc)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal genesis alloc: %w", err)
-	}
-
-	// Write all the required rawdb entries
-	rawdb.WriteGenesisStateSpec(batch, block.Hash(), allocBlob)
-	rawdb.WriteBlock(batch, block)
-	rawdb.WriteReceipts(batch, block.Hash(), block.NumberU64(), nil)
-	rawdb.WriteCanonicalHash(batch, block.Hash(), block.NumberU64())
-	rawdb.WriteHeadBlockHash(batch, block.Hash())
-	rawdb.WriteHeadFastBlockHash(batch, block.Hash())
-	rawdb.WriteHeadHeaderHash(batch, block.Hash())
-	rawdb.WriteChainConfig(batch, block.Hash(), chainCfg)
-
-	// PathDB metadata: state ID tracking and snapshot root.
-	// Required for geth's PathDB disk layer initialization (loadLayers).
-	//
-	// In binary trie mode, PathDB namespaces all its data under the "v"
-	// prefix (rawdb.VerklePrefix). A prefixWriter wraps the batch to add
-	// this prefix transparently, so rawdb functions write to the correct keys.
-	var metadataWriter ethdb.KeyValueWriter = batch
-	if binaryTrie {
-		metadataWriter = &prefixWriter{prefix: []byte("v"), w: batch}
-	}
-	rawdb.WriteStateID(metadataWriter, stateRoot, 0)
-	rawdb.WritePersistentStateID(metadataWriter, 0)
-	rawdb.WriteSnapshotRoot(metadataWriter, stateRoot)
-	if err := WriteCompletedSnapshotGenerator(metadataWriter); err != nil {
-		return nil, fmt.Errorf("failed to write snapshot generator: %w", err)
-	}
-
-	if err := batch.Write(); err != nil {
-		return nil, fmt.Errorf("failed to write genesis block: %w", err)
-	}
-
-	// Initialize the ancient/freezer database. Geth requires the freezer
-	// directory with proper index files to exist, even for a genesis-only
-	// database. rawdb.Open wraps the key-value store with a chain freezer
-	// and creates the necessary .cidx/.ridx/.meta table files.
-	if ancientDir != "" {
-		fdb, err := rawdb.Open(db, rawdb.OpenOptions{Ancient: ancientDir})
-		if err != nil {
-			return nil, fmt.Errorf("failed to initialize ancient database: %w", err)
-		}
-		fdb.Close()
-	}
-
-	return block, nil
-}
-
-// snapshotGenerator mirrors the wire format of pathdb's unexported
-// journalGenerator. The field order, types, and naming must match
-// triedb/pathdb/journal.go exactly so RLP-encoded blobs round-trip.
-type snapshotGenerator struct {
-	Wiping   bool // deprecated, kept for backward compatibility
-	Done     bool
-	Marker   []byte
-	Accounts uint64
-	Slots    uint64
-	Storage  uint64
-}
-
-// WriteCompletedSnapshotGenerator persists a SnapshotGenerator entry marking
-// the snapshot as fully generated (Done=true, nil marker).
-//
-// Without this entry, pathdb's loadGenerator returns a nil generator on open,
-// and setStateGenerator constructs a fresh one with an empty (non-nil) marker.
-// The disk layer's genComplete() then reports false, which:
-//   - in MPT mode (noBuild=false), triggers a full snapshot regeneration
-//     from scratch, and
-//   - in binary trie mode (noBuild=true via isVerkle), prevents AccountIterator
-//     and SnapshotCompleted from succeeding.
-//
-// The generator's binary-trie-ness is encoded by writing under the "v"
-// (rawdb.VerklePrefix) namespace via a prefixWriter, not by a struct field.
-func WriteCompletedSnapshotGenerator(w ethdb.KeyValueWriter) error {
-	blob, err := rlp.EncodeToBytes(snapshotGenerator{Done: true})
-	if err != nil {
-		return fmt.Errorf("encode snapshot generator: %w", err)
-	}
-	rawdb.WriteSnapshotGenerator(w, blob)
-	return nil
 }

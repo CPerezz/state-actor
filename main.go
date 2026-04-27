@@ -27,6 +27,8 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+
+	"github.com/nerolation/state-actor/client/geth"
 	"github.com/nerolation/state-actor/generator"
 	"github.com/nerolation/state-actor/genesis"
 )
@@ -375,7 +377,7 @@ func main() {
 		}
 
 		ancientDir := filepath.Join(config.DBPath, "ancient")
-		block, err := genesis.WriteGenesisBlock(gen.DB(), genesisConfig, stats.StateRoot, config.TrieMode == generator.TrieModeBinary, ancientDir)
+		block, err := geth.WriteGenesisBlock(gen.DB(), genesisConfig, stats.StateRoot, config.TrieMode == generator.TrieModeBinary, ancientDir)
 		if err != nil {
 			log.Fatalf("Failed to write genesis block: %v", err)
 		}
