@@ -13,6 +13,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -29,6 +30,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/nerolation/state-actor/client/geth"
+	"github.com/nerolation/state-actor/client/nethermind"
 	"github.com/nerolation/state-actor/generator"
 	"github.com/nerolation/state-actor/genesis"
 )
@@ -68,6 +70,11 @@ var (
 
 	// Stats server
 	statsPort = flag.Int("stats-port", 0, "Port for live stats HTTP server (0 = disabled)")
+
+	// Client dispatch — selects which on-disk format the writer produces.
+	// Default 'geth' preserves the historical behavior; 'nethermind' is
+	// implemented progressively (see PR#3 in the deep-feature-planning plan).
+	client = flag.String("client", "geth", "Target Ethereum client: 'geth' (default), 'nethermind'. Other clients (reth, erigon, besu) are tracked in follow-up PRs.")
 )
 
 func main() {
@@ -85,6 +92,29 @@ func main() {
 
 	if *seed == 0 {
 		*seed = time.Now().UnixNano()
+	}
+
+	// Validate --client value and its compatibility with other flags. Doing
+	// this at CLI parse time (before any generation work) means misconfigured
+	// runs fail fast instead of burning minutes producing a wrong output.
+	switch *client {
+	case "geth", "nethermind":
+		// supported
+	case "reth", "erigon", "besu":
+		log.Fatalf("--client=%s is not yet implemented on this branch (planned in a follow-up PR); use --client=geth or --client=nethermind", *client)
+	default:
+		log.Fatalf("--client=%s is not recognized; valid values: geth, nethermind", *client)
+	}
+	if *client == "nethermind" {
+		// Nethermind doesn't implement EIP-7864 (binary trie) and the
+		// deep-branch / commit-interval / group-depth / pebble-block-size
+		// flags are all geth/Pebble-specific. Reject up front.
+		if *binaryTrie {
+			log.Fatalf("--binary-trie is not supported with --client=nethermind (Nethermind does not implement EIP-7864)")
+		}
+		if *deepBranchAccounts > 0 {
+			log.Fatalf("--deep-branch-accounts is geth-specific and not supported with --client=nethermind")
+		}
 	}
 
 	trieMode := generator.TrieModeMPT
@@ -353,38 +383,60 @@ func main() {
 
 	start := time.Now()
 
-	gen, err := generator.New(config)
-	if err != nil {
-		log.Fatalf("Failed to create generator: %v", err)
-	}
-	defer gen.Close()
-
-	stats, err := gen.Generate()
-	if err != nil {
-		log.Fatalf("Failed to generate state: %v", err)
-	}
-
-	// Update live stats with final state
-	if liveStats != nil {
-		liveStats.AddBytes(int64(stats.AccountBytes), int64(stats.StorageBytes), int64(stats.CodeBytes))
-		liveStats.SetStateRoot(stats.StateRoot.Hex())
-	}
-
-	// Write genesis block if genesis was provided
-	if genesisConfig != nil {
-		if *verbose {
-			log.Printf("Writing genesis block with state root: %s", stats.StateRoot.Hex())
-		}
-
-		ancientDir := filepath.Join(config.DBPath, "ancient")
-		block, err := geth.WriteGenesisBlock(gen.DB(), genesisConfig, stats.StateRoot, config.TrieMode == generator.TrieModeBinary, ancientDir)
+	// Dispatch to the selected client's machinery. Each client owns its full
+	// pipeline (writer, trie, genesis) inside client/<name>/; main.go only
+	// decides who runs. The stats return shape is intentionally identical so
+	// the summary prints below work uniformly for any client.
+	var stats *generator.Stats
+	switch *client {
+	case "geth":
+		gen, err := generator.New(config)
 		if err != nil {
-			log.Fatalf("Failed to write genesis block: %v", err)
+			log.Fatalf("Failed to create generator: %v", err)
+		}
+		defer gen.Close()
+
+		stats, err = gen.Generate()
+		if err != nil {
+			log.Fatalf("Failed to generate state: %v", err)
 		}
 
-		if *verbose {
-			log.Printf("Genesis block hash: %s", block.Hash().Hex())
-			log.Printf("Genesis block number: %d", block.NumberU64())
+		// Update live stats with final state
+		if liveStats != nil {
+			liveStats.AddBytes(int64(stats.AccountBytes), int64(stats.StorageBytes), int64(stats.CodeBytes))
+			liveStats.SetStateRoot(stats.StateRoot.Hex())
+		}
+
+		// Write genesis block if genesis was provided (geth-specific).
+		if genesisConfig != nil {
+			if *verbose {
+				log.Printf("Writing genesis block with state root: %s", stats.StateRoot.Hex())
+			}
+
+			ancientDir := filepath.Join(config.DBPath, "ancient")
+			block, err := geth.WriteGenesisBlock(gen.DB(), genesisConfig, stats.StateRoot, config.TrieMode == generator.TrieModeBinary, ancientDir)
+			if err != nil {
+				log.Fatalf("Failed to write genesis block: %v", err)
+			}
+
+			if *verbose {
+				log.Printf("Genesis block hash: %s", block.Hash().Hex())
+				log.Printf("Genesis block number: %d", block.NumberU64())
+			}
+		}
+
+	case "nethermind":
+		// Nethermind path: the writer in client/nethermind/ owns the full
+		// pipeline (entitygen → trie.Builder → grocksdb). Currently a
+		// scaffold returning errNotImplemented; the cgo+grocksdb wiring
+		// lands in PR#3 stage 2.
+		var err error
+		stats, err = nethermind.Run(context.Background(), config, nethermind.Options{})
+		if err != nil {
+			log.Fatalf("Failed to populate Nethermind DB: %v", err)
+		}
+		if liveStats != nil && stats != nil {
+			liveStats.SetStateRoot(stats.StateRoot.Hex())
 		}
 	}
 
