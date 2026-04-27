@@ -25,6 +25,7 @@ import (
 
 	"github.com/nerolation/state-actor/generator"
 	"github.com/nerolation/state-actor/genesis"
+	"github.com/nerolation/state-actor/internal/neth"
 )
 
 // runImpl orchestrates a Nethermind RocksDB write.
@@ -49,19 +50,15 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 		return nil, errors.New("--db is required for --client=nethermind")
 	}
 
-	// Phase A: only empty-alloc supported. Any non-zero account/contract
-	// count means the user expects state-trie writes that Phase B implements.
+	// Phase A/B mix: synthetic accounts (--accounts=N) still belong to
+	// future Phase B work that wires entitygen.Source through trie.Builder.
+	// Genesis-alloc accounts (--genesis path with non-empty alloc) are
+	// supported now via writeGenesisAllocAccounts below.
 	if cfg.NumAccounts > 0 || cfg.NumContracts > 0 || cfg.DeepBranch.Enabled() {
 		return nil, errors.New(
-			"--client=nethermind: Phase A only supports empty alloc " +
-				"(--accounts=0 --contracts=0). Phase B with full entitygen " +
-				"iteration ships in the next commit",
-		)
-	}
-	if len(cfg.GenesisAccounts) > 0 {
-		return nil, errors.New(
-			"--client=nethermind: Phase A doesn't yet write genesis-alloc " +
-				"accounts to state — Phase B's entitygen integration handles them",
+			"--client=nethermind: synthetic accounts (--accounts=N) require " +
+				"entitygen.Source integration — coming in the next commit. " +
+				"Use --genesis with an alloc section to fund accounts today.",
 		)
 	}
 
@@ -72,14 +69,13 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 	gasLimit := uint64(30_000_000)
 	var extraData []byte
 	var timestamp uint64
-	// If state-actor was started with --genesis, GenesisFilePath is the path.
-	// We read it via genesis.LoadGenesis to extract chain ID + gasLimit.
-	// For Phase A's empty-alloc default this is optional.
+	var loadedGenesis *genesis.Genesis
 	if GenesisFilePath != "" {
 		g, err := genesis.LoadGenesis(GenesisFilePath)
 		if err != nil {
 			return nil, fmt.Errorf("load genesis: %w", err)
 		}
+		loadedGenesis = g
 		if g.Config != nil && g.Config.ChainID != nil {
 			chainID = g.Config.ChainID.Int64()
 		}
@@ -102,7 +98,21 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 	}
 	defer dbs.Close()
 
+	// Genesis-alloc preallocation: write each account's leaf into the
+	// state trie and update the header's stateRoot. Accounts come from
+	// --genesis JSON; cfg.GenesisAccounts (the legacy flag) merges in too.
+	stateRoot := common.Hash(neth.EmptyTreeHash)
+	if loadedGenesis != nil && len(loadedGenesis.Alloc) > 0 {
+		accounts := loadedGenesis.ToStateAccounts()
+		codes := loadedGenesis.GetAllocCode()
+		stateRoot, err = writeGenesisAllocAccounts(dbs, accounts, codes)
+		if err != nil {
+			return nil, fmt.Errorf("write genesis alloc: %w", err)
+		}
+	}
+
 	header := buildEmptyAllocGenesisHeader(chainID, gasLimit, extraData, timestamp)
+	header.Root = stateRoot
 
 	hash, err := writeGenesisBlockToDBs(dbs, header)
 	if err != nil {
@@ -111,8 +121,11 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 
 	if cfg.Verbose {
 		log.Printf("nethermind: genesis hash = %s", hash.Hex())
-		log.Printf("nethermind: state root  = %s (empty tree)", header.Root.Hex())
+		log.Printf("nethermind: state root  = %s", header.Root.Hex())
 		log.Printf("nethermind: 7 RocksDBs written under %s/db/", cfg.DBPath)
+		if loadedGenesis != nil && len(loadedGenesis.Alloc) > 0 {
+			log.Printf("nethermind: preallocated %d accounts from --genesis", len(loadedGenesis.Alloc))
+		}
 	}
 
 	return &generator.Stats{
