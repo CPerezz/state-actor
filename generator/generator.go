@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"math"
 	mrand "math/rand"
 	"os"
 	"runtime"
@@ -23,6 +22,8 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/trie"
 	"github.com/holiman/uint256"
+
+	"github.com/nerolation/state-actor/internal/entitygen"
 )
 
 // Generator handles state generation.
@@ -1232,13 +1233,16 @@ func (g *Generator) writeCodeOnly(acc *accountData) error {
 	return nil
 }
 
-// storageSlot is a key-value pair for deterministic storage iteration.
-type storageSlot struct {
-	Key   common.Hash
-	Value common.Hash
-}
+// storageSlot is the per-package alias of entitygen.StorageSlot. It exists so
+// existing pipeline code (binary_stack_trie.go, accountData.storage, the
+// snapshotWork channel) continues to compile unchanged after the
+// generation primitives moved into internal/entitygen/.
+type storageSlot = entitygen.StorageSlot
 
-// accountData holds generated account data.
+// accountData holds generated account data. The fields stay lowercase
+// (internal to the generator package) — entitygen.GenerateEOA / GenerateContract
+// return entitygen.Account values that the wrappers below copy into this
+// shape so the rest of the generator pipeline keeps its existing field accesses.
 type accountData struct {
 	address  common.Address
 	addrHash common.Hash
@@ -1249,153 +1253,54 @@ type accountData struct {
 }
 
 // mapToSortedSlots converts a storage map to a sorted slice of storageSlot.
+// Thin wrapper around entitygen.MapToSortedSlots; kept for call-site
+// readability and so binary_stack_trie callers don't need to import entitygen.
 func mapToSortedSlots(m map[common.Hash]common.Hash) []storageSlot {
-	slots := make([]storageSlot, 0, len(m))
-	for k, v := range m {
-		slots = append(slots, storageSlot{Key: k, Value: v})
-	}
-	sort.Slice(slots, func(i, j int) bool {
-		return bytes.Compare(slots[i].Key[:], slots[j].Key[:]) < 0
-	})
-	return slots
+	return entitygen.MapToSortedSlots(m)
 }
 
 // generateEOA generates an Externally Owned Account.
+//
+// Wrapper around entitygen.GenerateEOA: the RNG draw sequence is owned there
+// so geth/reth/nethermind producers all see byte-identical sequences for the
+// same seed. The wrapper just unpacks the result into the generator-local
+// accountData shape.
 func (g *Generator) generateEOA() *accountData {
-	var addr common.Address
-	g.rng.Read(addr[:])
-
-	// Random balance between 0 and 1000 ETH
-	balance := new(uint256.Int).Mul(
-		uint256.NewInt(uint64(g.rng.Intn(1000))),
-		uint256.NewInt(1e18),
-	)
-
+	e := entitygen.GenerateEOA(g.rng)
 	return &accountData{
-		address:  addr,
-		addrHash: crypto.Keccak256Hash(addr[:]),
-		account: &types.StateAccount{
-			Nonce:    uint64(g.rng.Intn(1000)),
-			Balance:  balance,
-			Root:     types.EmptyRootHash,
-			CodeHash: types.EmptyCodeHash.Bytes(),
-		},
-		storage: nil,
+		address:  e.Address,
+		addrHash: e.AddrHash,
+		account:  e.StateAccount,
 	}
 }
 
 // generateContract generates a contract account with storage.
+//
+// Wrapper around entitygen.GenerateContract — see comment on generateEOA.
 func (g *Generator) generateContract(numSlots int) *accountData {
-	var addr common.Address
-	g.rng.Read(addr[:])
-
-	// Generate random code
-	codeSize := g.config.CodeSize + g.rng.Intn(g.config.CodeSize)
-	code := make([]byte, codeSize)
-	g.rng.Read(code)
-	codeHash := crypto.Keccak256Hash(code)
-
-	// Random balance
-	balance := new(uint256.Int).Mul(
-		uint256.NewInt(uint64(g.rng.Intn(100))),
-		uint256.NewInt(1e18),
-	)
-
-	// Generate storage slots as a pre-sorted slice for deterministic trie insertion.
-	storage := make([]storageSlot, 0, numSlots)
-	for j := 0; j < numSlots; j++ {
-		var key, value common.Hash
-		g.rng.Read(key[:])
-		g.rng.Read(value[:])
-		// Ensure value is non-zero (zero values are deletions)
-		if value == (common.Hash{}) {
-			value[31] = 1
-		}
-		storage = append(storage, storageSlot{Key: key, Value: value})
-	}
-	sort.Slice(storage, func(i, j int) bool {
-		return bytes.Compare(storage[i].Key[:], storage[j].Key[:]) < 0
-	})
-
+	e := entitygen.GenerateContract(g.rng, g.config.CodeSize, numSlots)
 	return &accountData{
-		address:  addr,
-		addrHash: crypto.Keccak256Hash(addr[:]),
-		account: &types.StateAccount{
-			Nonce:    uint64(g.rng.Intn(1000)),
-			Balance:  balance,
-			Root:     types.EmptyRootHash, // Will be computed
-			CodeHash: codeHash.Bytes(),
-		},
-		code:     code,
-		codeHash: codeHash,
-		storage:  storage,
+		address:  e.Address,
+		addrHash: e.AddrHash,
+		account:  e.StateAccount,
+		code:     e.Code,
+		codeHash: e.CodeHash,
+		storage:  e.Storage,
 	}
 }
 
-// generateSlotDistribution generates the number of storage slots for each contract.
+// generateSlotDistribution returns one slot count per configured contract.
+// Wrapper around entitygen.GenerateSlotDistribution.
 func (g *Generator) generateSlotDistribution() []int {
-	distribution := make([]int, g.config.NumContracts)
-
-	switch g.config.Distribution {
-	case PowerLaw:
-		// Power-law distribution (Pareto) - 80/20 rule
-		// Most contracts have few slots, few contracts have many
-		alpha := 1.5 // Shape parameter
-		for i := range distribution {
-			// Inverse CDF of Pareto distribution
-			u := g.rng.Float64()
-			slots := float64(g.config.MinSlots) / math.Pow(1-u, 1/alpha)
-			if slots > float64(g.config.MaxSlots) {
-				slots = float64(g.config.MaxSlots)
-			}
-			distribution[i] = int(slots)
-		}
-
-	case Exponential:
-		// Exponential decay
-		lambda := math.Log(2) / float64(g.config.MaxSlots/4)
-		for i := range distribution {
-			u := g.rng.Float64()
-			slots := -math.Log(1-u) / lambda
-			slots = math.Max(float64(g.config.MinSlots), math.Min(slots, float64(g.config.MaxSlots)))
-			distribution[i] = int(slots)
-		}
-
-	case Uniform:
-		// Uniform distribution
-		for i := range distribution {
-			distribution[i] = g.config.MinSlots + g.rng.Intn(g.config.MaxSlots-g.config.MinSlots+1)
-		}
-	}
-
-	return distribution
+	return entitygen.GenerateSlotDistribution(g.rng, g.config.Distribution, g.config.MinSlots, g.config.MaxSlots, g.config.NumContracts)
 }
 
-// generateSlotCount generates the slot count for a single contract using
-// the configured distribution. Called from the producer goroutine (which
-// owns the RNG). Each call consumes exactly 1 RNG call, so the sequence
-// is identical to generateSlotDistribution for the same seed.
+// generateSlotCount returns one slot count using the same per-contract RNG
+// draws as generateSlotDistribution. Used by the bintrie producer goroutine
+// which generates contracts one at a time. Wrapper around
+// entitygen.GenerateSlotCount.
 func (g *Generator) generateSlotCount() int {
-	switch g.config.Distribution {
-	case PowerLaw:
-		alpha := 1.5
-		u := g.rng.Float64()
-		slots := float64(g.config.MinSlots) / math.Pow(1-u, 1/alpha)
-		if slots > float64(g.config.MaxSlots) {
-			slots = float64(g.config.MaxSlots)
-		}
-		return int(slots)
-	case Exponential:
-		lambda := math.Log(2) / float64(g.config.MaxSlots/4)
-		u := g.rng.Float64()
-		slots := -math.Log(1-u) / lambda
-		slots = math.Max(float64(g.config.MinSlots), math.Min(slots, float64(g.config.MaxSlots)))
-		return int(slots)
-	case Uniform:
-		return g.config.MinSlots + g.rng.Intn(g.config.MaxSlots-g.config.MinSlots+1)
-	default:
-		return g.config.MinSlots
-	}
+	return entitygen.GenerateSlotCount(g.rng, g.config.Distribution, g.config.MinSlots, g.config.MaxSlots)
 }
 
 // dirSize returns the total size of all files in a directory tree.

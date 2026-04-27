@@ -1,11 +1,12 @@
 package generator
 
 import (
-	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+
+	"github.com/nerolation/state-actor/internal/entitygen"
 )
 
 // TrieMode represents the trie algorithm used for state root computation.
@@ -20,32 +21,23 @@ const (
 	TrieModeBinary TrieMode = "binary"
 )
 
-// Distribution represents the storage slot distribution strategy.
-type Distribution int
+// Distribution selects how storage-slot counts vary across contracts.
+// Re-exported from internal/entitygen so existing callers (CLI, tests)
+// continue to work unchanged.
+type Distribution = entitygen.Distribution
 
 const (
 	// PowerLaw distribution - most contracts have few slots, few have many.
-	// This matches real Ethereum state where a few contracts (like Uniswap)
-	// have millions of slots while most have very few.
-	PowerLaw Distribution = iota
-
+	PowerLaw = entitygen.PowerLaw
 	// Uniform distribution - all contracts have similar slot counts.
-	Uniform
-
+	Uniform = entitygen.Uniform
 	// Exponential distribution - exponential decay in slot counts.
-	Exponential
+	Exponential = entitygen.Exponential
 )
 
 // ParseDistribution parses a distribution string.
 func ParseDistribution(s string) Distribution {
-	switch strings.ToLower(s) {
-	case "uniform":
-		return Uniform
-	case "exponential":
-		return Exponential
-	default:
-		return PowerLaw
-	}
+	return entitygen.ParseDistribution(s)
 }
 
 // Config holds the configuration for state generation.
