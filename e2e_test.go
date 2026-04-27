@@ -10,6 +10,8 @@ import (
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb/pebble"
+
+	"github.com/nerolation/state-actor/client/geth"
 	"github.com/nerolation/state-actor/generator"
 	"github.com/nerolation/state-actor/genesis"
 )
@@ -116,7 +118,7 @@ func TestEndToEndWithGenesis(t *testing.T) {
 
 	// Write genesis block
 	ancientDir := filepath.Join(config.DBPath, "ancient")
-	block, err := genesis.WriteGenesisBlock(stateGen.DB(), gen, stats.StateRoot, false, ancientDir)
+	block, err := geth.WriteGenesisBlock(stateGen.DB(), gen, stats.StateRoot, false, ancientDir)
 	if err != nil {
 		stateGen.Close()
 		t.Fatalf("Failed to write genesis block: %v", err)
@@ -298,7 +300,7 @@ func TestEndToEndWithGenesisBinaryTrie(t *testing.T) {
 
 	// Write genesis block with binary trie enabled
 	ancientDir2 := filepath.Join(config.DBPath, "ancient")
-	block, err := genesis.WriteGenesisBlock(stateGen.DB(), gen, stats.StateRoot, true, ancientDir2)
+	block, err := geth.WriteGenesisBlock(stateGen.DB(), gen, stats.StateRoot, true, ancientDir2)
 	if err != nil {
 		stateGen.Close()
 		t.Fatalf("Failed to write genesis block: %v", err)
@@ -401,7 +403,7 @@ func TestDatabaseReadableByRawDB(t *testing.T) {
 
 	// Write a genesis block
 	stateRoot := common.HexToHash("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
-	block, err := genesis.WriteGenesisBlock(db, &gen, stateRoot, false, "")
+	block, err := geth.WriteGenesisBlock(db, &gen, stateRoot, false, "")
 	if err != nil {
 		t.Fatalf("Failed to write genesis block: %v", err)
 	}
