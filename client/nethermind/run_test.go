@@ -9,13 +9,13 @@ import (
 	"github.com/nerolation/state-actor/generator"
 )
 
-// TestRun_StubReturnsNotImplemented pins the stage-1 scaffolding behavior:
-// Run returns a clearly-labeled "not yet implemented" error so users who
-// pass --client=nethermind on the current branch see what's missing
-// (rather than a panic, a nil pointer, or silent geth fallback).
+// TestRun_StubReturnsNotImplemented pins the !cgo_neth build behavior:
+// Run returns a clearly-labeled error directing the user at Docker so
+// `--client=nethermind` on a vanilla `go build` doesn't panic, return
+// nil, or silently no-op.
 //
-// When stage 2 lands and Run is wired up, this test gets replaced by the
-// Tier 2 differential-oracle test from B6.
+// Skipped when built with -tags cgo_neth — that path is exercised by
+// B6's Tier 2 differential-oracle test inside the Docker context.
 func TestRun_StubReturnsNotImplemented(t *testing.T) {
 	stats, err := Run(context.Background(), generator.Config{}, Options{})
 	if err == nil {
@@ -27,7 +27,9 @@ func TestRun_StubReturnsNotImplemented(t *testing.T) {
 	if stats != nil {
 		t.Errorf("expected nil stats from stub, got %#v", stats)
 	}
-	if !strings.Contains(err.Error(), "not yet implemented") {
-		t.Errorf("error text should explain status: %q", err.Error())
+	// The user-facing message must point at Docker so users who try
+	// --client=nethermind locally see the path forward.
+	if !strings.Contains(err.Error(), "Docker") {
+		t.Errorf("error text should mention Docker: %q", err.Error())
 	}
 }

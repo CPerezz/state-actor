@@ -11,14 +11,24 @@
 // WasProcessed=true / empty receipts at row 0). Booting nethermind
 // against the produced datadir starts at block 0 ready — no init phase.
 //
-// # Status — PR#3 stage 1 (this commit)
+// # Build
 //
-// This package is currently a SCAFFOLDING-ONLY skeleton: Run returns a
-// "not yet implemented" error. The full cgo+grocksdb wiring lands in
-// PR#3 stage 2 once the librocksdb-dev dependency is provisioned in CI
-// and the build-tag gating is finalized. main.go's --client=nethermind
-// dispatch surfaces the placeholder error cleanly so users can see where
-// the path lives without confusion.
+// state-actor's Nethermind path is **Docker-only**. The cgo_neth build
+// tag gates all grocksdb-importing files; vanilla `go build` (the local
+// default) compiles the stub at run_stub.go which returns a clear error
+// directing the user at the Dockerfile.
+//
+//	docker build -f Dockerfile.nethermind -t state-actor-nethermind .
+//	docker run --rm -v $PWD/_artifacts:/data state-actor-nethermind \
+//	  --client=nethermind --db=/data/neth --accounts=1000 --seed=42
+//
+// # Status — PR#3 stage 2 scaffold (this commit)
+//
+// run_cgo.go opens a smoke-test grocksdb instance to confirm the cgo
+// linker resolves librocksdb correctly inside the Docker context, then
+// returns a "wiring-only" error. The full 7-DB pipeline (state, code,
+// blocks, headers, blockNumbers, blockInfos, receipts) lands in the
+// next commit.
 //
 // # Pinned target
 //
