@@ -1,5 +1,6 @@
 .PHONY: all build test clean docker install lint fmt help \
-	docker-nethermind docker-nethermind-test test-nethermind-oracle smoke-nethermind
+	docker-nethermind docker-nethermind-test test-nethermind-oracle \
+	smoke-nethermind smoke-nethermind-spamoor
 
 # Binary name
 BINARY=state-actor
@@ -98,6 +99,36 @@ smoke-nethermind: docker-nethermind
 	  --accounts=$(ACCOUNTS) --contracts=$(CONTRACTS) --seed=$(SEED) \
 	  --genesis=/test/genesis-funded.json --verbose
 	bash $(PWD)/client/nethermind/testdata/validate-big-db.sh $(SA_DB)
+
+## smoke-nethermind-spamoor: Generate a DB, boot Nethermind 1.37.0, then run
+##                           spamoor erc20_bloater for 100 blocks of real workload.
+##   Usage: make smoke-nethermind-spamoor ACCOUNTS=1000 CONTRACTS=100 [SPAMOOR=/abs/path/spamoor]
+##   Pre-req: spamoor binary on PATH (or pass SPAMOOR=/path/to/spamoor).
+##            Build: https://github.com/ethpandaops/spamoor → make
+SPAMOOR ?= spamoor
+smoke-nethermind-spamoor: docker-nethermind
+	rm -rf $(SA_DB) && mkdir -p $(SA_DB)
+	docker run --rm \
+	  -v $(SA_DB):/data \
+	  -v $(PWD)/client/nethermind/testdata:/test:ro \
+	  state-actor-nethermind:latest \
+	  --client=nethermind --db=/data \
+	  --accounts=$(ACCOUNTS) --contracts=$(CONTRACTS) --seed=$(SEED) \
+	  --genesis=/test/genesis-funded.json --verbose
+	docker rm -f neth-smoke-spamoor 2>/dev/null || true
+	docker run --rm -d --name neth-smoke-spamoor \
+	  -v $(PWD)/client/nethermind/testdata:/test:ro \
+	  -v $(SA_DB):/data \
+	  -p 127.0.0.1:8545:8545 \
+	  nethermind/nethermind:1.37.0 \
+	  --config /test/configs/sa-dev-v2.json --log Info
+	@printf 'waiting for Nethermind RPC ' ; \
+	  until curl -s -o /dev/null --connect-timeout 1 -X POST -H 'Content-Type: application/json' \
+	    --data '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' http://127.0.0.1:8545; do \
+	    printf '.' ; sleep 1 ; \
+	  done ; echo ' up'
+	SPAMOOR=$(SPAMOOR) bash $(PWD)/client/nethermind/testdata/spamoor-100-blocks.sh ; \
+	  rc=$$? ; docker stop neth-smoke-spamoor >/dev/null ; exit $$rc
 
 ## tidy: Tidy go modules
 tidy:

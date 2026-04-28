@@ -1,46 +1,84 @@
 # client/nethermind/testdata
 
-Boot/integration test artifacts for `--client=nethermind`. These pair with the
-two-image build (state-actor + Nethermind) to validate that a freshly-emitted
-RocksDB datadir boots cleanly and serves dev-mode txs.
+Boot + integration smoke artifacts for `--client=nethermind`. These pair with the
+two-image build (state-actor + `nethermind/nethermind:1.37.0`) to validate that a
+freshly-emitted RocksDB datadir boots cleanly and sustains real dev-mode workloads.
+
+## Pinned target
+
+**Nethermind `nethermind/nethermind:1.37.0`** (the released image that ships at the
+time of writing). The plan originally pinned upstream/master at SHA `09bd5a2d`,
+but building from that SHA tripped a Roslyn / .NET-SDK version mismatch in
+`Nethermind.Analyzers`; the boot contract Nethermind enforces (`WasProcessed=true`
+gate, key formats, `HeaderStore.GetBlockNumberFromBlockNumberDb` 8-byte length
+check) is stable across versions, so the released image is what the smoke and
+oracle tests run against.
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `sa-dev.json` | Nethermind runner config — points at a `BaseDbPath=/data/db` (legacy layout, before the `db/` subdir was dropped) |
-| `sa-dev-v2.json` | Nethermind runner config — `BaseDbPath=/data` (current layout) |
+| `configs/sa-dev.json` | Nethermind runner config — `BaseDbPath=/data/db` (legacy layout, before the `db/` subdir was dropped) |
+| `configs/sa-dev-v2.json` | Nethermind runner config — `BaseDbPath=/data` (current layout) |
 | `chainspecs/sa-dev.json` | Parity-format chainspec: chainID 1337, NethDev engine, all EIPs through Shanghai active at genesis |
 | `genesis-funded.json` | geth-format `--genesis` for state-actor; pre-funds 3 dev wallets with 1M ETH each so dev mode can sign txs |
 | `send-100-txs.sh` | Sends 100 self-transfers from the first dev wallet, polls `eth_blockNumber` until block 100 |
+| `spamoor-100-blocks.sh` | Runs `spamoor erc20_bloater` against the local RPC and waits until the chain advances 100 blocks (real-traffic load) |
 | `validate-big-db.sh` | Boots Nethermind against a state-actor-produced datadir and runs the full validation: genesis-hash check + state-root match + dev-wallet balance + 100-tx round-trip |
 
-## Reproducing the smoke test
+## Quick reproducer (small DB)
 
 ```bash
-# 1. Build state-actor + chainspec image
-docker build -f Dockerfile.nethermind -t state-actor-nethermind:phaseB-v3 .
+# 1. Build the state-actor + Nethermind image
+make docker-nethermind
 
-# 2. Generate a small dev DB (current layout)
-mkdir /tmp/sa-neth && docker run --rm \
-  -v /tmp/sa-neth:/data \
+# 2. Generate a small dev DB
+make smoke-nethermind ACCOUNTS=1000 CONTRACTS=100
+```
+
+`make smoke-nethermind` runs state-actor, boots `nethermind/nethermind:1.37.0`,
+and runs `validate-big-db.sh` end-to-end.
+
+## Full pipeline (50 GB scale + spamoor `erc20_bloater`)
+
+```bash
+# 1. Build the image (one-time / on source change)
+make docker-nethermind
+
+# 2. Generate ~44 GB datadir (~28 min on Apple Silicon, single core)
+mkdir /tmp/sa-neth-big
+docker run --rm \
+  -v /tmp/sa-neth-big:/data \
   -v $PWD/client/nethermind/testdata:/test:ro \
-  state-actor-nethermind:phaseB-v3 \
-  --client=nethermind --db=/data --accounts=1000 --contracts=100 \
+  state-actor-nethermind:latest \
+  --client=nethermind --db=/data \
+  --accounts=6500000 --contracts=650000 \
+  --distribution=uniform --min-slots=200 --max-slots=400 \
+  --code-size=512 \
   --genesis=/test/genesis-funded.json --seed=42 --verbose
 
-# 3. Boot Nethermind against the produced datadir
-docker run --rm -d \
-  --name neth-smoke \
+# 3. Boot Nethermind against it
+docker run --rm -d --name neth-50g \
   -v $PWD/client/nethermind/testdata:/test:ro \
-  -v /tmp/sa-neth:/data \
+  -v /tmp/sa-neth-big:/data \
   -p 127.0.0.1:8545:8545 \
   nethermind/nethermind:1.37.0 \
-  --config /test/sa-dev-v2.json
+  --config /test/configs/sa-dev-v2.json
 
-# 4. Run the smoke test
-bash client/nethermind/testdata/validate-big-db.sh /tmp/sa-neth
+# 4. Smoke 1 — simple self-transfers
+bash client/nethermind/testdata/send-100-txs.sh
 
-# 5. Cleanup
-docker stop neth-smoke
+# 5. Smoke 2 — real-traffic load via spamoor erc20_bloater
+#    Requires the spamoor binary on PATH (or set SPAMOOR=/abs/path).
+#    Build: git clone https://github.com/ethpandaops/spamoor && cd spamoor && make
+bash client/nethermind/testdata/spamoor-100-blocks.sh
+
+# 6. Cleanup
+docker stop neth-50g
 ```
+
+`spamoor-100-blocks.sh` deploys an ERC20 contract and runs sustained `bloatStorage()`
+calls at ~16.5M gas/tx (50% of the 30M block limit). 100 blocks complete in ~1m45s
+on NethDev's instant-seal cadence; each tx writes ~370 storage slots (balance +
+allowance pairs). The chain head advances cleanly under load — proof the
+state-actor-produced state DB is read/write-functional, not just bootable.
