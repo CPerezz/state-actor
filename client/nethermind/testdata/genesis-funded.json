@@ -1,0 +1,23 @@
+{
+  "config": {
+    "chainId": 1337
+  },
+  "nonce": "0x0",
+  "timestamp": "0x0",
+  "gasLimit": "0x1c9c380",
+  "difficulty": "0x0",
+  "mixHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+  "coinbase": "0x0000000000000000000000000000000000000000",
+  "extraData": "0x",
+  "alloc": {
+    "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0x2b5ad5c4795c026514f8317c7a215e218dccd6cf": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "0x6813eb9362372eef6200f3b1dbc3f819671cba69": {
+      "balance": "0xd3c21bcecceda1000000"
+    }
+  }
+}
