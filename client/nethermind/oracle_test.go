@@ -3,6 +3,8 @@
 package nethermind
 
 import (
+	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -12,7 +14,6 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/holiman/uint256"
 
@@ -63,9 +64,9 @@ func TestDifferentialOracle(t *testing.T) {
 				t.Fatalf("load %s: %v", tc.fixtureFile, err)
 			}
 
-			accounts, codes := paritySpecToStateAccounts(spec)
-			t.Logf("%s: %d allocations → %d state entries (after EIP-161 filter)",
-				tc.name, len(spec.Accounts), len(accounts))
+			accounts, codes, storages := paritySpecToStateAccounts(spec)
+			t.Logf("%s: %d allocations → %d state entries (after EIP-161 filter), %d with storage",
+				tc.name, len(spec.Accounts), len(accounts), len(storages))
 
 			tmpDir := t.TempDir()
 			dbs, err := openNethDBs(tmpDir)
@@ -76,7 +77,7 @@ func TestDifferentialOracle(t *testing.T) {
 
 			stateRoot := common.Hash(neth.EmptyTreeHash)
 			if len(accounts) > 0 {
-				stateRoot, err = writeGenesisAllocAccounts(dbs, accounts, codes)
+				stateRoot, err = writeGenesisAllocAccounts(dbs, accounts, codes, storages)
 				if err != nil {
 					t.Fatalf("write genesis alloc: %v", err)
 				}
@@ -97,43 +98,49 @@ func TestDifferentialOracle(t *testing.T) {
 }
 
 // parityChainspec is a minimal Parity-format chainspec — only the fields
-// that affect the genesis block hash. Engine details and post-genesis
-// transition tables are deliberately omitted; they don't influence the
-// genesis we compute.
+// that affect the genesis block hash. Hex fields are parsed manually
+// because the Parity emitter writes leading zeros (e.g. "0x0a10000000"),
+// which go-ethereum's hexutil rejects for the Uint64 type.
 type parityChainspec struct {
 	Genesis struct {
-		Difficulty hexutil.Big    `json:"difficulty"`
-		Author     common.Address `json:"author"`
-		Timestamp  hexutil.Uint64 `json:"timestamp"`
-		ParentHash common.Hash    `json:"parentHash"`
-		ExtraData  hexutil.Bytes  `json:"extraData"`
-		GasLimit   hexutil.Uint64 `json:"gasLimit"`
+		Difficulty string `json:"difficulty"`
+		Author     string `json:"author"`
+		Timestamp  string `json:"timestamp"`
+		ParentHash string `json:"parentHash"`
+		ExtraData  string `json:"extraData"`
+		GasLimit   string `json:"gasLimit"`
 		Seal       struct {
 			Ethereum struct {
-				Nonce   hexutil.Bytes `json:"nonce"`
-				MixHash common.Hash   `json:"mixHash"`
+				Nonce   string `json:"nonce"`
+				MixHash string `json:"mixHash"`
 			} `json:"ethereum"`
 		} `json:"seal"`
 	} `json:"genesis"`
 	Params struct {
-		ChainID hexutil.Big `json:"chainID"`
+		ChainID string `json:"chainID"`
 	} `json:"params"`
 	Accounts map[string]parityAccount `json:"accounts"`
 }
 
 type parityAccount struct {
-	Balance *hexutil.Big      `json:"balance"`
-	Nonce   *hexutil.Uint64   `json:"nonce"`
-	Code    hexutil.Bytes     `json:"code"`
+	Balance string            `json:"balance"`
+	Nonce   string            `json:"nonce"`
+	Code    string            `json:"code"`
 	Storage map[string]string `json:"storage"`
 	Builtin *json.RawMessage  `json:"builtin"`
 }
+
+// utf8BOM is the byte sequence some editors prepend to JSON files.
+// Nethermind's hive_zero_balance_test.json carries one; encoding/json
+// rejects it as `invalid character 'ï' looking for beginning of value`.
+var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
 
 func loadParityChainspec(path string) (*parityChainspec, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
+	data = bytes.TrimPrefix(data, utf8BOM)
 	var spec parityChainspec
 	if err := json.Unmarshal(data, &spec); err != nil {
 		return nil, fmt.Errorf("unmarshal %s: %w", path, err)
@@ -141,42 +148,105 @@ func loadParityChainspec(path string) (*parityChainspec, error) {
 	return &spec, nil
 }
 
+// parseHexU64 parses a "0x..." string into a uint64, tolerating leading
+// zero digits (which go-ethereum's hexutil.Uint64 rejects).
+func parseHexU64(s string) (uint64, error) {
+	if s == "" {
+		return 0, nil
+	}
+	s = strings.TrimPrefix(strings.TrimPrefix(s, "0x"), "0X")
+	if s == "" {
+		return 0, nil
+	}
+	v := new(big.Int)
+	if _, ok := v.SetString(s, 16); !ok {
+		return 0, fmt.Errorf("not hex: %q", s)
+	}
+	if !v.IsUint64() {
+		return 0, fmt.Errorf("hex value overflows uint64: %q", s)
+	}
+	return v.Uint64(), nil
+}
+
+// parseHexBig parses a "0x..." string into a big.Int, tolerating leading
+// zeros and the empty string (returns 0).
+func parseHexBig(s string) *big.Int {
+	v := new(big.Int)
+	if s == "" {
+		return v
+	}
+	s = strings.TrimPrefix(strings.TrimPrefix(s, "0x"), "0X")
+	if s == "" {
+		return v
+	}
+	v.SetString(s, 16)
+	return v
+}
+
+// parseHexBytes parses a "0x..."-prefixed hex string into bytes. Returns
+// nil for the empty string or "0x".
+func parseHexBytes(s string) []byte {
+	if s == "" {
+		return nil
+	}
+	s = strings.TrimPrefix(strings.TrimPrefix(s, "0x"), "0X")
+	if s == "" {
+		return nil
+	}
+	if len(s)%2 == 1 {
+		s = "0" + s
+	}
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
 // paritySpecToStateAccounts converts Parity allocations into the
-// (StateAccount, code) pair writeGenesisAllocAccounts expects. Empty
-// accounts (EIP-161-empty: zero balance, zero nonce, no code, no storage)
-// and `builtin`-only entries (precompile gas-pricing pseudoaccounts) are
-// dropped — Nethermind's GenesisBuilder skips them at genesis time and
-// the state root we compute has to match.
+// (StateAccount, code, storage) triple writeGenesisAllocAccounts expects.
+// Empty accounts (EIP-161-empty: zero balance, zero nonce, no code, no
+// storage) and `builtin`-only entries (precompile gas-pricing
+// pseudoaccounts) are dropped — Nethermind's GenesisBuilder skips them at
+// genesis time and the state root we compute has to match.
 func paritySpecToStateAccounts(spec *parityChainspec) (
 	map[common.Address]*types.StateAccount,
 	map[common.Address][]byte,
+	map[common.Address]map[common.Hash]common.Hash,
 ) {
 	accounts := make(map[common.Address]*types.StateAccount)
 	codes := make(map[common.Address][]byte)
+	storages := make(map[common.Address]map[common.Hash]common.Hash)
 
 	for addrStr, acc := range spec.Accounts {
-		// Builtin-only entries (precompiles) carry no state.
+		balance := parseHexBig(acc.Balance)
+		nonce, _ := parseHexU64(acc.Nonce)
+		code := parseHexBytes(acc.Code)
+
+		// Nethermind's GenesisBuilder treats `balance` PRESENCE as the
+		// keep/drop signal, not its value: `hive_zero_balance_test.json`
+		// includes a `0x...03` precompile with `"balance": "0x0"` and the
+		// expected golden hash has it persisted in state. So drop only
+		// when balance is ABSENT (the hexutil zero-value here is "").
+		hasExplicitBalance := acc.Balance != ""
+
+		// Builtin pseudoaccounts without any state field at all (no
+		// balance, nonce, code, or storage) are gas-pricing entries only.
 		isBuiltinOnly := acc.Builtin != nil &&
-			(acc.Balance == nil || (*big.Int)(acc.Balance).Sign() == 0) &&
-			(acc.Nonce == nil || *acc.Nonce == 0) &&
-			len(acc.Code) == 0 &&
+			!hasExplicitBalance &&
+			nonce == 0 &&
+			len(code) == 0 &&
 			len(acc.Storage) == 0
 		if isBuiltinOnly {
 			continue
 		}
 
-		// EIP-161 empty: balance=0, nonce=0, code=0x, storage={}.
-		balance := new(big.Int)
-		if acc.Balance != nil {
-			balance = (*big.Int)(acc.Balance)
-		}
-		nonce := uint64(0)
-		if acc.Nonce != nil {
-			nonce = uint64(*acc.Nonce)
-		}
-		isEmpty := balance.Sign() == 0 &&
+		// EIP-161 empty: balance=0 AND not explicit, nonce=0, code=0x,
+		// storage={}. Explicit balance keeps the account regardless of value.
+		isEmpty := !hasExplicitBalance &&
+			balance.Sign() == 0 &&
 			nonce == 0 &&
-			len(acc.Code) == 0 &&
+			len(code) == 0 &&
 			len(acc.Storage) == 0
 		if isEmpty {
 			continue
@@ -190,22 +260,27 @@ func paritySpecToStateAccounts(spec *parityChainspec) (
 			Root:     types.EmptyRootHash,
 			CodeHash: types.EmptyCodeHash[:],
 		}
-		if len(acc.Code) > 0 {
-			codes[addr] = []byte(acc.Code)
+		if len(code) > 0 {
+			codes[addr] = code
 		}
-		// NOTE: storage entries on the parity account aren't written into
-		// the per-account storage trie here — writeGenesisAllocAccounts'
-		// code path is account-only. The three CCD-cited fixtures include
-		// only a single account with one storage slot
-		// (empty_accounts_and_storages.json's 0x6295...), so this
-		// limitation is what blocks the full match for that fixture; the
-		// other two pass against the empty-storage baseline.
-		// TODO(B6 follow-up): wire genesis-alloc storage into
-		// writeGenesisAllocAccounts.
+		if len(acc.Storage) > 0 {
+			normalized := make(map[common.Hash]common.Hash, len(acc.Storage))
+			for k, v := range acc.Storage {
+				kh := common.HexToHash(k)
+				vh := common.HexToHash(v)
+				if vh == (common.Hash{}) {
+					continue // zero slot = deletion, skip
+				}
+				normalized[kh] = vh
+			}
+			if len(normalized) > 0 {
+				storages[addr] = normalized
+			}
+		}
 		accounts[addr] = sa
 	}
 
-	return accounts, codes
+	return accounts, codes, storages
 }
 
 // buildHeaderFromParitySpec builds a go-ethereum types.Header whose RLP
@@ -236,35 +311,37 @@ func paritySpecToStateAccounts(spec *parityChainspec) (
 // uses `Berlin.Instance` as ISpecProvider), so no `baseFeePerGas` or
 // `withdrawalsRoot` are emitted in the genesis header.
 func buildHeaderFromParitySpec(spec *parityChainspec, stateRoot common.Hash) (*types.Header, error) {
-	var nonce types.BlockNonce
-	if len(spec.Genesis.Seal.Ethereum.Nonce) > 0 {
-		nb := []byte(spec.Genesis.Seal.Ethereum.Nonce)
-		if len(nb) > 8 {
-			return nil, fmt.Errorf("nonce too long: %d bytes", len(nb))
-		}
-		copy(nonce[8-len(nb):], nb)
+	gasLimit, err := parseHexU64(spec.Genesis.GasLimit)
+	if err != nil {
+		return nil, fmt.Errorf("gasLimit: %w", err)
+	}
+	timestamp, err := parseHexU64(spec.Genesis.Timestamp)
+	if err != nil {
+		return nil, fmt.Errorf("timestamp: %w", err)
 	}
 
-	difficulty := new(big.Int)
-	if d := (*big.Int)(&spec.Genesis.Difficulty); d != nil {
-		difficulty = new(big.Int).Set(d)
+	var nonce types.BlockNonce
+	nb := parseHexBytes(spec.Genesis.Seal.Ethereum.Nonce)
+	if len(nb) > 8 {
+		return nil, fmt.Errorf("nonce too long: %d bytes", len(nb))
 	}
+	copy(nonce[8-len(nb):], nb)
 
 	return &types.Header{
-		ParentHash:  spec.Genesis.ParentHash,
+		ParentHash:  common.HexToHash(spec.Genesis.ParentHash),
 		UncleHash:   types.EmptyUncleHash,
-		Coinbase:    spec.Genesis.Author,
+		Coinbase:    common.HexToAddress(spec.Genesis.Author),
 		Root:        stateRoot,
 		TxHash:      types.EmptyTxsHash,
 		ReceiptHash: types.EmptyReceiptsHash,
 		Bloom:       types.Bloom{},
-		Difficulty:  difficulty,
+		Difficulty:  parseHexBig(spec.Genesis.Difficulty),
 		Number:      new(big.Int),
-		GasLimit:    uint64(spec.Genesis.GasLimit),
+		GasLimit:    gasLimit,
 		GasUsed:     0,
-		Time:        uint64(spec.Genesis.Timestamp),
-		Extra:       []byte(spec.Genesis.ExtraData),
-		MixDigest:   spec.Genesis.Seal.Ethereum.MixHash,
+		Time:        timestamp,
+		Extra:       parseHexBytes(spec.Genesis.ExtraData),
+		MixDigest:   common.HexToHash(spec.Genesis.Seal.Ethereum.MixHash),
 		Nonce:       nonce,
 	}, nil
 }

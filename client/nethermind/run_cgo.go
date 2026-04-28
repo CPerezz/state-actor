@@ -103,9 +103,11 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 	stateRoot := common.Hash(neth.EmptyTreeHash)
 	var allocAccounts map[common.Address]*types.StateAccount
 	var allocCodes map[common.Address][]byte
+	var allocStorages map[common.Address]map[common.Hash]common.Hash
 	if loadedGenesis != nil && len(loadedGenesis.Alloc) > 0 {
 		allocAccounts = loadedGenesis.ToStateAccounts()
 		allocCodes = loadedGenesis.GetAllocCode()
+		allocStorages = loadedGenesis.GetAllocStorage()
 	}
 	switch {
 	case cfg.NumAccounts > 0 || cfg.NumContracts > 0:
@@ -114,7 +116,7 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 			return nil, fmt.Errorf("write synthetic accounts: %w", err)
 		}
 	case len(allocAccounts) > 0:
-		stateRoot, err = writeGenesisAllocAccounts(dbs, allocAccounts, allocCodes)
+		stateRoot, err = writeGenesisAllocAccounts(dbs, allocAccounts, allocCodes, allocStorages)
 		if err != nil {
 			return nil, fmt.Errorf("write genesis alloc: %w", err)
 		}
