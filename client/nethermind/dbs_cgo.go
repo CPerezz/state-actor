@@ -51,13 +51,19 @@ type nethDBs struct {
 	openedOpts []*grocksdb.Options
 }
 
-// openNethDBs opens (or creates) the 7 RocksDB instances under
-// <dataDir>/db/<name>/. dataDir typically comes from the user's --db flag.
+// openNethDBs opens (or creates) the 7 RocksDB instances directly under
+// dataDir/<name>/. dataDir typically comes from the user's --db flag, and
+// matches Nethermind's `BaseDbPath` convention 1:1 — point Nethermind at
+// the same path state-actor wrote to and it finds the DBs immediately, no
+// subdir gymnastics. (Earlier revisions used a `db/` subdir to mirror
+// geth's `geth/chaindata/` convention; that produced silent boot failures
+// because Nethermind opened freshly-created empty DBs at dataDir/<name>/
+// and ignored the populated ones at dataDir/db/<name>/.)
 //
 // On any error, partially-opened DBs are closed before returning so
 // callers don't have to handle a half-initialized struct.
 func openNethDBs(dataDir string) (*nethDBs, error) {
-	dbRoot := filepath.Join(dataDir, "db")
+	dbRoot := dataDir
 
 	// grocksdb's CreateIfMissing only creates the leaf directory, not its
 	// parents. Pre-create the per-DB subdirs so the open call succeeds on

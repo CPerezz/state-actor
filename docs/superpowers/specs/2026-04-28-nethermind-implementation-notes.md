@@ -54,7 +54,7 @@ Nethermind's convention: data dir = `<base>/<dbName>/`, no intermediate. So if s
 
 Symptom: Nethermind opens an empty DB at `<base>/blockInfos/` (which it auto-creates), sees `last_sequence=0`, falls back to chainspec genesis. No error message — your DB is just bypassed.
 
-Workaround in the integration test config: `BaseDbPath = /data/db` (with state-actor mounted at `/data`). A future cleanup could drop the `db/` subdir from state-actor's Nethermind writer for cleaner UX.
+**Fixed:** state-actor's Nethermind writer now drops the `db/` subdir, so `--db=<path>` and Nethermind's `BaseDbPath=<path>` line up 1:1. The smoke-test config is updated accordingly.
 
 ### 3. `stateDBSink.SetStorageNode` is required — not a stub
 
@@ -138,5 +138,4 @@ Memory: `O(max_slots_per_contract)`. Total entity count is bounded only by the t
 ## Known gaps (not blocking PR#3)
 
 - **B6 differential oracle** — the 3 CCD-cited golden hashes from `Nethermind.Blockchain.Test.GenesisBuilderTests` (`empty_accounts_and_storages`, `empty_accounts_and_codes`, `hive_zero_balance_test`). Vendored as Parity-format JSON in `internal/neth/testdata/`; running them needs either a Parity chainspec parser or hand-converted geth-format equivalents. Tracked as the last open task; not on the critical path.
-- **`BaseDbPath` UX** — state-actor still writes to `<dbPath>/db/<dbName>/` while Nethermind expects DBs directly under `BaseDbPath`. Workaround: callers point Nethermind at `<dbPath>/db`. Cleanup is one-line.
 - **Streaming snapshot writes** — the geth path uses an async snapshot-writer goroutine; the Nethermind path is single-goroutine. At 5M+500K scale we observe 30% single-core utilization, so there's headroom to parallelize when needed.
