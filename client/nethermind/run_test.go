@@ -1,3 +1,5 @@
+//go:build !cgo_neth
+
 package nethermind
 
 import (

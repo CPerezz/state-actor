@@ -448,8 +448,17 @@ func main() {
 	fmt.Printf("Total Time:        %v\n", elapsed.Round(time.Millisecond))
 	fmt.Printf("Accounts Created:  %d\n", stats.AccountsCreated)
 	fmt.Printf("Contracts Created: %d\n", stats.ContractsCreated)
-	fmt.Printf("Storage Slots:     %d\n", stats.StorageSlotsCreated)
-	fmt.Printf("Total Bytes:       %s\n", formatBytes(stats.TotalBytes))
+	// StorageSlotsCreated / TotalBytes / Throughput are populated by the
+	// geth path; the nethermind path doesn't track them yet (writer
+	// streams through grocksdb without accumulating per-slot counters).
+	// Hide the rows when there's nothing to show rather than printing
+	// misleading zeros.
+	if stats.StorageSlotsCreated > 0 {
+		fmt.Printf("Storage Slots:     %d\n", stats.StorageSlotsCreated)
+	}
+	if stats.TotalBytes > 0 {
+		fmt.Printf("Total Bytes:       %s\n", formatBytes(stats.TotalBytes))
+	}
 	if stats.TrieNodeBytes > 0 {
 		fmt.Printf("Trie Node Bytes:   %s\n", formatBytes(stats.TrieNodeBytes))
 	}
@@ -460,7 +469,9 @@ func main() {
 	if dbSize, err := dirSize(config.DBPath); err == nil {
 		fmt.Printf("Total DB Size:     %s\n", formatBytes(dbSize))
 	}
-	fmt.Printf("Throughput:        %.2f slots/sec\n", float64(stats.StorageSlotsCreated)/elapsed.Seconds())
+	if stats.StorageSlotsCreated > 0 {
+		fmt.Printf("Throughput:        %.2f slots/sec\n", float64(stats.StorageSlotsCreated)/elapsed.Seconds())
+	}
 	if stats.DeepBranchAccounts > 0 {
 		fmt.Printf("Deep Branch:       %d accounts, depth %d nibbles, %d known slots each\n",
 			stats.DeepBranchAccounts, stats.DeepBranchDepth, *deepBranchKnownSlots)

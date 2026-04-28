@@ -267,10 +267,23 @@ import "github.com/nerolation/state-actor/client/geth"
 gen, err := generator.NewWithWriter(cfg, geth.NewWriterFactory())
 ```
 
-Today the only client adapter is `client/geth/`. Future adapters
-(`client/nethermind/`, `client/reth/`) follow the same shape: a `Writer`
-implementing `generator.Writer`, plus a `NewWriterFactory()` and an init()
-registration.
+Today's client adapters: `client/geth/` (the original, geth-format Pebble)
+and `client/nethermind/` (cgo+grocksdb, direct RocksDB write — see
+`docs/superpowers/specs/2026-04-28-nethermind-implementation-notes.md`).
+A `client/reth/` adapter exists on a parallel branch and follows the same
+shape: a `Writer` implementing `generator.Writer`, plus a `NewWriterFactory()`
+and an init() registration.
+
+The Nethermind adapter takes a different route from the geth/reth ones:
+instead of writing a chainspec for the client to consume, it writes the
+seven RocksDB instances Nethermind reads on boot directly (state, code,
+blocks, headers, blockNumbers, blockInfos, receipts). This bypasses
+Nethermind's `LoadGenesisBlock` step (which would deserialize every alloc
+account into a `Dictionary<Address, ChainSpecAllocation>` — fine at small
+scale, OOMs at multi-million-account scale per upstream issue #7361). The
+boot gate is `BlockInfos[0].WasProcessed=true`. Behind the `cgo_neth`
+build tag; default `go build` produces a stub that points users at
+`docker build -f Dockerfile.nethermind .`.
 
 ## File Structure
 
