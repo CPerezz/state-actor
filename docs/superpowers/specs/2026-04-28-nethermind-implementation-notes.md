@@ -5,6 +5,15 @@
 **Status:** Implemented — ready for review
 **Companion to:** [`2026-04-24-nethermind-client-design.md`](./2026-04-24-nethermind-client-design.md) — superseded by direct-write decision below.
 
+**Validated against:** `nethermind/nethermind:1.37.0` (Docker Hub release). The
+plan originally pinned upstream/master at SHA `09bd5a2d`, but building from
+that SHA tripped a `Microsoft.CodeAnalysis.CSharp 5.3.0` analyzer / running
+compiler 5.0.0 mismatch in `Nethermind.Analyzers`. The boot contract
+state-actor depends on (`WasProcessed=true` gate, key formats,
+`HeaderStore.GetBlockNumberFromBlockNumberDb` 8-byte length check) is
+stable across the released line, so smoke + oracle tests run against the
+released image.
+
 ---
 
 ## TL;DR
@@ -131,7 +140,7 @@ Memory: `O(max_slots_per_contract)`. Total entity count is bounded only by the t
 - 100 EOAs + 10 contracts: state root deterministic across re-runs (same `--seed`).
 - 100K EOAs + 10K contracts: state root reported by state-actor byte-equals what Nethermind reports for `eth_getBlockByNumber("0x0").stateRoot`.
 - 1M EOAs + 100K contracts (max-slots=2048, power-law): 67s generation, 835 MB datadir.
-- 50 GB stress test: in progress at time of writing — projected ~2 hours at observed 7-8 MB/s sustained throughput.
+- **6.5M EOAs + 650K contracts (uniform 200–400 storage slots, code-size=512): ~28 min generation, 44 GB datadir.** Booted on `nethermind/nethermind:1.37.0`, ran `spamoor erc20_bloater` for 100 blocks of sustained ERC20 deploy + balance/allowance SSTORE traffic at ~16.5M gas/tx (50% of 30M block limit). Chain mined 100 blocks in ~1m45s under load with no failed txs.
 
 ---
 
