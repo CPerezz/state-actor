@@ -34,7 +34,7 @@ import (
 // Phase A pipeline:
 //  1. Resolve genesis fields (chain ID, gasLimit, extraData, timestamp)
 //     from cfg.* / --genesis path.
-//  2. Open 7 grocksdb instances under cfg.DBPath/db/.
+//  2. Open 7 grocksdb instances directly under cfg.DBPath/.
 //  3. Build the empty-alloc genesis header (state root = EmptyTreeHash).
 //  4. Write the genesis row across blocks/, headers/, blockNumbers/,
 //     blockInfos/ (with WasProcessed=true), receipts/Blocks CF.
@@ -131,7 +131,7 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 	if cfg.Verbose {
 		log.Printf("nethermind: genesis hash = %s", hash.Hex())
 		log.Printf("nethermind: state root  = %s", header.Root.Hex())
-		log.Printf("nethermind: 7 RocksDBs written under %s/db/", cfg.DBPath)
+		log.Printf("nethermind: 7 RocksDBs written under %s/", cfg.DBPath)
 		if loadedGenesis != nil && len(loadedGenesis.Alloc) > 0 {
 			log.Printf("nethermind: preallocated %d accounts from --genesis", len(loadedGenesis.Alloc))
 		}

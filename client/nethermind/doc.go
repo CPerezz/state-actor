@@ -3,7 +3,7 @@
 //
 // # Approach
 //
-// Run() opens the RocksDB instances under <datadir>/db/ that Nethermind
+// Run() opens the RocksDB instances directly under <datadir>/ that Nethermind
 // expects (state, code, blocks, headers, blockNumbers, blockInfos,
 // receipts), drives entitygen.Source → internal/neth/trie.Builder to
 // produce HalfPath-keyed state-trie nodes, then assembles the genesis
