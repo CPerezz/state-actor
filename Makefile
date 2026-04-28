@@ -1,4 +1,5 @@
-.PHONY: all build test clean docker install lint fmt help
+.PHONY: all build test clean docker install lint fmt help \
+	docker-nethermind docker-nethermind-test test-nethermind-oracle smoke-nethermind
 
 # Binary name
 BINARY=state-actor
@@ -67,6 +68,36 @@ clean:
 docker:
 	docker build -t state-actor:latest .
 	docker build -t state-actor:$(VERSION) .
+
+## docker-nethermind: Build the Nethermind-capable image (cgo+grocksdb+rocksdb-from-source)
+docker-nethermind:
+	docker build -f Dockerfile.nethermind -t state-actor-nethermind:latest -t state-actor-nethermind:$(VERSION) .
+
+## docker-nethermind-test: Build the builder stage so we can run cgo_neth go tests inside it
+docker-nethermind-test:
+	docker build -f Dockerfile.nethermind --target builder -t state-actor-nethermind-builder:latest .
+
+## test-nethermind-oracle: Run the Tier 2 differential oracle (3 CCD-cited golden hashes)
+test-nethermind-oracle: docker-nethermind-test
+	docker run --rm --entrypoint bash state-actor-nethermind-builder:latest \
+	  -c 'cd /app && go test -tags cgo_neth -run TestDifferentialOracle -v ./client/nethermind/...'
+
+## smoke-nethermind: End-to-end smoke — generate a small DB, boot Nethermind 1.37.0, send 100 dev-mode txs
+##   Usage: make smoke-nethermind ACCOUNTS=1000 CONTRACTS=100
+ACCOUNTS ?= 1000
+CONTRACTS ?= 100
+SEED ?= 42
+SA_DB ?= /tmp/sa-neth-smoke
+smoke-nethermind: docker-nethermind
+	rm -rf $(SA_DB) && mkdir -p $(SA_DB)
+	docker run --rm \
+	  -v $(SA_DB):/data \
+	  -v $(PWD)/client/nethermind/testdata:/test:ro \
+	  state-actor-nethermind:latest \
+	  --client=nethermind --db=/data \
+	  --accounts=$(ACCOUNTS) --contracts=$(CONTRACTS) --seed=$(SEED) \
+	  --genesis=/test/genesis-funded.json --verbose
+	bash $(PWD)/client/nethermind/testdata/validate-big-db.sh $(SA_DB)
 
 ## tidy: Tidy go modules
 tidy:
