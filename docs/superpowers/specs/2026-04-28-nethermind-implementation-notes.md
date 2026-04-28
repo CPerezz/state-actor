@@ -135,7 +135,25 @@ Memory: `O(max_slots_per_contract)`. Total entity count is bounded only by the t
 
 ---
 
+## Differential oracle (B6) — passes
+
+`client/nethermind/oracle_test.go` (gated by `//go:build cgo_neth`) runs the full state-actor pipeline against the three CCD-cited Parity chainspec fixtures from `Nethermind.Blockchain.Test.GenesisBuilderTests` and asserts the resulting genesis hash matches Nethermind's own golden values byte-for-byte:
+
+| Fixture | Golden hash | Result |
+|---|---|---|
+| `empty_accounts_and_storages.json` | `0x61b2253366eab37849d21ac066b96c9de133b8c58a9a38652deae1dd7ec22e7b` | ✅ |
+| `empty_accounts_and_codes.json` | `0xfa3da895e1c2a4d2673f60dd885b867d60fb6d823abaf1e5276a899d7e2feca5` | ✅ |
+| `hive_zero_balance_test.json` | `0x62839401df8970ec70785f62e9e9d559b256a9a10b343baf6c064747b094de09` | ✅ |
+
+Run via the builder Docker image: `docker build -f Dockerfile.nethermind --target builder -t sab .` then `docker run --rm --entrypoint bash sab -c 'cd /app && go test -tags cgo_neth -run TestDifferentialOracle -v ./client/nethermind/...'`.
+
+### Subtle bits the oracle surfaced
+
+- `hive_zero_balance_test.json` ships with a UTF-8 BOM (saved by an editor that adds one). The loader strips `EF BB BF` before `encoding/json` sees the input.
+- `empty_accounts_and_codes.json`'s `gasLimit` is `0x0bebc200` — leading-zero hex digits trip go-ethereum's `hexutil.Uint64`. The oracle's parser uses `big.Int.SetString` which accepts them.
+- Nethermind keeps an alloc account when the chainspec specifies a `balance` field at all, even if it's `0x0` (the `precompile that has zero balance` test name was the cue). The EIP-161 emptiness filter checks balance **presence**, not its value.
+
 ## Known gaps (not blocking PR#3)
 
-- **B6 differential oracle** — the 3 CCD-cited golden hashes from `Nethermind.Blockchain.Test.GenesisBuilderTests` (`empty_accounts_and_storages`, `empty_accounts_and_codes`, `hive_zero_balance_test`). Vendored as Parity-format JSON in `internal/neth/testdata/`; running them needs either a Parity chainspec parser or hand-converted geth-format equivalents. Tracked as the last open task; not on the critical path.
-- **Streaming snapshot writes** — the geth path uses an async snapshot-writer goroutine; the Nethermind path is single-goroutine. At 5M+500K scale we observe 30% single-core utilization, so there's headroom to parallelize when needed.
+- **Streaming snapshot writes** — the geth path uses an async snapshot-writer goroutine; the Nethermind path is single-goroutine. At 5M+500K scale CPU sits around 30-71% on one core, so there's headroom to parallelize when needed.
+- **WriteBatch flush threshold (16 MiB)** is a starting point. Worth re-tuning by benchmarking on hosts with different fsync latencies.
