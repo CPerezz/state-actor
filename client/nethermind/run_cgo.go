@@ -22,6 +22,7 @@ import (
 	"log"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/nerolation/state-actor/generator"
 	"github.com/nerolation/state-actor/genesis"
@@ -50,16 +51,9 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 		return nil, errors.New("--db is required for --client=nethermind")
 	}
 
-	// Phase A/B mix: synthetic accounts (--accounts=N) still belong to
-	// future Phase B work that wires entitygen.Source through trie.Builder.
-	// Genesis-alloc accounts (--genesis path with non-empty alloc) are
-	// supported now via writeGenesisAllocAccounts below.
-	if cfg.NumAccounts > 0 || cfg.NumContracts > 0 || cfg.DeepBranch.Enabled() {
-		return nil, errors.New(
-			"--client=nethermind: synthetic accounts (--accounts=N) require " +
-				"entitygen.Source integration — coming in the next commit. " +
-				"Use --genesis with an alloc section to fund accounts today.",
-		)
+	// Deep-branch mode is binary-trie-only and not supported on Nethermind.
+	if cfg.DeepBranch.Enabled() {
+		return nil, errors.New("--client=nethermind: --deep-branch-* flags are MPT-incompatible")
 	}
 
 	// Pull genesis fields. If the caller passed --genesis, use those values;
@@ -98,14 +92,29 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 	}
 	defer dbs.Close()
 
-	// Genesis-alloc preallocation: write each account's leaf into the
-	// state trie and update the header's stateRoot. Accounts come from
-	// --genesis JSON; cfg.GenesisAccounts (the legacy flag) merges in too.
+	// State-trie population: dispatch by what the caller asked for.
+	//   - synthetic --accounts=N or --contracts=N → writeSyntheticAccounts
+	//     (entitygen → temp Pebble → addrHash-sorted state trie). It also
+	//     folds in genesis-alloc accounts so the same sort produces a
+	//     unified root.
+	//   - genesis-alloc only (no synthetic) → writeGenesisAllocAccounts (a
+	//     simpler in-memory path without the temp Pebble round-trip).
+	//   - empty alloc → state stays empty; root = EmptyTreeHash.
 	stateRoot := common.Hash(neth.EmptyTreeHash)
+	var allocAccounts map[common.Address]*types.StateAccount
+	var allocCodes map[common.Address][]byte
 	if loadedGenesis != nil && len(loadedGenesis.Alloc) > 0 {
-		accounts := loadedGenesis.ToStateAccounts()
-		codes := loadedGenesis.GetAllocCode()
-		stateRoot, err = writeGenesisAllocAccounts(dbs, accounts, codes)
+		allocAccounts = loadedGenesis.ToStateAccounts()
+		allocCodes = loadedGenesis.GetAllocCode()
+	}
+	switch {
+	case cfg.NumAccounts > 0 || cfg.NumContracts > 0:
+		stateRoot, err = writeSyntheticAccounts(dbs, cfg, allocAccounts, allocCodes)
+		if err != nil {
+			return nil, fmt.Errorf("write synthetic accounts: %w", err)
+		}
+	case len(allocAccounts) > 0:
+		stateRoot, err = writeGenesisAllocAccounts(dbs, allocAccounts, allocCodes)
 		if err != nil {
 			return nil, fmt.Errorf("write genesis alloc: %w", err)
 		}
@@ -126,12 +135,15 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 		if loadedGenesis != nil && len(loadedGenesis.Alloc) > 0 {
 			log.Printf("nethermind: preallocated %d accounts from --genesis", len(loadedGenesis.Alloc))
 		}
+		if cfg.NumAccounts > 0 || cfg.NumContracts > 0 {
+			log.Printf("nethermind: synthesized %d EOAs + %d contracts", cfg.NumAccounts, cfg.NumContracts)
+		}
 	}
 
 	return &generator.Stats{
-		StateRoot: header.Root,
-		// Other Stats fields (counts, byte totals) stay zero — Phase A
-		// writes the 7-DB scaffold only, not synthetic state.
+		StateRoot:        header.Root,
+		AccountsCreated:  cfg.NumAccounts,
+		ContractsCreated: cfg.NumContracts,
 	}, nil
 }
 
