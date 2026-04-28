@@ -10,6 +10,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+	gethrlp "github.com/ethereum/go-ethereum/rlp"
 	"github.com/linxGnu/grocksdb"
 
 	"github.com/nerolation/state-actor/internal/neth"
@@ -100,15 +101,21 @@ func (s *stateDBSink) SetStorageNode(addrHash [32]byte, path []byte, pathLen int
 // writeGenesisAllocAccounts walks the genesis allocation, writes each
 // account's leaf into the state trie via trie.Builder, and returns the
 // computed state root. Code bytes (if any) go into the code DB keyed by
-// keccak(code).
+// keccak(code). Storage slots (if any) go through the per-account storage
+// trie and the resulting root replaces account.Root before encoding.
 //
 // Accounts MUST be processed in keccak(address) ascending order — that's
-// what the StackTrie inside Builder requires. We sort them up-front.
+// what the StackTrie inside Builder requires. We sort them up-front, and
+// per-account slot keys get sorted by keccak(slotKey) the same way.
 //
-// Storage slots in the genesis alloc are NOT written here; this is Phase B
-// scaffolding that's enough to fund a few dev wallets so Nethermind's dev
-// mode can mine txs. Full storage support arrives with the entitygen path.
-func writeGenesisAllocAccounts(dbs *nethDBs, accounts map[common.Address]*types.StateAccount, codes map[common.Address][]byte) (common.Hash, error) {
+// `storages` may be nil for the no-storage case; the legacy callers
+// (genesis-alloc dev wallets) pass nil and pay no overhead.
+func writeGenesisAllocAccounts(
+	dbs *nethDBs,
+	accounts map[common.Address]*types.StateAccount,
+	codes map[common.Address][]byte,
+	storages map[common.Address]map[common.Hash]common.Hash,
+) (common.Hash, error) {
 	if len(accounts) == 0 {
 		return common.Hash(neth.EmptyTreeHash), nil
 	}
@@ -147,6 +154,50 @@ func writeGenesisAllocAccounts(dbs *nethDBs, accounts map[common.Address]*types.
 				return common.Hash{}, fmt.Errorf("write code for %s: %w", e.addr.Hex(), err)
 			}
 			acc.CodeHash = codeHash[:]
+		}
+
+		// Build the account's storage trie if it has any non-zero slots.
+		// Slots must enter the StackTrie in keccak(slotKey)-ascending
+		// order (same discipline as the account-trie above), so we sort
+		// the (keyHash, value) pairs before feeding the Builder.
+		if slots := storages[e.addr]; len(slots) > 0 {
+			type hashedSlot struct {
+				keyHash common.Hash
+				value   common.Hash
+			}
+			hashed := make([]hashedSlot, 0, len(slots))
+			for k, v := range slots {
+				hashed = append(hashed, hashedSlot{
+					keyHash: crypto.Keccak256Hash(k[:]),
+					value:   v,
+				})
+			}
+			sort.Slice(hashed, func(i, j int) bool {
+				return bytes.Compare(hashed[i].keyHash[:], hashed[j].keyHash[:]) < 0
+			})
+
+			for _, s := range hashed {
+				v := s.value[:]
+				for len(v) > 0 && v[0] == 0 {
+					v = v[1:]
+				}
+				if len(v) == 0 {
+					// Zero slots are deletions; skipping matches geth/Nethermind.
+					continue
+				}
+				valRLP, err := gethrlp.EncodeToBytes(v)
+				if err != nil {
+					return common.Hash{}, fmt.Errorf("encode slot value for %s: %w", e.addr.Hex(), err)
+				}
+				if err := builder.AddStorageSlot(e.addrHash, [32]byte(s.keyHash), valRLP); err != nil {
+					return common.Hash{}, fmt.Errorf("add storage slot for %s: %w", e.addr.Hex(), err)
+				}
+			}
+			storageRoot, err := builder.FinalizeStorageRoot(e.addrHash)
+			if err != nil {
+				return common.Hash{}, fmt.Errorf("finalize storage root for %s: %w", e.addr.Hex(), err)
+			}
+			acc.Root = common.Hash(storageRoot)
 		}
 
 		accRLP, err := nethrlp.EncodeAccount(acc)
