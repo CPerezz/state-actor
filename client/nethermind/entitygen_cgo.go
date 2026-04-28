@@ -61,7 +61,7 @@ func writeSyntheticAccounts(
 	genesisCodes map[common.Address][]byte,
 ) (common.Hash, error) {
 	sink := newStateDBSink(dbs.state)
-	defer sink.close()
+	defer func() { _ = sink.close() }()
 	builder := nethtrie.NewBuilder(sink)
 
 	tempDir, err := os.MkdirTemp("", "neth-acct-trie-*")
@@ -236,6 +236,12 @@ func writeSyntheticAccounts(
 	root, err := builder.FinalizeStateRoot()
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("finalize state root: %w", err)
+	}
+	// Flush the state-trie WriteBatch before returning so the genesis-block
+	// writer (which closes the State DB shortly afterward) sees a coherent
+	// view, and so failures here surface synchronously.
+	if err := sink.close(); err != nil {
+		return common.Hash{}, fmt.Errorf("flush state writes: %w", err)
 	}
 	return common.Hash(root), nil
 }
