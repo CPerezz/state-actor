@@ -4,7 +4,6 @@ package nethermind
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"sort"
 
@@ -43,11 +42,11 @@ func (s *stateDBSink) SetStateNode(path []byte, pathLen int, keccak [32]byte, rl
 	return s.db.Put(s.wo, key, rlpBlob)
 }
 
-// SetStorageNode is unsupported in this minimal Phase B — the genesis-alloc
-// path doesn't yet write per-account storage tries. Returning an error
-// surfaces the gap loudly if a caller tries to use it.
+// SetStorageNode writes a storage-trie node at its HalfPath storage key
+// (74 bytes: section(=2) + addrHash(32) + path[:8] + pathLen + keccak).
 func (s *stateDBSink) SetStorageNode(addrHash [32]byte, path []byte, pathLen int, keccak [32]byte, rlpBlob []byte) error {
-	return errors.New("storage trie not supported in Phase B genesis-alloc path")
+	key := nethstorage.StorageNodeKey(addrHash, path, pathLen, keccak)
+	return s.db.Put(s.wo, key, rlpBlob)
 }
 
 // writeGenesisAllocAccounts walks the genesis allocation, writes each
