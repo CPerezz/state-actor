@@ -1,6 +1,8 @@
 package rlp
 
 import (
+	"fmt"
+
 	gethrlp "github.com/ethereum/go-ethereum/rlp"
 )
 
@@ -39,8 +41,7 @@ func EncodeChainLevelInfo(cli *ChainLevelInfo) []byte {
 	inner := make([]gethrlp.RawValue, len(cli.BlockInfos))
 	for i, bi := range cli.BlockInfos {
 		if bi == nil {
-			panic("EncodeChainLevelInfo: nil BlockInfo at index " +
-				string(rune('0'+i)))
+			panic(fmt.Sprintf("EncodeChainLevelInfo: nil BlockInfo at index %d", i))
 		}
 		inner[i] = EncodeBlockInfo(bi)
 	}

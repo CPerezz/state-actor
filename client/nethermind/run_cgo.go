@@ -111,6 +111,23 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 	}
 	switch {
 	case cfg.NumAccounts > 0 || cfg.NumContracts > 0:
+		// writeSyntheticAccounts doesn't yet thread genesis-alloc storage
+		// through the temp-Pebble pipeline. If the user supplied a --genesis
+		// whose alloc carries non-empty storage AND asked for synthetic
+		// accounts, those storage slots would silently disappear from the
+		// state root we write. Fail loud until storage threading lands —
+		// tracked at https://github.com/nerolation/state-actor/issues/22.
+		if len(allocStorages) > 0 {
+			return nil, fmt.Errorf(
+				"--client=nethermind: --genesis with %d storage-bearing alloc account(s) is "+
+					"incompatible with --accounts/--contracts > 0. The synthetic-accounts path "+
+					"does not yet write genesis-alloc storage tries; using it now would silently "+
+					"drop your storage entries. Run again without --accounts/--contracts to use "+
+					"the genesis-alloc-only path, or remove storage from the alloc. "+
+					"Tracked at https://github.com/nerolation/state-actor/issues/22.",
+				len(allocStorages),
+			)
+		}
 		stateRoot, err = writeSyntheticAccounts(dbs, cfg, allocAccounts, allocCodes)
 		if err != nil {
 			return nil, fmt.Errorf("write synthetic accounts: %w", err)
@@ -152,7 +169,3 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 // GenesisFilePath / ChainIDOverride are declared in run.go (no build
 // tag) so main.go's assignments compile in both build modes. The cgo
 // build path reads them from runImpl above; the stub path ignores them.
-//
-// The blank import is here to keep the common package dependency real
-// in the cgo build — header construction in genesis_cgo.go uses it.
-var _ = common.Hash{}

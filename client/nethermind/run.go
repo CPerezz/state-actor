@@ -19,7 +19,7 @@ import (
 var errNotImplemented = errors.New(
 	"client/nethermind: requires the cgo_neth build tag and librocksdb. " +
 		"--client=nethermind is Docker-only — build with `docker build -f Dockerfile.nethermind .`. " +
-		"See ~/.claude/plans/do-you-recall-the-gleaming-fox.md PR#3 / B5 for status",
+		"See client/nethermind/testdata/README.md for the reproducer (or `make smoke-nethermind`).",
 )
 
 // Run is the public entry point dispatched from main.go's
