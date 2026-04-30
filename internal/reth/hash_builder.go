@@ -12,6 +12,111 @@ import (
 // greater than the previous key (nibble-lexicographic order).
 var ErrKeysOutOfOrder = errors.New("HashBuilder: keys must be inserted in strictly ascending nibble order")
 
+// HashBuilder is a streaming Merkle-Patricia trie builder that produces
+// reth-canonical BranchNodeCompact emissions in path order, suitable for
+// MDBX cursor.append into AccountsTrie or StoragesTrie.
+//
+// # Algorithm
+//
+// HashBuilder mirrors alloy_trie::HashBuilder. The state machine maintains:
+//
+//   - prevKey/prevValue: the most recent leaf's nibble key + RLP-encoded value
+//   - stack: an O(depth) stack of deferred branch contexts, one per
+//     in-progress branch node along the right edge of the trie
+//   - stateMasks/treeMasks/hashMasks: per-depth 16-bit child-slot bitmasks
+//
+// Each AddLeaf:
+//
+//  1. Computes CPL (common-prefix length) between the new key and prevKey.
+//  2. Pops stack entries deeper than CPL — those subtrees are now complete.
+//     For each popped branch, computes its state_mask, tree_mask, hash_mask
+//     and Hashes vec, emits the BranchNodeCompact via the NodeEmitter, and
+//     replaces it with its parent's reference (a hash if RLP ≥ 32 bytes,
+//     or the inlined RLP otherwise).
+//  3. Pushes the new leaf onto the stack at depth CPL.
+//
+// Root() drains the stack, finalizing all remaining branches. The final
+// returned hash is the trie root.
+//
+// # Mask semantics (BNC fields)
+//
+//   - state_mask: bit i is set iff slot i has any child (leaf or sub-branch).
+//   - tree_mask: bit i is set iff slot i's child was emitted as its own
+//     BranchNodeCompact row (i.e., a sub-branch we wrote to the trie table).
+//     ONLY set via add_branch() in alloy_trie — see emission semantics below.
+//   - hash_mask: bit i is set iff slot i's child is referenced by its
+//     32-byte hash (RLP ≥ 32 bytes), as opposed to inlined RLP < 32 bytes.
+//     ALSO ONLY set via add_branch() per alloy_trie semantics.
+//   - Hashes: the popcount(hash_mask) hashes, in slot-index order.
+//   - RootHash: optional; populated only on the final emission (the trie root).
+//
+// # Emission semantics — IMPORTANT
+//
+// A BranchNodeCompact is emitted ONLY when hash_mask | tree_mask != 0, mirroring
+// alloy_trie's behavior. Those masks are populated by add_branch() calls,
+// which simulate pre-existing branch nodes during incremental re-execution.
+//
+// **Pure-leaf insertion (our genesis use case) never triggers add_branch, so
+// no BranchNodeCompact emissions occur during a fresh build.** This matches
+// reth's own genesis behavior — see crates/storage/db-common/src/init.rs's
+// compute_state_root_chunked path. Slice E's writer should treat empty
+// AccountsTrie/StoragesTrie tables as expected for genesis-only state.
+//
+// If you need the trie tables populated for boot-time validation, that's a
+// separate concern from HashBuilder: either accept reth's lazy-recompute
+// behavior, or add an incremental-build pass that calls add_branch (not yet
+// implemented in this Go port; out of scope for Slices A-F).
+//
+// # Path emission order
+//
+// When emissions DO happen (incremental re-execution future-work), they're
+// guaranteed lexicographically sorted by StoredNibbles path, matching the
+// order MDBX expects for cursor.append. This is a load-bearing property —
+// Slice E's writer relies on it for sequential MDBX writes.
+//
+// # Memory
+//
+// O(trie depth) ≈ a few KB regardless of input size. The stack max-depth is
+// bounded by the longest CPL among any two adjacent inputs.
+//
+// # Determinism
+//
+// HashBuilder is deterministic: same input sequence → same emissions → same
+// root. No map iteration, no time, no randomness.
+//
+// # Caller obligations
+//
+//   - AddLeaf inputs MUST be sorted strictly ascending by key. Asserted via
+//     ErrKeysOutOfOrder; not silently tolerated.
+//   - valueRLP must be the FULL leaf value as it should appear in the trie
+//     (e.g., rlp.Encode(account_struct) with storage_root already in the
+//     account's Root field).
+//   - The NodeEmitter callback MUST NOT block or do heavy I/O on the hot path
+//     — it's called from inside AddLeaf/Root. If you need to batch writes,
+//     buffer in the callback and flush periodically.
+//   - **A non-nil error from NodeEmitter MUST be treated as fatal by the
+//     caller** — HashBuilder logs it but continues, returning a root hash
+//     that is inconsistent with whatever was actually persisted to disk.
+//     Slice E's writer will halt the build pipeline on emit error.
+//   - Once Root() returns, the HashBuilder is consumed; do not call AddLeaf
+//     after Root().
+//
+// # Validation
+//
+// HashBuilder is cross-validated against alloy_trie::HashBuilder via
+// internal/reth/testdata/gen/ — both the root hash and the per-emission
+// (path, BranchNodeCompact) sequence must match for a fixed set of fixture
+// inputs. See TestGoldenHashBuilder{Root,Emissions}. Note: emissions tests
+// are vacuously correct for the current fixture set (pure-leaf insertion;
+// no add_branch); the emission path is correct by structural inspection
+// against the Rust reference but exercised end-to-end only in incremental
+// flows we haven't yet built fixtures for.
+//
+// # References
+//
+//   - Spec §6.5: docs/superpowers/specs/2026-04-29-reth-direct-mdbx-design.md
+//   - Rust ref: ~/.cargo/registry/.../alloy-trie-0.9.5/src/hash_builder/
+//
 // NodeEmitter is called by HashBuilder once for each branch node that
 // completes during streaming. The path is the trie nibble path from root to
 // the branch (using StoredNibbles' 33-byte packed form), and node is the
@@ -19,20 +124,13 @@ var ErrKeysOutOfOrder = errors.New("HashBuilder: keys must be inserted in strict
 //
 // Emissions happen in path-lexicographic order, so the consumer can write to
 // AccountsTrie/StoragesTrie via cursor.append (sequential MDBX writes).
+//
+// A non-nil error from NodeEmitter MUST be treated as fatal by the caller —
+// HashBuilder logs it but continues, so a swallowed error results in a root
+// hash that is inconsistent with whatever was actually persisted to disk.
 type NodeEmitter func(path StoredNibbles, node BranchNodeCompact) error
 
-// HashBuilder is a streaming MPT builder. Consumes keccak-sorted (path, leaf)
-// pairs via AddLeaf; emits BranchNodeCompact updates via the NodeEmitter
-// callback as branch subtrees complete; returns the final state root from
-// Root() after the last AddLeaf.
-//
-// Algorithm mirrors alloy_trie::HashBuilder: an O(depth) stack of in-progress
-// subtrees keyed by the current key prefix. Each AddLeaf extends the rightmost
-// stack entry. When a new leaf's prefix diverges from the previous one,
-// completed subtrees pop off the stack and emit one BranchNodeCompact per
-// branch node.
-//
-// Memory footprint at any moment: O(trie depth) ≈ a few KB regardless of N.
+// HashBuilder implements the algorithm described on NodeEmitter above.
 type HashBuilder struct {
 	emit NodeEmitter
 
