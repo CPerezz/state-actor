@@ -35,6 +35,10 @@ var emptyMPTRoot = common.HexToHash("0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b9
 // For empty alloc (NumAccounts=0, NumContracts=0) the state root is the
 // canonical empty-MPT hash 0x56e81f17... Slices D+E will compute it from
 // generated entities.
+//
+// On error, partially written files in cfg.DBPath are NOT cleaned up; the
+// freshDir precondition will reject the next invocation until the caller
+// manually removes the directory.
 func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator.Stats, error) {
 	if cfg.DBPath == "" {
 		return nil, fmt.Errorf("RunCgo: cfg.DBPath required")

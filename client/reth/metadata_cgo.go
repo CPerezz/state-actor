@@ -29,6 +29,10 @@ import (
 //   - VersionHistory: BE u64(0) → Compact ClientVersion identity.
 //
 // ChainState is left empty; reth populates it lazily on finality.
+//
+// NOTE: the Number=0 guard below is a forward-compatibility trap for Slices
+// D+E. If a future slice switches to a non-genesis header (e.g. block 1 to
+// work around an underflow bug), this guard must be relaxed or replaced.
 func WriteMetadata(envs *Envs, header *types.Header, chainID uint64) error {
 	if header.Number.Sign() != 0 {
 		return fmt.Errorf("WriteMetadata: header must be block 0, got %s", header.Number)
