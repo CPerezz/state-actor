@@ -68,3 +68,36 @@ func TestStorageEntryRoundtrip(t *testing.T) {
 		}
 	}
 }
+
+func TestIntegerListRoundtrip(t *testing.T) {
+	cases := [][]uint64{
+		nil,
+		{},
+		{0},
+		{0, 1, 2, 3},
+		{0, 100, 200, 0x12345678},
+	}
+	for i, in := range cases {
+		var buf bytes.Buffer
+		EncodeIntegerList(&buf, in)
+		out, n := DecodeIntegerList(buf.Bytes())
+		if n != buf.Len() {
+			t.Errorf("case %d: consumed %d, encoded %d", i, n, buf.Len())
+		}
+		if (len(in) == 0 && len(out) != 0) || (len(in) > 0 && !uint64SliceEqual(in, out)) {
+			t.Errorf("case %d: in=%v out=%v hex=%x", i, in, out, buf.Bytes())
+		}
+	}
+}
+
+func uint64SliceEqual(a, b []uint64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}

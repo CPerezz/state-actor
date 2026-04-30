@@ -142,3 +142,24 @@ func (s *StorageEntry) DecodeCompact(b []byte, totalLen int) int {
 	}
 	return cursor
 }
+
+// EncodeIntegerList writes a Vec<u64> in Compact form: varuint(count) followed
+// by per-element varuint(value). Used by AccountsHistory / StoragesHistory.
+func EncodeIntegerList(buf *bytes.Buffer, list []uint64) {
+	encodeVarUint(buf, uint64(len(list)))
+	for _, v := range list {
+		encodeVarUint(buf, v)
+	}
+}
+
+// DecodeIntegerList reads a Vec<u64> from b. Returns the slice and bytes consumed.
+func DecodeIntegerList(b []byte) ([]uint64, int) {
+	count, n := decodeVarUint(b)
+	out := make([]uint64, count)
+	for i := uint64(0); i < count; i++ {
+		v, m := decodeVarUint(b[n:])
+		out[i] = v
+		n += m
+	}
+	return out, n
+}
