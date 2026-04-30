@@ -135,6 +135,169 @@ func TestGoldenStorageTrieEntry(t *testing.T) {
 	}
 }
 
+// unpackNibbles converts a byte slice to individual nibbles (each byte → 2 nibbles,
+// high nibble first). Mirrors alloy_trie Nibbles::unpack.
+func unpackNibbles(data []byte) []byte {
+	nibbles := make([]byte, len(data)*2)
+	for i, b := range data {
+		nibbles[i*2] = b >> 4
+		nibbles[i*2+1] = b & 0x0f
+	}
+	return nibbles
+}
+
+// mustHexDecode decodes a hex string or fatals the test.
+func mustHexDecode(t *testing.T, s string) []byte {
+	t.Helper()
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		t.Fatalf("mustHexDecode(%q): %v", s, err)
+	}
+	return b
+}
+
+// hashBuilderLeaf is a (key, value) pair for HashBuilder input.
+type hashBuilderLeaf struct{ key, value []byte }
+
+// hashBuilderEmission is one (path, node) pair emitted by HashBuilder.
+type hashBuilderEmission struct {
+	path StoredNibbles
+	node BranchNodeCompact
+}
+
+// hashBuilderLeavesByLabel returns the test-case leaves for the given fixture label.
+// Definitions match the Rust harness cases byte-for-byte.
+func hashBuilderLeavesByLabel(t *testing.T, label string) []hashBuilderLeaf {
+	t.Helper()
+	switch label {
+	case "hb_single_root", "hb_single_emissions":
+		return []hashBuilderLeaf{
+			{key: bytes.Repeat([]byte{0xa0}, 32), value: bytes.Repeat([]byte{0x42}, 32)},
+		}
+	case "hb_two_shared_root", "hb_two_shared_emissions":
+		k1 := bytes.Repeat([]byte{0xa0}, 32)
+		k2 := bytes.Repeat([]byte{0xa0}, 32)
+		k2[31] = 0xa1
+		return []hashBuilderLeaf{
+			{key: k1, value: []byte{0x01}},
+			{key: k2, value: []byte{0x02}},
+		}
+	case "hb_three_top_root", "hb_three_top_emissions":
+		k1 := make([]byte, 32)
+		k2 := make([]byte, 32)
+		k3 := make([]byte, 32)
+		k1[0] = 0x10
+		k2[0] = 0x20
+		k3[0] = 0x30
+		return []hashBuilderLeaf{
+			{key: k1, value: []byte{0x01}},
+			{key: k2, value: []byte{0x02}},
+			{key: k3, value: []byte{0x03}},
+		}
+	case "hb_full_branch_root", "hb_full_branch_emissions":
+		leaves := make([]hashBuilderLeaf, 16)
+		for i := 0; i < 16; i++ {
+			k := make([]byte, 32)
+			k[0] = byte(i) << 4
+			leaves[i] = hashBuilderLeaf{key: k, value: []byte{byte(i) + 1}}
+		}
+		return leaves
+	default:
+		t.Fatalf("hashBuilderLeavesByLabel: unknown label %q", label)
+		return nil
+	}
+}
+
+// encodeEmissionsForGoldenCompare encodes a slice of emissions into the same
+// binary format the Rust harness writes into HashBuilderEmissions fixtures:
+//
+//	For each emission:
+//	  path[33]: packed[32] || length[1]
+//	  bnc_len[2]: big-endian u16
+//	  bnc_bytes[bnc_len]: BranchNodeCompact compact encoding
+func encodeEmissionsForGoldenCompare(emissions []hashBuilderEmission) []byte {
+	var buf bytes.Buffer
+	for _, e := range emissions {
+		// Path: StoredNibbles wire form is packed[32] || length[1]
+		buf.Write(e.path.Packed[:])
+		buf.WriteByte(e.path.Length)
+		var nodeBuf bytes.Buffer
+		nLen := e.node.EncodeCompact(&nodeBuf)
+		buf.WriteByte(byte(nLen >> 8))
+		buf.WriteByte(byte(nLen))
+		buf.Write(nodeBuf.Bytes())
+	}
+	return buf.Bytes()
+}
+
+// TestGoldenHashBuilderRoot cross-validates Go HashBuilder root output against
+// the alloy_trie::HashBuilder canonical root in the Rust fixtures.
+// Tests will fail/panic on non-trivial cases until Slice B's algorithm is implemented.
+func TestGoldenHashBuilderRoot(t *testing.T) {
+	cases := loadFixtures(t)["HashBuilderRoot"]
+	if len(cases) == 0 {
+		t.Fatal("no HashBuilderRoot fixtures (regenerate via testdata/gen/)")
+	}
+	for _, fx := range cases {
+		fx := fx
+		t.Run(fx.Label, func(t *testing.T) {
+			want := mustHexDecode(t, fx.Hex)
+			leaves := hashBuilderLeavesByLabel(t, fx.Label)
+			var emissions []hashBuilderEmission
+			emit := func(path StoredNibbles, node BranchNodeCompact) error {
+				emissions = append(emissions, hashBuilderEmission{path: path, node: node})
+				return nil
+			}
+			hb := NewHashBuilder(emit)
+			for _, leaf := range leaves {
+				// key bytes → nibble-unpacked: each byte becomes 2 nibbles
+				nibbles := unpackNibbles(leaf.key)
+				if err := hb.AddLeaf(nibbles, leaf.value); err != nil {
+					t.Fatalf("AddLeaf: %v", err)
+				}
+			}
+			got := hb.Root()
+			if !bytes.Equal(got[:], want) {
+				t.Errorf("root mismatch:\n  go   = %x\n  rust = %x", got[:], want)
+			}
+		})
+	}
+}
+
+// TestGoldenHashBuilderEmissions cross-validates Go HashBuilder emission output
+// against the alloy_trie::HashBuilder canonical emissions in the Rust fixtures.
+// Tests will fail/panic on non-trivial cases until Slice B's algorithm is implemented.
+func TestGoldenHashBuilderEmissions(t *testing.T) {
+	cases := loadFixtures(t)["HashBuilderEmissions"]
+	if len(cases) == 0 {
+		t.Fatal("no HashBuilderEmissions fixtures (regenerate via testdata/gen/)")
+	}
+	for _, fx := range cases {
+		fx := fx
+		t.Run(fx.Label, func(t *testing.T) {
+			want := mustHexDecode(t, fx.Hex)
+			leaves := hashBuilderLeavesByLabel(t, fx.Label)
+			var emissions []hashBuilderEmission
+			emit := func(path StoredNibbles, node BranchNodeCompact) error {
+				emissions = append(emissions, hashBuilderEmission{path: path, node: node})
+				return nil
+			}
+			hb := NewHashBuilder(emit)
+			for _, leaf := range leaves {
+				nibbles := unpackNibbles(leaf.key)
+				if err := hb.AddLeaf(nibbles, leaf.value); err != nil {
+					t.Fatalf("AddLeaf: %v", err)
+				}
+			}
+			_ = hb.Root() // finalizes any pending emissions
+			got := encodeEmissionsForGoldenCompare(emissions)
+			if !bytes.Equal(got, want) {
+				t.Errorf("emissions mismatch:\n  go   = %x\n  rust = %x", got, want)
+			}
+		})
+	}
+}
+
 // TestGoldenBranchNodeCompact validates our BNC wire format against Rust's.
 // If this fails, revise BranchNodeCompact.EncodeCompact in trie_format.go to match.
 func TestGoldenBranchNodeCompact(t *testing.T) {
