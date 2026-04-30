@@ -2,7 +2,9 @@ package reth
 
 import (
 	"bytes"
+	"fmt"
 
+	"github.com/RoaringBitmap/roaring/v2/roaring64"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/holiman/uint256"
 )
@@ -143,25 +145,42 @@ func (s *StorageEntry) DecodeCompact(b []byte, totalLen int) int {
 	return cursor
 }
 
-// EncodeIntegerList writes a Vec<u64> in Compact form: varuint(count) followed
-// by per-element varuint(value). Used by AccountsHistory / StoragesHistory.
+// EncodeIntegerList writes the roaring-treemap-serialized form of a sorted u64 list.
+// Matches reth's IntegerList wire format (RoaringTreemap, see
+// crates/storage/db-api/src/models/integer_list.rs).
+//
+// The input list MUST be sorted ascending; reth's IntegerList::new uses
+// from_sorted_iter and rejects unsorted input. This function panics on unsorted input.
 func EncodeIntegerList(buf *bytes.Buffer, list []uint64) {
-	encodeVarUint(buf, uint64(len(list)))
+	for i := 1; i < len(list); i++ {
+		if list[i] <= list[i-1] {
+			panic("IntegerList: input must be strictly sorted ascending")
+		}
+	}
+	bm := roaring64.New()
 	for _, v := range list {
-		encodeVarUint(buf, v)
+		bm.Add(v)
+	}
+	if _, err := bm.WriteTo(buf); err != nil {
+		panic(fmt.Sprintf("IntegerList: WriteTo failed: %v", err))
 	}
 }
 
-// DecodeIntegerList reads a Vec<u64> from b. Returns the slice and bytes consumed.
+// DecodeIntegerList parses the roaring-treemap-serialized form into a sorted u64 slice.
+// Returns the slice and bytes consumed.
 func DecodeIntegerList(b []byte) ([]uint64, int) {
-	count, n := decodeVarUint(b)
-	out := make([]uint64, count)
-	for i := uint64(0); i < count; i++ {
-		v, m := decodeVarUint(b[n:])
-		out[i] = v
-		n += m
+	bm := roaring64.New()
+	r := bytes.NewReader(b)
+	n, err := bm.ReadFrom(r)
+	if err != nil {
+		panic(fmt.Sprintf("IntegerList: ReadFrom failed: %v", err))
 	}
-	return out, n
+	out := make([]uint64, 0, bm.GetCardinality())
+	it := bm.Iterator()
+	for it.HasNext() {
+		out = append(out, it.Next())
+	}
+	return out, int(n)
 }
 
 // ShardedKeyAddress is the AccountsHistory key. Address followed by a u64
