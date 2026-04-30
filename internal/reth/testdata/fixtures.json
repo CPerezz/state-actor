@@ -38,6 +38,23 @@
       "hex": "0100000000000000000000003a300000020000000000020034120000180000001e00000000006400c8007856"
     }
   ],
+  "StorageTrieEntry": [
+    {
+      "label": "ste_minimal",
+      "type_name": "StorageTrieEntry",
+      "hex": "000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "label": "ste_basic",
+      "type_name": "StorageTrieEntry",
+      "hex": "123400000000000000000000000000000000000000000000000000000000000004000100000001aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "label": "ste_with_root",
+      "type_name": "StorageTrieEntry",
+      "hex": "123456780000000000000000000000000000000000000000000000000000000008000300020003bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ],
   "U256": [
     {
       "label": "u256_0",
