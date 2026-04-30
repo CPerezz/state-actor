@@ -91,6 +91,50 @@ func TestGoldenIntegerList(t *testing.T) {
 	}
 }
 
+// TestGoldenStorageTrieEntry cross-validates Go StorageTrieEntry encoder output
+// against Rust canonical hex (PackedStorageTrieEntry, storage v2, 33-byte subkey).
+// If this fails, revise StorageTrieEntry.EncodeCompact in trie_format.go to match.
+func TestGoldenStorageTrieEntry(t *testing.T) {
+	cases := loadFixtures(t)["StorageTrieEntry"]
+	if len(cases) == 0 {
+		t.Fatal("no StorageTrieEntry fixtures (regenerate via testdata/gen/)")
+	}
+	h_a := common.HexToHash("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	h_b := common.HexToHash("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	inputs := map[string]StorageTrieEntry{
+		"ste_minimal": {
+			SubKey: StoredNibbles{Length: 0, Packed: common.Hash{}},
+			Node:   BranchNodeCompact{StateMask: 0, TreeMask: 0, HashMask: 0, Hashes: nil, RootHash: nil},
+		},
+		"ste_basic": {
+			SubKey: StoredNibbles{Length: 4, Packed: packNibbles([]byte{1, 2, 3, 4})},
+			Node: BranchNodeCompact{
+				StateMask: 0x0001, TreeMask: 0, HashMask: 0x0001,
+				Hashes: []common.Hash{h_a}, RootHash: nil,
+			},
+		},
+		"ste_with_root": {
+			SubKey: StoredNibbles{Length: 8, Packed: packNibbles([]byte{1, 2, 3, 4, 5, 6, 7, 8})},
+			Node: BranchNodeCompact{
+				StateMask: 0x0003, TreeMask: 0x0002, HashMask: 0x0003,
+				Hashes: []common.Hash{h_a, h_b}, RootHash: &h_b,
+			},
+		},
+	}
+	for _, fx := range cases {
+		in, ok := inputs[fx.Label]
+		if !ok {
+			t.Fatalf("unknown fixture label %q — Rust and Go are out of sync", fx.Label)
+		}
+		var buf bytes.Buffer
+		in.EncodeCompact(&buf)
+		got := hex.EncodeToString(buf.Bytes())
+		if got != fx.Hex {
+			t.Errorf("StorageTrieEntry %s:\n  go   = %s\n  rust = %s", fx.Label, got, fx.Hex)
+		}
+	}
+}
+
 // TestGoldenBranchNodeCompact validates our BNC wire format against Rust's.
 // If this fails, revise BranchNodeCompact.EncodeCompact in trie_format.go to match.
 func TestGoldenBranchNodeCompact(t *testing.T) {
