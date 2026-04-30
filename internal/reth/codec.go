@@ -154,7 +154,6 @@ func (b *bitflagBuilder) PutBool(v bool) {
 }
 
 func (b *bitflagBuilder) PutU64Length(n int)  { b.put(uint64(n), 4) }
-func (b *bitflagBuilder) PutU128Length(n int) { b.put(uint64(n), 5) }
 func (b *bitflagBuilder) PutU256Length(n int) { b.put(uint64(n), 6) }
 
 // Finalize emits the bitflag header as 1 or 2 bytes. totalBits is the sum of
@@ -206,5 +205,14 @@ func (r *bitflagReader) get(width uint) uint64 {
 
 func (r *bitflagReader) GetBool() bool      { return r.get(1) != 0 }
 func (r *bitflagReader) GetU64Length() int  { return int(r.get(4)) }
-func (r *bitflagReader) GetU128Length() int { return int(r.get(5)) }
 func (r *bitflagReader) GetU256Length() int { return int(r.get(6)) }
+
+// bufWrite extends buf by n bytes and returns a slice into the new region for
+// `copy` to fill. Useful for shaping struct emission code as a sequence of
+// `copy(bufWrite(...), src)` calls that mirror the wire layout one-to-one.
+// Used by the value codecs in types.go and trie_format.go.
+func bufWrite(buf *bytes.Buffer, n int) []byte {
+	start := buf.Len()
+	buf.Write(make([]byte, n))
+	return buf.Bytes()[start : start+n]
+}
