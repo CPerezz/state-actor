@@ -2,6 +2,7 @@ package reth
 
 import (
 	"bytes"
+	"errors"
 	"math/rand"
 	"sort"
 	"testing"
@@ -261,5 +262,69 @@ func TestHashBuilderStorageTriePattern(t *testing.T) {
 	}
 	if storageRoot != st.Hash() {
 		t.Errorf("storage root: got=%s want=%s", storageRoot.Hex(), st.Hash().Hex())
+	}
+}
+
+// TestHashBuilderErrKeysOutOfOrder verifies the monotonicity guard.
+func TestHashBuilderErrKeysOutOfOrder(t *testing.T) {
+	cases := []struct {
+		name              string
+		keys              [][]byte
+		wantErr           bool
+		wantSentinelOnIdx int // which AddLeaf call should fail (-1 = none)
+	}{
+		{
+			name:              "ascending OK",
+			keys:              [][]byte{{0x01}, {0x02}, {0x03}},
+			wantErr:           false,
+			wantSentinelOnIdx: -1,
+		},
+		{
+			name:              "equal keys fail",
+			keys:              [][]byte{{0x01}, {0x01}},
+			wantErr:           true,
+			wantSentinelOnIdx: 1,
+		},
+		{
+			name:              "reversed fails",
+			keys:              [][]byte{{0x02}, {0x01}},
+			wantErr:           true,
+			wantSentinelOnIdx: 1,
+		},
+		{
+			name:              "empty after non-empty fails",
+			keys:              [][]byte{{0x01}, {}},
+			wantErr:           true,
+			wantSentinelOnIdx: 1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hb := NewHashBuilder(func(StoredNibbles, BranchNodeCompact) error { return nil })
+			var lastErr error
+			var lastErrIdx = -1
+			for i, k := range tc.keys {
+				err := hb.AddLeaf(k, []byte{0x42})
+				if err != nil {
+					lastErr = err
+					lastErrIdx = i
+					break
+				}
+			}
+			if tc.wantErr {
+				if lastErr == nil {
+					t.Errorf("expected error, got none")
+				} else if !errors.Is(lastErr, ErrKeysOutOfOrder) {
+					t.Errorf("expected ErrKeysOutOfOrder, got %v", lastErr)
+				}
+				if lastErrIdx != tc.wantSentinelOnIdx {
+					t.Errorf("expected error on AddLeaf #%d, got #%d", tc.wantSentinelOnIdx, lastErrIdx)
+				}
+			} else {
+				if lastErr != nil {
+					t.Errorf("expected no error, got %v at #%d", lastErr, lastErrIdx)
+				}
+			}
+		})
 	}
 }
