@@ -16,14 +16,33 @@ import (
 
 // Reth MDBX geometry — matches reth's default in
 // crates/storage/db/src/implementation/mdbx/mod.rs:72-240.
+//
+// Page size: reth uses default_page_size() = OS page size clamped to
+// [4096, 65536]. Passing 0 to mdbx-go is treated as MDBX_MIN_PAGESIZE
+// (256 bytes), which would produce a database reth refuses to open
+// on platforms where its expected page size differs (notably macOS
+// arm64 with 16 KiB pages). We compute the same value reth would
+// produce: clamp(os.Getpagesize(), 4096, 65536).
 const (
 	mdbxSizeMin      = int(0)
 	mdbxSizeNow      = int(0)
 	mdbxSizeMax      = int(8 * 1024 * 1024 * 1024 * 1024) // 8 TiB
 	mdbxGrowthStep   = int(4 * 1024 * 1024 * 1024)        // 4 GiB
 	mdbxShrinkThresh = int(0)
-	mdbxPageSize     = int(0) // system default
 )
+
+// mdbxDefaultPageSize matches reth's default_page_size() in
+// crates/storage/db/src/implementation/mdbx/mod.rs:139,160.
+func mdbxDefaultPageSize() int {
+	ps := os.Getpagesize()
+	if ps < 4096 {
+		return 4096
+	}
+	if ps > 65536 {
+		return 65536
+	}
+	return ps
+}
 
 // rocksdbCFNames lists the v2 history-table column families reth uses.
 var rocksdbCFNames = []string{
@@ -81,7 +100,7 @@ func OpenEnvs(dataDir string, freshDir bool) (*Envs, error) {
 		mdbxSizeMax,
 		mdbxGrowthStep,
 		mdbxShrinkThresh,
-		mdbxPageSize,
+		mdbxDefaultPageSize(),
 	); err != nil {
 		env.Close()
 		return nil, fmt.Errorf("mdbx.SetGeometry: %w", err)
@@ -120,12 +139,14 @@ func OpenEnvs(dataDir string, freshDir bool) (*Envs, error) {
 
 	// --- RocksDB env with column families ---
 	rocksOpts := grocksdb.NewDefaultOptions()
+	defer rocksOpts.Destroy() // C-allocated; release after OpenDbColumnFamilies returns
 	rocksOpts.SetCreateIfMissing(true)
 	rocksOpts.SetCreateIfMissingColumnFamilies(true)
 
 	cfOpts := make([]*grocksdb.Options, len(rocksdbCFNames))
 	for i := range cfOpts {
 		cfOpts[i] = grocksdb.NewDefaultOptions()
+		defer cfOpts[i].Destroy()
 	}
 
 	rdb, cfs, err := grocksdb.OpenDbColumnFamilies(rocksOpts, rocksdbDir, rocksdbCFNames, cfOpts)
