@@ -11,25 +11,29 @@ import (
 //
 // Wire (MDBX key, fixed 33 bytes):
 //
-//	length (1 byte, 0..=64) || packed (32 bytes; 2 nibbles per byte, high then low)
+//	packed (32 bytes; 2 nibbles per byte, high then low) || length (1 byte, 0..=64)
 //
 // When Length is odd, the final low nibble is zero-padded.
+//
+// Note: the length byte is at the END (byte[32]), not the beginning.
+// This matches PackedStoredNibbles::to_compact in reth-trie-common (nibbles.rs
+// lines 193-211) which writes packed[32] then puts the nibble count byte last.
 type StoredNibbles struct {
 	Length byte
 	Packed common.Hash
 }
 
 func (s *StoredNibbles) EncodeKey(buf *bytes.Buffer) {
-	buf.WriteByte(s.Length)
 	buf.Write(s.Packed[:])
+	buf.WriteByte(s.Length)
 }
 
 func (s *StoredNibbles) DecodeKey(b []byte) {
 	if len(b) < 33 {
 		panic("StoredNibbles: truncated key")
 	}
-	s.Length = b[0]
-	copy(s.Packed[:], b[1:33])
+	copy(s.Packed[:], b[0:32])
+	s.Length = b[32]
 }
 
 // StoredNibblesSubKey is the StoragesTrie sub-key (DupSort sub-key after the
@@ -150,19 +154,24 @@ func readBEU16(b []byte) uint16 {
 //
 // Wire:
 //
-//	33 bytes SubKey (StoredNibblesSubKey) || BranchNodeCompact bytes
+//	33 bytes SubKey (PackedStoredNibblesSubKey) || BranchNodeCompact bytes
 //
-// SubKey layout is fixed (Task 11) and BranchNodeCompact is cross-validated
-// against Rust canonical hex via golden_test.go.
+// SubKey layout matches PackedStoredNibblesSubKey::to_compact (reth-trie-common
+// nibbles.rs): packed[32] (2 nibbles per byte, zero-padded right) || length[1].
+// The length byte is at the END (byte[32]), not the beginning.
+// Cross-validated against Rust canonical hex via TestGoldenStorageTrieEntry
+// in golden_test.go.
 type StorageTrieEntry struct {
 	SubKey StoredNibblesSubKey
 	Node   BranchNodeCompact
 }
 
 func (e *StorageTrieEntry) EncodeCompact(buf *bytes.Buffer) int {
+	// SubKey wire: packed[32] || length[1] (length byte at end, matching
+	// PackedStoredNibblesSubKey::to_compact in reth-trie-common nibbles.rs).
 	written := 0
-	written += copy(bufWrite(buf, 1), []byte{e.SubKey.Length})
 	written += copy(bufWrite(buf, 32), e.SubKey.Packed[:])
+	written += copy(bufWrite(buf, 1), []byte{e.SubKey.Length})
 	written += e.Node.EncodeCompact(buf)
 	return written
 }
@@ -174,8 +183,9 @@ func (e *StorageTrieEntry) DecodeCompact(data []byte, totalLen int) int {
 	if len(data) < totalLen {
 		panic("StorageTrieEntry: buffer shorter than totalLen")
 	}
-	e.SubKey.Length = data[0]
-	copy(e.SubKey.Packed[:], data[1:33])
+	// SubKey wire: packed[32] || length[1]
+	copy(e.SubKey.Packed[:], data[0:32])
+	e.SubKey.Length = data[32]
 	nodeLen := totalLen - 33
 	consumed := e.Node.DecodeCompact(data[33:], nodeLen)
 	if consumed != nodeLen {
