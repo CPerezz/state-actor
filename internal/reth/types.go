@@ -93,3 +93,52 @@ func bufWrite(buf *bytes.Buffer, n int) []byte {
 	buf.Write(make([]byte, n))
 	return buf.Bytes()[start : start+n]
 }
+
+// StorageEntry mirrors reth-db-models 0.3.1's StorageEntry struct.
+//
+// Wire format:
+//  1. 1-byte bitflag header: value_length(6) padding=2
+//  2. 32-byte key (fixed, no compaction)
+//  3. Stripped-be value: 0..=32 bytes
+type StorageEntry struct {
+	Key   common.Hash
+	Value *uint256.Int
+}
+
+func (s *StorageEntry) EncodeCompact(buf *bytes.Buffer) int {
+	var valBuf bytes.Buffer
+	valN := encodeU256Compact(&valBuf, s.Value)
+
+	var bb bitflagBuilder
+	bb.PutU256Length(valN)
+	header := bb.Finalize(6)
+
+	written := 0
+	written += copy(bufWrite(buf, len(header)), header)
+	written += copy(bufWrite(buf, 32), s.Key[:])
+	written += copy(bufWrite(buf, valN), valBuf.Bytes())
+	return written
+}
+
+func (s *StorageEntry) DecodeCompact(b []byte, totalLen int) int {
+	if len(b) < 1 {
+		panic("StorageEntry: header truncated")
+	}
+	header := b[:1]
+	cursor := 1
+
+	var br bitflagReader
+	br.Init(header, 6)
+	valN := br.GetU256Length()
+
+	copy(s.Key[:], b[cursor:cursor+32])
+	cursor += 32
+
+	s.Value = decodeU256Compact(b[cursor:], valN)
+	cursor += valN
+
+	if cursor != totalLen {
+		panic("StorageEntry: cursor != totalLen")
+	}
+	return cursor
+}
