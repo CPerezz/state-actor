@@ -172,16 +172,21 @@ func encodeBytecodeCompact(code []byte) []byte {
 	copy(analyzed, code)
 	// Remaining bytes are already zero (padding with STOP=0x00).
 
-	// Build jump table: ceil(analyzedLen/8) bytes, bitvec<u8, Lsb0>.
+	// Build jump table: ceil(originalLen/8) bytes, bitvec<u8, Lsb0>.
+	// reth/revm initialize the bitvec at original length: `bitvec![u8, Lsb0; 0;
+	// bytecode.len()]` — the bitmap is NOT extended during padding analysis.
 	// Bit at position pos: byte = pos/8, bit offset = pos%8 (0=LSB).
-	jtBytes := (analyzedLen + 7) / 8
+	jtBytes := (originalLen + 7) / 8
 	jumpTable := make([]byte, jtBytes)
 	for pos, isJump := range jumps {
-		if isJump {
-			byteIdx := pos / 8
-			bitIdx := uint(pos % 8)
-			jumpTable[byteIdx] |= 1 << bitIdx
+		if !isJump || pos >= originalLen {
+			// JUMPDESTs in padding bytes don't exist (padding is all-zero STOP)
+			// but guard out-of-range writes anyway.
+			continue
 		}
+		byteIdx := pos / 8
+		bitIdx := uint(pos % 8)
+		jumpTable[byteIdx] |= 1 << bitIdx
 	}
 
 	// Assemble wire format:
