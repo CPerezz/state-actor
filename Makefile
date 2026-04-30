@@ -1,4 +1,5 @@
 .PHONY: all build test clean docker install lint fmt help \
+	image-reth test-reth-cgo test-reth-oracle \
 	docker-nethermind docker-nethermind-test test-nethermind-oracle \
 	smoke-nethermind smoke-nethermind-spamoor \
 	docker-besu docker-besu-test test-besu-oracle \
@@ -234,3 +235,32 @@ help:
 	@echo ""
 	@echo "Targets:"
 	@grep -E '^## ' $(MAKEFILE_LIST) | sed 's/## /  /'
+
+# ---------------------------------------------------------------------------
+# Reth / cgo targets
+# ---------------------------------------------------------------------------
+
+## image-reth: Build the cgo+libmdbx Docker image for direct-write reth
+image-reth:
+	docker build -f Dockerfile.reth --target builder -t state-actor-reth .
+
+## test-reth-cgo: Run cgo_reth-tagged unit tests inside the Docker image
+# Use this when local dev does not have libmdbx + librocksdb headers installed.
+test-reth-cgo: image-reth
+	docker run --rm state-actor-reth go test -tags cgo_reth ./client/reth/...
+
+## test-reth-oracle: Run the differential oracle test (boots paradigmxyz/reth db stats)
+# Requires Docker daemon. Gated by build tags `cgo_reth oracle`.
+# Uses a named Docker volume so both containers (state-actor-reth and
+# paradigmxyz/reth) share the same filesystem namespace via the Docker daemon.
+ORACLE_VOL ?= reth-oracle-datadir
+test-reth-oracle: image-reth
+	docker volume rm -f $(ORACLE_VOL) >/dev/null 2>&1 || true
+	docker volume create $(ORACLE_VOL)
+	docker run --rm \
+	  -v $(ORACLE_VOL):/oracle-data \
+	  -v /var/run/docker.sock:/var/run/docker.sock \
+	  -e RETH_ORACLE_DATADIR=/oracle-data \
+	  -e RETH_ORACLE_VOL=$(ORACLE_VOL) \
+	  state-actor-reth go test -tags 'cgo_reth oracle' ./client/reth/ -run TestRethDbStats -v
+	docker volume rm -f $(ORACLE_VOL) >/dev/null 2>&1 || true
