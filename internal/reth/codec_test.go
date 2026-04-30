@@ -3,6 +3,8 @@ package reth
 import (
 	"bytes"
 	"testing"
+
+	"github.com/holiman/uint256"
 )
 
 func TestVarUintRoundtrip(t *testing.T) {
@@ -91,5 +93,35 @@ func TestU64StrippedHighByte(t *testing.T) {
 	}
 	if n != 4 {
 		t.Errorf("u64(0x12345678) length = %d, want 4", n)
+	}
+}
+
+func TestU256StrippedRoundtrip(t *testing.T) {
+	cases := []*uint256.Int{
+		uint256.NewInt(0),
+		uint256.NewInt(1),
+		uint256.NewInt(0xff),
+		uint256.NewInt(0x100),
+		new(uint256.Int).SetAllOne(), // 2^256 - 1
+		uint256.MustFromHex("0x10000000000000000"),
+	}
+	for _, v := range cases {
+		var buf bytes.Buffer
+		n := encodeU256Compact(&buf, v)
+		if n != buf.Len() {
+			t.Errorf("encodeU256Compact(%s) returned len=%d but wrote %d bytes", v, n, buf.Len())
+		}
+		decoded := decodeU256Compact(buf.Bytes(), n)
+		if !decoded.Eq(v) {
+			t.Errorf("U256 stripped roundtrip: %s -> hex=%x -> %s", v, buf.Bytes(), decoded)
+		}
+	}
+}
+
+func TestU256StrippedZero(t *testing.T) {
+	var buf bytes.Buffer
+	n := encodeU256Compact(&buf, uint256.NewInt(0))
+	if n != 0 || buf.Len() != 0 {
+		t.Errorf("U256=0 must encode to 0 bytes, got n=%d", n)
 	}
 }
