@@ -2,6 +2,8 @@ package reth
 
 import (
 	"bytes"
+
+	"github.com/holiman/uint256"
 )
 
 // encodeVarUint writes v in LEB128 form (7-bit chunks, MSB continuation).
@@ -75,4 +77,32 @@ func decodeU64Compact(b []byte, n int) uint64 {
 		v = (v << 8) | uint64(b[i])
 	}
 	return v
+}
+
+// encodeU256Compact writes v in big-endian form with leading zeros stripped.
+// Returns byte count written (0..=32). Length is recorded out-of-band like
+// encodeU64Compact.
+func encodeU256Compact(buf *bytes.Buffer, v *uint256.Int) int {
+	var raw [32]byte
+	v.WriteToSlice(raw[:])
+	i := 0
+	for i < 32 && raw[i] == 0 {
+		i++
+	}
+	n := 32 - i
+	buf.Write(raw[i:])
+	return n
+}
+
+// decodeU256Compact reads a stripped-big-endian U256 of length n bytes from b.
+func decodeU256Compact(b []byte, n int) *uint256.Int {
+	if n < 0 || n > 32 {
+		panic("U256 compact length out of range")
+	}
+	if n > len(b) {
+		panic("U256 compact buffer too short")
+	}
+	var raw [32]byte
+	copy(raw[32-n:], b[:n])
+	return new(uint256.Int).SetBytes(raw[:])
 }
