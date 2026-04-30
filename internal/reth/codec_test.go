@@ -125,3 +125,26 @@ func TestU256StrippedZero(t *testing.T) {
 		t.Errorf("U256=0 must encode to 0 bytes, got n=%d", n)
 	}
 }
+
+func TestBytesRoundtrip(t *testing.T) {
+	cases := [][]byte{
+		nil,
+		{},
+		{0x00},
+		{0x01, 0x02, 0x03},
+		make([]byte, 1024),
+	}
+	cases[len(cases)-1][0] = 0xab
+	cases[len(cases)-1][1023] = 0xcd
+	for i, in := range cases {
+		var buf bytes.Buffer
+		n := encodeBytesCompact(&buf, in)
+		if n != len(in) {
+			t.Errorf("case %d: returned %d, want %d", i, n, len(in))
+		}
+		out := decodeBytesCompact(buf.Bytes(), n)
+		if !bytes.Equal(out, in) {
+			t.Errorf("case %d: roundtrip mismatch in=%x out=%x", i, in, out)
+		}
+	}
+}

@@ -106,3 +106,21 @@ func decodeU256Compact(b []byte, n int) *uint256.Int {
 	copy(raw[32-n:], b[:n])
 	return new(uint256.Int).SetBytes(raw[:])
 }
+
+// encodeBytesCompact writes b verbatim. Length is out-of-band; reth-codecs
+// stores Bytes-typed fields LAST in struct order so the consumer reads them
+// using "remaining buffer length".
+func encodeBytesCompact(buf *bytes.Buffer, b []byte) int {
+	buf.Write(b)
+	return len(b)
+}
+
+// decodeBytesCompact returns a copy of the first n bytes of b.
+func decodeBytesCompact(b []byte, n int) []byte {
+	if n > len(b) {
+		panic("bytes compact buffer too short")
+	}
+	out := make([]byte, n)
+	copy(out, b[:n])
+	return out
+}
