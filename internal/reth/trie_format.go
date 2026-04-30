@@ -138,3 +138,40 @@ func writeBEU16(buf *bytes.Buffer, v uint16) int {
 func readBEU16(b []byte) uint16 {
 	return uint16(b[0])<<8 | uint16(b[1])
 }
+
+// StorageTrieEntry is the DupSort value of StoragesTrie. The 33-byte SubKey
+// is also the MDBX DupSort sub-key prefix; reth re-encodes it inside the
+// value for self-description.
+//
+// Wire (best-effort hand-derived; Task 16 cross-validates against Rust):
+//
+//	33 bytes SubKey (StoredNibblesSubKey) || BranchNodeCompact bytes
+type StorageTrieEntry struct {
+	SubKey StoredNibblesSubKey
+	Node   BranchNodeCompact
+}
+
+func (e *StorageTrieEntry) EncodeCompact(buf *bytes.Buffer) int {
+	written := 0
+	written += copy(bufWrite(buf, 1), []byte{e.SubKey.Length})
+	written += copy(bufWrite(buf, 32), e.SubKey.Packed[:])
+	written += e.Node.EncodeCompact(buf)
+	return written
+}
+
+func (e *StorageTrieEntry) DecodeCompact(data []byte, totalLen int) int {
+	if totalLen < 33 {
+		panic("StorageTrieEntry: totalLen < 33 (SubKey truncated)")
+	}
+	if len(data) < totalLen {
+		panic("StorageTrieEntry: buffer shorter than totalLen")
+	}
+	e.SubKey.Length = data[0]
+	copy(e.SubKey.Packed[:], data[1:33])
+	nodeLen := totalLen - 33
+	consumed := e.Node.DecodeCompact(data[33:], nodeLen)
+	if consumed != nodeLen {
+		panic("StorageTrieEntry: inner node consumed != totalLen-33")
+	}
+	return totalLen
+}

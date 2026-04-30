@@ -104,3 +104,27 @@ func branchNodeEqual(a, b BranchNodeCompact) bool {
 	}
 	return true
 }
+
+func TestStorageTrieEntryRoundtrip(t *testing.T) {
+	h := common.HexToHash("0xabc")
+	in := StorageTrieEntry{
+		SubKey: StoredNibbles{Length: 4, Packed: packNibbles([]byte{1, 2, 3, 4})},
+		Node: BranchNodeCompact{
+			StateMask: 0x0001, TreeMask: 0, HashMask: 0x0001,
+			Hashes: []common.Hash{h}, RootHash: nil,
+		},
+	}
+	var buf bytes.Buffer
+	n := in.EncodeCompact(&buf)
+	var out StorageTrieEntry
+	consumed := out.DecodeCompact(buf.Bytes(), n)
+	if consumed != n {
+		t.Errorf("consumed %d, encoded %d", consumed, n)
+	}
+	if in.SubKey != out.SubKey {
+		t.Errorf("SubKey roundtrip mismatch")
+	}
+	if !branchNodeEqual(in.Node, out.Node) {
+		t.Errorf("Node roundtrip mismatch hex=%x", buf.Bytes())
+	}
+}
