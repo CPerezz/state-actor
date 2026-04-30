@@ -1,8 +1,9 @@
 package reth
 
 // Pinned versions of the upstream reth artifacts we mirror. Bumping any of
-// these requires running the differential oracle (client/reth/oracle_test.go)
-// and regenerating testdata/fixtures.json — see testdata/README.md.
+// these requires regenerating testdata/fixtures.json (see testdata/README.md)
+// and, once it lands, running the differential oracle that will live at
+// client/reth/oracle_test.go (Slice F scope).
 const (
 	// PinnedRethCommit is the exact reth source SHA whose schema and codec
 	// this package mirrors.

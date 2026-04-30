@@ -87,15 +87,6 @@ func (a *Account) DecodeCompact(b []byte, totalLen int) int {
 	return cursor
 }
 
-// bufWrite extends buf by n bytes and returns a slice into the new region for
-// `copy` to fill. Useful for shaping struct emission code as a sequence of
-// `copy(bufWrite(...), src)` calls that mirror the wire layout one-to-one.
-func bufWrite(buf *bytes.Buffer, n int) []byte {
-	start := buf.Len()
-	buf.Write(make([]byte, n))
-	return buf.Bytes()[start : start+n]
-}
-
 // StorageEntry mirrors reth-db-models 0.3.1's StorageEntry struct.
 //
 // Wire format:

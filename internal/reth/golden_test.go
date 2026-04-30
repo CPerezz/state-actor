@@ -114,8 +114,7 @@ func TestGoldenBranchNodeCompact(t *testing.T) {
 	for _, fx := range cases {
 		in, ok := inputs[fx.Label]
 		if !ok {
-			t.Errorf("unknown fixture label %q — Rust and Go are out of sync", fx.Label)
-			continue
+			t.Fatalf("unknown fixture label %q — Rust and Go are out of sync", fx.Label)
 		}
 		var buf bytes.Buffer
 		in.EncodeCompact(&buf)

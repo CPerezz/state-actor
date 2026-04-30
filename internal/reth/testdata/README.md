@@ -8,8 +8,13 @@ cd internal/reth/testdata/gen && cargo run --release
 
 Regenerate ONLY when bumping any of `internal/reth/constants.go`'s pinned
 versions (PinnedCodecsVer, PinnedAlloyTrieVer, PinnedRethRelease,
-PinnedRethCommit). After regenerating, re-run `go test ./internal/reth/...`
-and resolve any diffs in the codec encoders before committing the new
-fixtures.
+PinnedRethCommit) **OR** the nightly channel in `gen/rust-toolchain.toml`.
+After regenerating, re-run `go test ./internal/reth/...` and resolve any
+diffs in the codec encoders before committing the new fixtures.
+
+The nightly toolchain pin is intentional: reth-codecs 0.3.1's MSRV (1.93)
+is newer than Homebrew's stable rustc (1.88 at time of writing). If you
+update `gen/rust-toolchain.toml` (channel/date), regenerate fixtures in
+the same commit so byte output stays reproducible.
 
 Requires Rust toolchain (`rustup`); not needed for normal Go development.
