@@ -148,9 +148,12 @@ func readBEU16(b []byte) uint16 {
 // is also the MDBX DupSort sub-key prefix; reth re-encodes it inside the
 // value for self-description.
 //
-// Wire (best-effort hand-derived; Task 16 cross-validates against Rust):
+// Wire:
 //
 //	33 bytes SubKey (StoredNibblesSubKey) || BranchNodeCompact bytes
+//
+// SubKey layout is fixed (Task 11) and BranchNodeCompact is cross-validated
+// against Rust canonical hex via golden_test.go.
 type StorageTrieEntry struct {
 	SubKey StoredNibblesSubKey
 	Node   BranchNodeCompact
