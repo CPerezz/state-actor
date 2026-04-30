@@ -262,5 +262,5 @@ test-reth-oracle: image-reth
 	  -v /var/run/docker.sock:/var/run/docker.sock \
 	  -e RETH_ORACLE_DATADIR=/oracle-data \
 	  -e RETH_ORACLE_VOL=$(ORACLE_VOL) \
-	  state-actor-reth go test -tags 'cgo_reth oracle' ./client/reth/ -run TestRethDbStats -v
+	  state-actor-reth go test -tags 'cgo_reth oracle' ./client/reth/ -run TestRethDbStats -v -timeout 300s
 	docker volume rm -f $(ORACLE_VOL) >/dev/null 2>&1 || true
