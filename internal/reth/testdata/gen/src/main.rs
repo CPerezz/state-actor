@@ -5,6 +5,7 @@ use std::io::Write;
 use alloy_primitives::{B256, U256};
 use alloy_trie::{nodes::BranchNodeCompact, TrieMask};
 use reth_codecs::Compact;
+use roaring::RoaringTreemap;
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -45,6 +46,22 @@ fn main() {
         U256::MAX,
     ] {
         fixtures.push(fix(&format!("u256_{:x}", v), "U256", enc(&v)));
+    }
+
+    // ---- IntegerList (RoaringTreemap serialization) ----
+    // Mirrors reth-db-api's IntegerList::to_bytes() which calls
+    // RoaringTreemap::serialize_into (crates/storage/db-api/src/models/integer_list.rs).
+    let il_cases: Vec<(&str, Vec<u64>)> = vec![
+        ("il_empty", vec![]),
+        ("il_single", vec![0]),
+        ("il_small", vec![0, 1, 2, 3]),
+        ("il_sparse", vec![0, 100, 200, 0x12345678]),
+    ];
+    for (label, values) in il_cases {
+        let bm = RoaringTreemap::from_sorted_iter(values.into_iter()).expect("sorted");
+        let mut bytes = Vec::with_capacity(bm.serialized_size());
+        bm.serialize_into(&mut bytes).expect("serialize");
+        fixtures.push(fix(label, "IntegerList", bytes));
     }
 
     // ---- BranchNodeCompact ----

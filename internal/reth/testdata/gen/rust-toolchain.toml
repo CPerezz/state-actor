@@ -1,6 +1,7 @@
 [toolchain]
-# Pinned nightly date so fixture regeneration is byte-reproducible across
-# machines. Bump only when intentionally re-validating against a newer
-# rustc; check the new fixtures.json into the same commit as the bump.
-# Homebrew rustc 1.88 < reth-codecs 0.3.1 MSRV (1.93), hence nightly.
-channel = "nightly-2026-04-30"
+# Nightly required because reth-codecs 0.3.1 MSRV (1.93) > Homebrew rustc 1.88.
+# Use "nightly" (latest installed) rather than a pinned date; the roaring
+# serialization format is stable so byte output is reproducible across nightly
+# versions.  If regenerating on a machine without rustup, install nightly via:
+#   rustup toolchain install nightly
+channel = "nightly"
