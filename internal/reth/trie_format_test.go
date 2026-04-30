@@ -52,3 +52,55 @@ func packNibbles(nibbles []byte) common.Hash {
 	}
 	return packed
 }
+
+func TestBranchNodeCompactRoundtrip(t *testing.T) {
+	h1 := common.HexToHash("0x1111111111111111111111111111111111111111111111111111111111111111")
+	h2 := common.HexToHash("0x2222222222222222222222222222222222222222222222222222222222222222")
+	cases := []BranchNodeCompact{
+		// minimal: no children
+		{StateMask: 0, TreeMask: 0, HashMask: 0, Hashes: nil, RootHash: nil},
+		// one hashed child
+		{StateMask: 0x0001, TreeMask: 0, HashMask: 0x0001, Hashes: []common.Hash{h1}, RootHash: nil},
+		// two hashed children + root
+		{StateMask: 0x0003, TreeMask: 0x0002, HashMask: 0x0003, Hashes: []common.Hash{h1, h2}, RootHash: &h1},
+		// full state, all hashed
+		{
+			StateMask: 0xffff, TreeMask: 0x0000, HashMask: 0xffff,
+			Hashes:   []common.Hash{h1, h2, h1, h2, h1, h2, h1, h2, h1, h2, h1, h2, h1, h2, h1, h2},
+			RootHash: &h2,
+		},
+	}
+	for i, in := range cases {
+		var buf bytes.Buffer
+		n := in.EncodeCompact(&buf)
+		var out BranchNodeCompact
+		consumed := out.DecodeCompact(buf.Bytes(), n)
+		if consumed != n {
+			t.Errorf("case %d: consumed %d, encoded %d", i, consumed, n)
+		}
+		if !branchNodeEqual(in, out) {
+			t.Errorf("case %d: in=%+v out=%+v hex=%x", i, in, out, buf.Bytes())
+		}
+	}
+}
+
+func branchNodeEqual(a, b BranchNodeCompact) bool {
+	if a.StateMask != b.StateMask || a.TreeMask != b.TreeMask || a.HashMask != b.HashMask {
+		return false
+	}
+	if len(a.Hashes) != len(b.Hashes) {
+		return false
+	}
+	for i := range a.Hashes {
+		if a.Hashes[i] != b.Hashes[i] {
+			return false
+		}
+	}
+	if (a.RootHash == nil) != (b.RootHash == nil) {
+		return false
+	}
+	if a.RootHash != nil && *a.RootHash != *b.RootHash {
+		return false
+	}
+	return true
+}
