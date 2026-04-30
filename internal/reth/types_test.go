@@ -151,3 +151,48 @@ func TestBlockNumberAddressRoundtrip(t *testing.T) {
 		t.Errorf("BlockNumberAddress roundtrip mismatch")
 	}
 }
+
+func TestStoredBlockBodyIndicesRoundtrip(t *testing.T) {
+	cases := []StoredBlockBodyIndices{
+		{FirstTxNum: 0, TxCount: 0},
+		{FirstTxNum: 1, TxCount: 1},
+		{FirstTxNum: 0x12345678, TxCount: 0xff},
+	}
+	for i, in := range cases {
+		var buf bytes.Buffer
+		n := in.EncodeCompact(&buf)
+		var out StoredBlockBodyIndices
+		out.DecodeCompact(buf.Bytes(), n)
+		if in != out {
+			t.Errorf("case %d: in=%+v out=%+v hex=%x", i, in, out, buf.Bytes())
+		}
+	}
+}
+
+func TestStageCheckpointRoundtrip(t *testing.T) {
+	cases := []StageCheckpoint{
+		{BlockNumber: 0},
+		{BlockNumber: 1},
+		{BlockNumber: 0x12345678},
+	}
+	for i, in := range cases {
+		var buf bytes.Buffer
+		n := in.EncodeCompact(&buf)
+		var out StageCheckpoint
+		out.DecodeCompact(buf.Bytes(), n)
+		if in != out {
+			t.Errorf("case %d: in=%+v out=%+v hex=%x", i, in, out, buf.Bytes())
+		}
+	}
+}
+
+func TestClientVersionRoundtrip(t *testing.T) {
+	in := ClientVersion{Version: "1.0.0", GitSha: "deadbeef", BuildTimestamp: "1700000000"}
+	var buf bytes.Buffer
+	n := in.EncodeCompact(&buf)
+	var out ClientVersion
+	out.DecodeCompact(buf.Bytes(), n)
+	if in != out {
+		t.Errorf("in=%+v out=%+v hex=%x", in, out, buf.Bytes())
+	}
+}
