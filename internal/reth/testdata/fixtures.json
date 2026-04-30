@@ -16,6 +16,50 @@
       "hex": "000300020003111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222"
     }
   ],
+  "HashBuilderEmissions": [
+    {
+      "label": "hb_single_emissions",
+      "type_name": "HashBuilderEmissions",
+      "hex": ""
+    },
+    {
+      "label": "hb_two_shared_emissions",
+      "type_name": "HashBuilderEmissions",
+      "hex": ""
+    },
+    {
+      "label": "hb_three_top_emissions",
+      "type_name": "HashBuilderEmissions",
+      "hex": ""
+    },
+    {
+      "label": "hb_full_branch_emissions",
+      "type_name": "HashBuilderEmissions",
+      "hex": ""
+    }
+  ],
+  "HashBuilderRoot": [
+    {
+      "label": "hb_single_root",
+      "type_name": "HashBuilderRoot",
+      "hex": "3bded4a820bf85bf52f16d0645b35284c0d922747d0ca84e8f2108d37d491403"
+    },
+    {
+      "label": "hb_two_shared_root",
+      "type_name": "HashBuilderRoot",
+      "hex": "4d96abf5999caa6777e0b2f147f08c462eb0d25525d8b19c51b168b9f2f8506a"
+    },
+    {
+      "label": "hb_three_top_root",
+      "type_name": "HashBuilderRoot",
+      "hex": "68a7eae8ca7a49c05c5fdb8062105aa85867e4529c1bd19f0f364918ca07a56d"
+    },
+    {
+      "label": "hb_full_branch_root",
+      "type_name": "HashBuilderRoot",
+      "hex": "e9f165f8d34082059236ecda1ac3732db9eabfd1e5ca62a2f687d574596868dc"
+    }
+  ],
   "IntegerList": [
     {
       "label": "il_empty",
