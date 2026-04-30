@@ -163,3 +163,104 @@ func DecodeIntegerList(b []byte) ([]uint64, int) {
 	}
 	return out, n
 }
+
+// ShardedKeyAddress is the AccountsHistory key. Address followed by a u64
+// block-number suffix.
+//
+// Wire (MDBX key encoding, fixed 28 bytes):
+//
+//	address[20] || BE_u64(block_number)[8]
+type ShardedKeyAddress struct {
+	Address     common.Address
+	BlockNumber uint64
+}
+
+func (k *ShardedKeyAddress) EncodeKey(buf *bytes.Buffer) {
+	buf.Write(k.Address[:])
+	writeBEU64(buf, k.BlockNumber)
+}
+
+func (k *ShardedKeyAddress) DecodeKey(b []byte) {
+	if len(b) < 28 {
+		panic("ShardedKeyAddress: truncated key")
+	}
+	copy(k.Address[:], b[:20])
+	k.BlockNumber = readBEU64(b[20:])
+}
+
+// StorageShardedKey is the StoragesHistory key. Address + per-slot storage
+// key + block-number suffix.
+//
+// Wire (MDBX key encoding, fixed 60 bytes):
+//
+//	address[20] || storage_key[32] || BE_u64(block_number)[8]
+type StorageShardedKey struct {
+	Address     common.Address
+	StorageKey  common.Hash
+	BlockNumber uint64
+}
+
+func (k *StorageShardedKey) EncodeKey(buf *bytes.Buffer) {
+	buf.Write(k.Address[:])
+	buf.Write(k.StorageKey[:])
+	writeBEU64(buf, k.BlockNumber)
+}
+
+func (k *StorageShardedKey) DecodeKey(b []byte) {
+	if len(b) < 60 {
+		panic("StorageShardedKey: truncated key")
+	}
+	copy(k.Address[:], b[:20])
+	copy(k.StorageKey[:], b[20:52])
+	k.BlockNumber = readBEU64(b[52:])
+}
+
+// BlockNumberAddress is the StorageChangeSets key. Block-number FIRST so
+// MDBX sorts numerically by block.
+//
+// Wire (MDBX key encoding, fixed 28 bytes):
+//
+//	BE_u64(block_number)[8] || address[20]
+type BlockNumberAddress struct {
+	BlockNumber uint64
+	Address     common.Address
+}
+
+func (k *BlockNumberAddress) EncodeKey(buf *bytes.Buffer) {
+	writeBEU64(buf, k.BlockNumber)
+	buf.Write(k.Address[:])
+}
+
+func (k *BlockNumberAddress) DecodeKey(b []byte) {
+	if len(b) < 28 {
+		panic("BlockNumberAddress: truncated key")
+	}
+	k.BlockNumber = readBEU64(b[:8])
+	copy(k.Address[:], b[8:28])
+}
+
+// writeBEU64 writes v as 8 big-endian bytes.
+func writeBEU64(buf *bytes.Buffer, v uint64) {
+	var be [8]byte
+	be[0] = byte(v >> 56)
+	be[1] = byte(v >> 48)
+	be[2] = byte(v >> 40)
+	be[3] = byte(v >> 32)
+	be[4] = byte(v >> 24)
+	be[5] = byte(v >> 16)
+	be[6] = byte(v >> 8)
+	be[7] = byte(v)
+	buf.Write(be[:])
+}
+
+// readBEU64 reads 8 big-endian bytes from b[:8] as uint64.
+func readBEU64(b []byte) uint64 {
+	return uint64(b[0])<<56 |
+		uint64(b[1])<<48 |
+		uint64(b[2])<<40 |
+		uint64(b[3])<<32 |
+		uint64(b[4])<<24 |
+		uint64(b[5])<<16 |
+		uint64(b[6])<<8 |
+		uint64(b[7])
+}

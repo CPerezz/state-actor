@@ -101,3 +101,53 @@ func uint64SliceEqual(a, b []uint64) bool {
 	}
 	return true
 }
+
+func TestShardedKeyAddressRoundtrip(t *testing.T) {
+	addr := common.HexToAddress("0xdeadbeef00000000000000000000000000000000")
+	key := ShardedKeyAddress{Address: addr, BlockNumber: ^uint64(0)}
+	var buf bytes.Buffer
+	key.EncodeKey(&buf)
+	if buf.Len() != 28 {
+		t.Fatalf("ShardedKeyAddress encodes to %d bytes, want 28", buf.Len())
+	}
+	var out ShardedKeyAddress
+	out.DecodeKey(buf.Bytes())
+	if out != key {
+		t.Errorf("ShardedKeyAddress roundtrip: %+v -> %+v hex=%x", key, out, buf.Bytes())
+	}
+}
+
+func TestStorageShardedKeyRoundtrip(t *testing.T) {
+	addr := common.HexToAddress("0xff")
+	slot := common.HexToHash("0x42")
+	key := StorageShardedKey{Address: addr, StorageKey: slot, BlockNumber: ^uint64(0)}
+	var buf bytes.Buffer
+	key.EncodeKey(&buf)
+	if buf.Len() != 60 {
+		t.Fatalf("StorageShardedKey encodes to %d bytes, want 60", buf.Len())
+	}
+	var out StorageShardedKey
+	out.DecodeKey(buf.Bytes())
+	if out != key {
+		t.Errorf("StorageShardedKey roundtrip mismatch hex=%x", buf.Bytes())
+	}
+}
+
+func TestBlockNumberAddressRoundtrip(t *testing.T) {
+	addr := common.HexToAddress("0x42")
+	key := BlockNumberAddress{BlockNumber: 0x1234567890ab, Address: addr}
+	var buf bytes.Buffer
+	key.EncodeKey(&buf)
+	if buf.Len() != 28 {
+		t.Fatalf("BlockNumberAddress encodes to %d bytes, want 28", buf.Len())
+	}
+	// Sanity: high block bytes come first (BE) so MDBX sorts numerically by block.
+	if buf.Bytes()[0] != 0x00 || buf.Bytes()[7] != 0xab {
+		t.Errorf("BlockNumberAddress not big-endian: hex=%x", buf.Bytes())
+	}
+	var out BlockNumberAddress
+	out.DecodeKey(buf.Bytes())
+	if out != key {
+		t.Errorf("BlockNumberAddress roundtrip mismatch")
+	}
+}
