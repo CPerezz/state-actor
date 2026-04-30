@@ -1,0 +1,88 @@
+{
+  "BranchNodeCompact": [
+    {
+      "label": "bnc_minimal",
+      "type_name": "BranchNodeCompact",
+      "hex": "000000000000"
+    },
+    {
+      "label": "bnc_one_child",
+      "type_name": "BranchNodeCompact",
+      "hex": "0001000000011111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "label": "bnc_two_children_with_root",
+      "type_name": "BranchNodeCompact",
+      "hex": "000300020003111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222"
+    }
+  ],
+  "U256": [
+    {
+      "label": "u256_0",
+      "type_name": "U256",
+      "hex": ""
+    },
+    {
+      "label": "u256_1",
+      "type_name": "U256",
+      "hex": "01"
+    },
+    {
+      "label": "u256_ff",
+      "type_name": "U256",
+      "hex": "ff"
+    },
+    {
+      "label": "u256_100",
+      "type_name": "U256",
+      "hex": "0100"
+    },
+    {
+      "label": "u256_ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "type_name": "U256",
+      "hex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    }
+  ],
+  "u64": [
+    {
+      "label": "u64_0",
+      "type_name": "u64",
+      "hex": ""
+    },
+    {
+      "label": "u64_1",
+      "type_name": "u64",
+      "hex": "01"
+    },
+    {
+      "label": "u64_ff",
+      "type_name": "u64",
+      "hex": "ff"
+    },
+    {
+      "label": "u64_100",
+      "type_name": "u64",
+      "hex": "0100"
+    },
+    {
+      "label": "u64_ffff",
+      "type_name": "u64",
+      "hex": "ffff"
+    },
+    {
+      "label": "u64_10000",
+      "type_name": "u64",
+      "hex": "010000"
+    },
+    {
+      "label": "u64_ffffffff",
+      "type_name": "u64",
+      "hex": "ffffffff"
+    },
+    {
+      "label": "u64_ffffffffffffffff",
+      "type_name": "u64",
+      "hex": "ffffffffffffffff"
+    }
+  ]
+}

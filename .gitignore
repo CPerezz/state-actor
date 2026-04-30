@@ -55,3 +55,6 @@ temp/
 # Local config
 .env
 .env.local
+
+# Rust fixture generator build artifacts
+internal/reth/testdata/gen/target/

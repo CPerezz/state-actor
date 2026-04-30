@@ -1,0 +1,13 @@
+[package]
+name = "reth-fixture-gen"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+reth-codecs = "0.3.1"
+alloy-primitives = "1"
+alloy-trie = "0.9.5"
+hex = "0.4"
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
