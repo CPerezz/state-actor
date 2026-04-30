@@ -306,6 +306,13 @@ func (b *HashBuilder) update(succeeding []byte) {
 // pushBranchNode pops the children for the branch at depth `length` off the
 // stack, encodes the branch RLP, pushes the result, and emits a BranchNodeCompact
 // if warranted (hash_mask or tree_mask non-zero).
+//
+// Emission semantics: a BranchNodeCompact is ONLY emitted when
+// hash_mask | tree_mask != 0, mirroring alloy_trie. Both masks are populated
+// exclusively by add_branch() calls (incremental re-execution), which this Go
+// port does not yet implement. Consequently, a fresh genesis build (pure-leaf
+// insertion only) produces zero emissions — the AccountsTrie/StoragesTrie tables
+// remain empty, which is correct reth behavior for genesis-only state.
 func (b *HashBuilder) pushBranchNode(current []byte, length int) {
 	stateMask := b.stateMasks[length]
 	hashMask := uint16(0)
@@ -570,8 +577,10 @@ func nibblesToCompact(nibbles []byte, isLeaf bool) []byte {
 // rlpEncodeBytes encodes a byte slice as an RLP byte string.
 func rlpEncodeBytes(b []byte) []byte {
 	if len(b) == 1 && b[0] < 0x80 {
-		// Single byte < 0x80: encoded as itself.
-		return b
+		// Single byte < 0x80: encoded as itself. Return a copy to avoid
+		// aliasing the caller's slice — mutating the result would corrupt
+		// the original buffer.
+		return []byte{b[0]}
 	}
 	return append(rlpLengthPrefix(len(b), 0x80), b...)
 }
