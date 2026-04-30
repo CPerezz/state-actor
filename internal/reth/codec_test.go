@@ -56,3 +56,40 @@ func bytesToHex(b []byte) string {
 	}
 	return string(out)
 }
+
+func TestU64StrippedRoundtrip(t *testing.T) {
+	cases := []uint64{
+		0, 1, 0xff, 0x100, 0x10000, 0xffffffff, 0x100000000, ^uint64(0),
+	}
+	for _, v := range cases {
+		var buf bytes.Buffer
+		n := encodeU64Compact(&buf, v)
+		if n != buf.Len() {
+			t.Errorf("encodeU64Compact(%#x) returned len=%d but wrote %d bytes", v, n, buf.Len())
+		}
+		decoded := decodeU64Compact(buf.Bytes(), n)
+		if decoded != v {
+			t.Errorf("u64 stripped roundtrip: %#x -> hex=%x -> %#x", v, buf.Bytes(), decoded)
+		}
+	}
+}
+
+func TestU64StrippedZero(t *testing.T) {
+	var buf bytes.Buffer
+	n := encodeU64Compact(&buf, 0)
+	if n != 0 || buf.Len() != 0 {
+		t.Errorf("u64=0 must encode to 0 bytes, got n=%d len=%d hex=%x", n, buf.Len(), buf.Bytes())
+	}
+}
+
+func TestU64StrippedHighByte(t *testing.T) {
+	var buf bytes.Buffer
+	n := encodeU64Compact(&buf, 0x12345678)
+	got := bytesToHex(buf.Bytes())
+	if got != "12345678" {
+		t.Errorf("u64(0x12345678) = %s, want 12345678", got)
+	}
+	if n != 4 {
+		t.Errorf("u64(0x12345678) length = %d, want 4", n)
+	}
+}
