@@ -48,3 +48,23 @@ func accountEqual(a, b Account) bool {
 	}
 	return true
 }
+
+func TestStorageEntryRoundtrip(t *testing.T) {
+	cases := []StorageEntry{
+		{Key: common.HexToHash("0x00"), Value: uint256.NewInt(0)},
+		{Key: common.HexToHash("0x01"), Value: uint256.NewInt(0xff)},
+		{Key: common.HexToHash("0xdeadbeef"), Value: new(uint256.Int).SetAllOne()},
+	}
+	for i, in := range cases {
+		var buf bytes.Buffer
+		n := in.EncodeCompact(&buf)
+		var out StorageEntry
+		consumed := out.DecodeCompact(buf.Bytes(), n)
+		if consumed != n {
+			t.Errorf("case %d: consumed %d, encoded %d", i, consumed, n)
+		}
+		if in.Key != out.Key || !in.Value.Eq(out.Value) {
+			t.Errorf("case %d: in=%+v out=%+v hex=%x", i, in, out, buf.Bytes())
+		}
+	}
+}
