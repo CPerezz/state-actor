@@ -148,3 +148,44 @@ func TestBytesRoundtrip(t *testing.T) {
 		}
 	}
 }
+
+func TestBitflagBuilder(t *testing.T) {
+	// Account = (nonce: u64@4bits, balance: U256@6bits, bytecode_hash: Option<B256>@1bit)
+	// Total = 11 bits → 2-byte header.
+	var b bitflagBuilder
+	b.PutU64Length(3)            // nonce uses 3 bytes
+	b.PutU256Length(1)           // balance uses 1 byte
+	b.PutBool(true)              // bytecode_hash present
+	header := b.Finalize(11)
+	if len(header) != 2 {
+		t.Fatalf("header len = %d, want 2", len(header))
+	}
+
+	var r bitflagReader
+	r.Init(header, 11)
+	if got := r.GetU64Length(); got != 3 {
+		t.Errorf("nonce length = %d, want 3", got)
+	}
+	if got := r.GetU256Length(); got != 1 {
+		t.Errorf("balance length = %d, want 1", got)
+	}
+	if got := r.GetBool(); !got {
+		t.Errorf("bytecode_hash flag = false, want true")
+	}
+}
+
+func TestBitflagOneByteHeader(t *testing.T) {
+	// Single bool field: 1 bit → 1-byte header.
+	var b bitflagBuilder
+	b.PutBool(true)
+	header := b.Finalize(1)
+	if len(header) != 1 {
+		t.Fatalf("header len = %d, want 1", len(header))
+	}
+
+	var r bitflagReader
+	r.Init(header, 1)
+	if got := r.GetBool(); !got {
+		t.Error("flag = false, want true")
+	}
+}
