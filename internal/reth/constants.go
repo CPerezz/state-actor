@@ -21,6 +21,10 @@ const (
 	// boots against in CI. Bump when validating against a new release.
 	PinnedRethRelease = "v2.1.0"
 
+	// PinnedRethImage is the fully-qualified image reference (registry + name)
+	// without the tag. Reth is published to GHCR, not Docker Hub.
+	PinnedRethImage = "ghcr.io/paradigmxyz/reth"
+
 	// PinnedMdbxGoVer is the github.com/erigontech/mdbx-go module version
 	// that the cgo writer links against. Pinned because libmdbx C ABI is
 	// version-sensitive.
