@@ -1,13 +1,17 @@
 # syntax=docker/dockerfile:1
 # Slice C skeleton — Slice D/E will extend with state generation pipeline.
 #
-# Builds state-actor with -tags cgo_reth, linking libmdbx and librocksdb.
+# Builds state-actor with -tags cgo_reth, linking librocksdb.
+# mdbx-go bundles its own C sources (mdbx.c / mdbxgo.c) so no system
+# libmdbx package is needed.
 # Run-time stage produces a binary that can write a reth-compatible datadir
 # directly without spawning `reth init-state`.
+#
+# Uses Debian bookworm's librocksdb 7.8.3 with grocksdb v1.7.14 (last
+# release that doesn't use rocksdb API extensions absent in 7.8.3).
 
-FROM golang:1.21-bookworm AS builder
+FROM golang:1.24-bookworm AS builder
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libmdbx-dev \
     librocksdb-dev \
     libsnappy-dev \
     libzstd-dev \
@@ -19,12 +23,11 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=1 go build -tags cgo_reth -o /out/state-actor ./
+RUN mkdir -p /out && CGO_ENABLED=1 go build -tags cgo_reth -o /out/state-actor ./
 
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libmdbx0 \
-    librocksdb-dev \
+    librocksdb7.8 \
     libsnappy1v5 \
     libzstd1 \
     liblz4-1 \
