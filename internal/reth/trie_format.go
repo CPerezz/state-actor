@@ -37,16 +37,20 @@ func (s *StoredNibbles) DecodeKey(b []byte) {
 type StoredNibblesSubKey = StoredNibbles
 
 // BranchNodeCompact mirrors alloy_trie::BranchNodeCompact (alloy-trie 0.9.5,
-// nodes/branch.rs:262-285). Used as the value of AccountsTrie / StoragesTrie.
+// nodes/branch.rs). Used as the value of AccountsTrie / StoragesTrie.
 //
-// Wire format (best-effort hand-derived; Task 16 cross-validates against Rust):
+// Wire format (cross-validated against Rust in golden_test.go; canonical
+// source: reth-codecs 0.3.1 src/alloy/trie.rs lines 55-75):
 //
-//  1. 1-byte bitflag: root_hash_present(1) | padding(7)
-//  2. state_mask: BE u16
-//  3. tree_mask: BE u16
-//  4. hash_mask: BE u16
+//  1. state_mask: BE u16
+//  2. tree_mask: BE u16
+//  3. hash_mask: BE u16
+//  4. root_hash: 32 bytes, present ONLY when RootHash != nil
 //  5. hashes: popcount(hash_mask) × 32 bytes
-//  6. root_hash: 32 bytes if present
+//
+// Note: there is NO bitflag header byte. root_hash presence is inferred from
+// the total encoded length: if (totalLen-6) % 32 == 0 and the hash count
+// equals popcount(hash_mask)+1, a root_hash precedes the child hashes.
 type BranchNodeCompact struct {
 	StateMask uint16
 	TreeMask  uint16
@@ -63,35 +67,25 @@ func (b *BranchNodeCompact) EncodeCompact(buf *bytes.Buffer) int {
 		panic("BranchNodeCompact: tree_mask/hash_mask must be subset of state_mask")
 	}
 
-	var bb bitflagBuilder
-	bb.PutBool(b.RootHash != nil)
-	header := bb.Finalize(1)
-
 	written := 0
-	written += copy(bufWrite(buf, len(header)), header)
 	written += writeBEU16(buf, b.StateMask)
 	written += writeBEU16(buf, b.TreeMask)
 	written += writeBEU16(buf, b.HashMask)
-	for _, h := range b.Hashes {
-		written += copy(bufWrite(buf, 32), h[:])
-	}
+	// root_hash comes BEFORE child hashes (matches Rust to_compact, line 65-68).
 	if b.RootHash != nil {
 		written += copy(bufWrite(buf, 32), b.RootHash[:])
+	}
+	for _, h := range b.Hashes {
+		written += copy(bufWrite(buf, 32), h[:])
 	}
 	return written
 }
 
 func (b *BranchNodeCompact) DecodeCompact(data []byte, totalLen int) int {
-	cursor := 0
-	if len(data) < 1 {
-		panic("BranchNodeCompact: header truncated")
+	if totalLen < 6 {
+		panic("BranchNodeCompact: totalLen < 6 (masks truncated)")
 	}
-	header := data[:1]
-	cursor++
-
-	var br bitflagReader
-	br.Init(header, 1)
-	hasRoot := br.GetBool()
+	cursor := 0
 
 	b.StateMask = readBEU16(data[cursor:])
 	cursor += 2
@@ -100,20 +94,31 @@ func (b *BranchNodeCompact) DecodeCompact(data []byte, totalLen int) int {
 	b.HashMask = readBEU16(data[cursor:])
 	cursor += 2
 
-	count := popcount16(b.HashMask)
-	b.Hashes = make([]common.Hash, count)
-	for i := 0; i < count; i++ {
-		copy(b.Hashes[i][:], data[cursor:cursor+32])
-		cursor += 32
+	// Determine how many 32-byte hash slots remain.
+	remaining := totalLen - cursor
+	if remaining%32 != 0 {
+		panic("BranchNodeCompact: non-multiple-of-32 hash bytes")
 	}
+	numHashes := remaining / 32
+	count := popcount16(b.HashMask)
 
-	if hasRoot {
+	// If numHashes == count+1 the first slot is the root_hash.
+	b.RootHash = nil
+	if numHashes == count+1 {
 		var h common.Hash
 		copy(h[:], data[cursor:cursor+32])
 		b.RootHash = &h
 		cursor += 32
-	} else {
-		b.RootHash = nil
+		numHashes--
+	}
+	if numHashes != count {
+		panic("BranchNodeCompact: hash count mismatch")
+	}
+
+	b.Hashes = make([]common.Hash, count)
+	for i := 0; i < count; i++ {
+		copy(b.Hashes[i][:], data[cursor:cursor+32])
+		cursor += 32
 	}
 
 	if cursor != totalLen {
