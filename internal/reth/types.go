@@ -264,3 +264,129 @@ func readBEU64(b []byte) uint64 {
 		uint64(b[6])<<8 |
 		uint64(b[7])
 }
+
+// StoredBlockBodyIndices mirrors reth's BlockBodyIndices.
+//
+// Wire: 1-byte bitflag (4+4 bits, FirstTxNum length then TxCount length) ||
+//
+//	stripped(FirstTxNum) || stripped(TxCount)
+type StoredBlockBodyIndices struct {
+	FirstTxNum uint64
+	TxCount    uint64
+}
+
+func (s *StoredBlockBodyIndices) EncodeCompact(buf *bytes.Buffer) int {
+	var fBuf, cBuf bytes.Buffer
+	fN := encodeU64Compact(&fBuf, s.FirstTxNum)
+	cN := encodeU64Compact(&cBuf, s.TxCount)
+	var bb bitflagBuilder
+	bb.PutU64Length(fN)
+	bb.PutU64Length(cN)
+	header := bb.Finalize(8)
+
+	written := 0
+	written += copy(bufWrite(buf, len(header)), header)
+	written += copy(bufWrite(buf, fN), fBuf.Bytes())
+	written += copy(bufWrite(buf, cN), cBuf.Bytes())
+	return written
+}
+
+func (s *StoredBlockBodyIndices) DecodeCompact(b []byte, totalLen int) int {
+	if len(b) < 1 {
+		panic("StoredBlockBodyIndices: header truncated")
+	}
+	header := b[:1]
+	cursor := 1
+	var br bitflagReader
+	br.Init(header, 8)
+	fN := br.GetU64Length()
+	cN := br.GetU64Length()
+	s.FirstTxNum = decodeU64Compact(b[cursor:], fN)
+	cursor += fN
+	s.TxCount = decodeU64Compact(b[cursor:], cN)
+	cursor += cN
+	if cursor != totalLen {
+		panic("StoredBlockBodyIndices: cursor != totalLen")
+	}
+	return cursor
+}
+
+// StageCheckpoint mirrors the subset of reth's StageCheckpoint we use:
+// just block_number. Reth's full type also has stage-specific fields, but
+// those default-zero for genesis init — sufficient for our use.
+//
+// Wire: 1-byte bitflag (4 bits, padding=4) || stripped(BlockNumber)
+type StageCheckpoint struct {
+	BlockNumber uint64
+}
+
+func (s *StageCheckpoint) EncodeCompact(buf *bytes.Buffer) int {
+	var nBuf bytes.Buffer
+	n := encodeU64Compact(&nBuf, s.BlockNumber)
+	var bb bitflagBuilder
+	bb.PutU64Length(n)
+	header := bb.Finalize(4)
+
+	written := 0
+	written += copy(bufWrite(buf, len(header)), header)
+	written += copy(bufWrite(buf, n), nBuf.Bytes())
+	return written
+}
+
+func (s *StageCheckpoint) DecodeCompact(b []byte, totalLen int) int {
+	if len(b) < 1 {
+		panic("StageCheckpoint: header truncated")
+	}
+	header := b[:1]
+	cursor := 1
+	var br bitflagReader
+	br.Init(header, 4)
+	n := br.GetU64Length()
+	s.BlockNumber = decodeU64Compact(b[cursor:], n)
+	cursor += n
+	if cursor != totalLen {
+		panic("StageCheckpoint: cursor != totalLen")
+	}
+	return cursor
+}
+
+// ClientVersion mirrors reth's ClientVersion. Three String (==Bytes) fields.
+// In Compact, only the LAST Bytes-typed field can be unprefixed (it consumes
+// "rest of buffer"). The first two need explicit length prefixes.
+//
+// Wire:
+//
+//	varuint(len(Version)) || Version bytes ||
+//	varuint(len(GitSha))  || GitSha bytes  ||
+//	BuildTimestamp bytes  (LAST, no length prefix — consumes remaining)
+type ClientVersion struct {
+	Version        string
+	GitSha         string
+	BuildTimestamp string
+}
+
+func (c *ClientVersion) EncodeCompact(buf *bytes.Buffer) int {
+	start := buf.Len()
+	encodeVarUint(buf, uint64(len(c.Version)))
+	buf.WriteString(c.Version)
+	encodeVarUint(buf, uint64(len(c.GitSha)))
+	buf.WriteString(c.GitSha)
+	buf.WriteString(c.BuildTimestamp)
+	return buf.Len() - start
+}
+
+func (c *ClientVersion) DecodeCompact(b []byte, totalLen int) int {
+	cursor := 0
+	verLen, n := decodeVarUint(b)
+	cursor += n
+	c.Version = string(b[cursor : cursor+int(verLen)])
+	cursor += int(verLen)
+
+	shaLen, n := decodeVarUint(b[cursor:])
+	cursor += n
+	c.GitSha = string(b[cursor : cursor+int(shaLen)])
+	cursor += int(shaLen)
+
+	c.BuildTimestamp = string(b[cursor:totalLen])
+	return totalLen
+}
