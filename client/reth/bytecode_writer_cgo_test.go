@@ -168,17 +168,54 @@ func TestEncodeBytecodeCompactWireFormat(t *testing.T) {
 		// JUMPDEST (0x5B) at position 0, then STOP.
 		// analyze: i=0 → JUMPDEST → jumps[0]=true, i=1
 		//          i=1 → STOP(0x00) → i=2; loop ends. last=STOP → padding += isDupnSwapnExchange(0x5B)=0 → padding=0
-		// analyzedLen = 2
-		// jump_table: ceil(2/8)=1 byte. bit0 (pos0) = 1 → byte = 0x01.
+		// analyzedLen = 2; originalLen = 2; jt size = ceil(2/8)=1 byte; bit0=1 → 0x01.
 		code := []byte{0x5B, 0x00}
 		encoded := encodeBytecodeCompact(code)
-		// 4+2+1+8+1 = 16
 		if len(encoded) != 16 {
 			t.Errorf("expected 16 bytes, got %d", len(encoded))
 		}
 		jtByte := encoded[4+2+1+8]
 		if jtByte != 0x01 {
 			t.Errorf("jump_table byte: got 0x%02X want 0x01", jtByte)
+		}
+	})
+
+	t.Run("padding_crosses_8byte_boundary_jumptable_uses_original_len", func(t *testing.T) {
+		// 8 bytes: 7 STOPs followed by JUMPDEST. After analyze_legacy,
+		// padding adds 1 trailing STOP → analyzedLen = 9.
+		//
+		// originalLen=8 → ceil(8/8) = 1 byte of jump_table. Bit 7 set (JUMPDEST
+		// at position 7) → byte = 0x80.
+		//
+		// If the encoder incorrectly sized jump_table by analyzedLen=9, it would
+		// emit ceil(9/8) = 2 bytes (extra trailing zero). This is the precise
+		// case the holistic-review bug manifests on.
+		//
+		// Total with FIX: 4 (analyzed_len) + 9 (analyzed_bytes) + 1 (discriminant)
+		//                 + 8 (original_len) + 1 (jump_table) = 23 bytes.
+		// Total with BUG: 4 + 9 + 1 + 8 + 2 = 24 bytes (one extra zero byte).
+		code := []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x5B}
+		encoded := encodeBytecodeCompact(code)
+
+		if len(encoded) != 23 {
+			t.Errorf("expected 23 bytes (originalLen=8 → 1 jt byte), got %d", len(encoded))
+		}
+		// Verify original_len field reads back as 8.
+		gotOriginalLen := uint64(encoded[4+9+1])<<56 |
+			uint64(encoded[4+9+2])<<48 |
+			uint64(encoded[4+9+3])<<40 |
+			uint64(encoded[4+9+4])<<32 |
+			uint64(encoded[4+9+5])<<24 |
+			uint64(encoded[4+9+6])<<16 |
+			uint64(encoded[4+9+7])<<8 |
+			uint64(encoded[4+9+8])
+		if gotOriginalLen != 8 {
+			t.Errorf("original_len = %d, want 8", gotOriginalLen)
+		}
+		// jt byte: bit 7 set (LSB-first → 0x80).
+		jtByte := encoded[4+9+1+8]
+		if jtByte != 0x80 {
+			t.Errorf("jump_table byte = 0x%02X, want 0x80 (JUMPDEST at pos 7)", jtByte)
 		}
 	})
 }
