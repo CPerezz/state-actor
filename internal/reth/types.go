@@ -249,6 +249,47 @@ func (k *BlockNumberAddress) DecodeKey(b []byte) {
 	copy(k.Address[:], b[8:28])
 }
 
+// AccountBeforeTx is the value type of the AccountChangeSets table (DupSort).
+// Stores the account state before a block's transactions touched it.
+//
+// Wire format (reth-codecs Compact — manually implemented per accounts.rs):
+//
+//	address[20] (raw, no compaction — it is also the DupSort SubKey)
+//	if len(total) > 20: Compact-encoded Account
+//
+// For genesis-init (account newly created at block 0), info is nil and the
+// encoding is exactly 20 bytes (address only).
+type AccountBeforeTx struct {
+	Address common.Address
+	Info    *Account // nil = no prior state (newly created)
+}
+
+// EncodeCompact appends the Compact wire form of a to buf and returns bytes written.
+func (a *AccountBeforeTx) EncodeCompact(buf *bytes.Buffer) int {
+	written := copy(bufWrite(buf, 20), a.Address[:])
+	if a.Info != nil {
+		written += a.Info.EncodeCompact(buf)
+	}
+	return written
+}
+
+// DecodeCompact reads the Compact wire form from b. totalLen is the total
+// length of the encoded value (determines whether Info is present).
+func (a *AccountBeforeTx) DecodeCompact(b []byte, totalLen int) int {
+	if len(b) < 20 {
+		panic("AccountBeforeTx: truncated")
+	}
+	copy(a.Address[:], b[:20])
+	cursor := 20
+	if totalLen > 20 {
+		a.Info = &Account{}
+		cursor += a.Info.DecodeCompact(b[cursor:], totalLen-20)
+	} else {
+		a.Info = nil
+	}
+	return cursor
+}
+
 // writeBEU64 writes v as 8 big-endian bytes.
 func writeBEU64(buf *bytes.Buffer, v uint64) {
 	var be [8]byte

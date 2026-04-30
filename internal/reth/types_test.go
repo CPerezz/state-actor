@@ -186,6 +186,46 @@ func TestStageCheckpointRoundtrip(t *testing.T) {
 	}
 }
 
+func TestAccountBeforeTxNoneRoundtrip(t *testing.T) {
+	in := AccountBeforeTx{Address: common.HexToAddress("0xabc"), Info: nil}
+	var buf bytes.Buffer
+	n := in.EncodeCompact(&buf)
+	if n != 20 {
+		t.Errorf("nil-Info AccountBeforeTx encoded len = %d, want 20", n)
+	}
+	var out AccountBeforeTx
+	out.DecodeCompact(buf.Bytes(), n)
+	if in.Address != out.Address || (in.Info == nil) != (out.Info == nil) {
+		t.Errorf("roundtrip: in=%+v out=%+v", in, out)
+	}
+}
+
+func TestAccountBeforeTxSomeRoundtrip(t *testing.T) {
+	h := common.HexToHash("0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470")
+	info := &Account{
+		Nonce:        42,
+		Balance:      uint256.NewInt(1000),
+		BytecodeHash: &h,
+	}
+	in := AccountBeforeTx{Address: common.HexToAddress("0xdef"), Info: info}
+	var buf bytes.Buffer
+	n := in.EncodeCompact(&buf)
+	var out AccountBeforeTx
+	out.DecodeCompact(buf.Bytes(), n)
+	if in.Address != out.Address {
+		t.Errorf("Address mismatch: %s vs %s", in.Address.Hex(), out.Address.Hex())
+	}
+	if (in.Info == nil) != (out.Info == nil) {
+		t.Errorf("Info nil-ness mismatch")
+	}
+	if in.Info.Nonce != out.Info.Nonce {
+		t.Errorf("Nonce mismatch: %d vs %d", in.Info.Nonce, out.Info.Nonce)
+	}
+	if !in.Info.Balance.Eq(out.Info.Balance) {
+		t.Errorf("Balance mismatch")
+	}
+}
+
 func TestClientVersionRoundtrip(t *testing.T) {
 	in := ClientVersion{Version: "1.0.0", GitSha: "deadbeef", BuildTimestamp: "1700000000"}
 	var buf bytes.Buffer
