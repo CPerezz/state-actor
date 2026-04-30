@@ -153,9 +153,9 @@ func TestBitflagBuilder(t *testing.T) {
 	// Account = (nonce: u64@4bits, balance: U256@6bits, bytecode_hash: Option<B256>@1bit)
 	// Total = 11 bits → 2-byte header.
 	var b bitflagBuilder
-	b.PutU64Length(3)            // nonce uses 3 bytes
-	b.PutU256Length(1)           // balance uses 1 byte
-	b.PutBool(true)              // bytecode_hash present
+	b.PutU64Length(3)  // nonce uses 3 bytes
+	b.PutU256Length(1) // balance uses 1 byte
+	b.PutBool(true)    // bytecode_hash present
 	header := b.Finalize(11)
 	if len(header) != 2 {
 		t.Fatalf("header len = %d, want 2", len(header))
