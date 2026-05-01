@@ -729,7 +729,7 @@ func (g *Generator) generateStreamingMPT() (*Stats, error) {
 	stateRoot := accountTrie.Hash()
 	stats.StateRoot = stateRoot
 
-	if err := g.writer.SetStateRoot(stateRoot); err != nil {
+	if err := g.writer.SetStateRoot(stateRoot, false); err != nil {
 		return nil, fmt.Errorf("failed to write state root: %w", err)
 	}
 
@@ -1195,7 +1195,7 @@ func (g *Generator) generateStreamingBinary() (retStats *Stats, retErr error) {
 	stats.StateRoot = stateRoot
 
 	// Write state root via StateWriter
-	if err := g.writer.SetStateRoot(stateRoot); err != nil {
+	if err := g.writer.SetStateRoot(stateRoot, true); err != nil {
 		return nil, fmt.Errorf("failed to write snapshot root: %w", err)
 	}
 

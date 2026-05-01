@@ -465,8 +465,10 @@ func TestDatabaseContentBinaryTrie(t *testing.T) {
 	}
 	defer db.Close()
 
-	// Verify snapshot root
-	snapshotRootData, err := db.Get([]byte("SnapshotRoot"))
+	// Verify snapshot root. In bintrie mode pathdb wraps its diskdb under
+	// the "v" prefix (rawdb.VerklePrefix) at construction time, so all
+	// pathdb metadata — including SnapshotRoot — lives under that prefix.
+	snapshotRootData, err := db.Get(append([]byte("v"), []byte("SnapshotRoot")...))
 	if err != nil {
 		t.Fatalf("Failed to read snapshot root: %v", err)
 	}

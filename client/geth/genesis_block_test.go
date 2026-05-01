@@ -316,3 +316,142 @@ func TestWriteGenesisBlockBinaryTrieNoMutation(t *testing.T) {
 			gen.Config.EnableVerkleAtGenesis, origVerkle)
 	}
 }
+
+// TestWriteGenesisBlockDatabaseVersionMPT pins the rawdb DatabaseVersion gate
+// that geth uses at startup to decide "is this DB initialized?". A nil value
+// causes geth --dev to silently overwrite the DB with a fresh dev genesis,
+// discarding everything state-actor wrote.
+//
+// DatabaseVersion is read before pathdb is constructed, so it must live at
+// the raw key (NOT under the "v" prefix) regardless of trie mode.
+func TestWriteGenesisBlockDatabaseVersionMPT(t *testing.T) {
+	db := rawdb.NewMemoryDatabase()
+	defer db.Close()
+
+	stateRoot := common.HexToHash("0x1212121212121212121212121212121212121212121212121212121212121212")
+	if _, err := WriteGenesisBlock(db, sampleGenesis(), stateRoot, false, ""); err != nil {
+		t.Fatalf("WriteGenesisBlock: %v", err)
+	}
+	assertDatabaseVersionAtRawKey(t, db)
+}
+
+// TestWriteGenesisBlockDatabaseVersionBinaryTrie is the bintrie counterpart:
+// even in bintrie mode, DatabaseVersion stays at the raw key — never under
+// "v" — because geth reads it before pathdb wraps the diskdb.
+func TestWriteGenesisBlockDatabaseVersionBinaryTrie(t *testing.T) {
+	db := rawdb.NewMemoryDatabase()
+	defer db.Close()
+
+	stateRoot := common.HexToHash("0x3434343434343434343434343434343434343434343434343434343434343434")
+	if _, err := WriteGenesisBlock(db, sampleGenesis(), stateRoot, true, ""); err != nil {
+		t.Fatalf("WriteGenesisBlock: %v", err)
+	}
+	assertDatabaseVersionAtRawKey(t, db)
+
+	// And it must NOT be present under the v-prefix — leaking it there would
+	// confuse a future reader and mask a missing raw-key write.
+	prefixed, err := db.Get(append([]byte("v"), []byte("DatabaseVersion")...))
+	if err == nil && len(prefixed) != 0 {
+		t.Errorf("DatabaseVersion unexpectedly present under v-prefix: %x", prefixed)
+	}
+}
+
+// TestSnapshotGeneratorIsBintrieRoundTripMPT pins IsBintrie=false in MPT
+// mode. pathdb/journal.go discards the generator unless IsBintrie matches
+// the opening database's mode, so a stray true here would trigger a full
+// snapshot regeneration.
+func TestSnapshotGeneratorIsBintrieRoundTripMPT(t *testing.T) {
+	db := rawdb.NewMemoryDatabase()
+	defer db.Close()
+
+	stateRoot := common.HexToHash("0x5656565656565656565656565656565656565656565656565656565656565656")
+	if _, err := WriteGenesisBlock(db, sampleGenesis(), stateRoot, false, ""); err != nil {
+		t.Fatalf("WriteGenesisBlock: %v", err)
+	}
+	gen := readSnapshotGeneratorEntry(t, db, nil)
+	if !gen.Done {
+		t.Error("SnapshotGenerator.Done = false, want true")
+	}
+	if gen.IsBintrie {
+		t.Error("SnapshotGenerator.IsBintrie = true in MPT mode, want false")
+	}
+}
+
+// TestSnapshotGeneratorIsBintrieRoundTripBinaryTrie pins IsBintrie=true in
+// bintrie mode and verifies it lives under the "v" prefix. The dual signal
+// (prefix + struct field) is required because pathdb checks both.
+func TestSnapshotGeneratorIsBintrieRoundTripBinaryTrie(t *testing.T) {
+	db := rawdb.NewMemoryDatabase()
+	defer db.Close()
+
+	stateRoot := common.HexToHash("0x7878787878787878787878787878787878787878787878787878787878787878")
+	if _, err := WriteGenesisBlock(db, sampleGenesis(), stateRoot, true, ""); err != nil {
+		t.Fatalf("WriteGenesisBlock: %v", err)
+	}
+	gen := readSnapshotGeneratorEntry(t, db, []byte("v"))
+	if !gen.Done {
+		t.Error("SnapshotGenerator.Done = false under v-prefix, want true")
+	}
+	if !gen.IsBintrie {
+		t.Error("SnapshotGenerator.IsBintrie = false in bintrie mode, want true")
+	}
+}
+
+// TestWritePathDBMetadataPrefixing verifies the full key layout produced by
+// WritePathDBMetadata in isolation, without depending on WriteGenesisBlock.
+func TestWritePathDBMetadataPrefixing(t *testing.T) {
+	stateRoot := common.HexToHash("0x9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a")
+
+	for _, tc := range []struct {
+		name       string
+		binaryTrie bool
+		// pathdbKeys are read prefixed in bintrie mode, raw in MPT.
+		pathdbKeys []string
+	}{
+		{name: "MPT", binaryTrie: false, pathdbKeys: []string{"SnapshotRoot", "SnapshotGenerator"}},
+		{name: "BinaryTrie", binaryTrie: true, pathdbKeys: []string{"SnapshotRoot", "SnapshotGenerator"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := rawdb.NewMemoryDatabase()
+			defer db.Close()
+
+			if err := WritePathDBMetadata(db, stateRoot, tc.binaryTrie); err != nil {
+				t.Fatalf("WritePathDBMetadata: %v", err)
+			}
+
+			assertDatabaseVersionAtRawKey(t, db)
+
+			for _, key := range tc.pathdbKeys {
+				rawVal, _ := db.Get([]byte(key))
+				prefixedVal, _ := db.Get(append([]byte("v"), []byte(key)...))
+
+				if tc.binaryTrie {
+					if len(rawVal) != 0 {
+						t.Errorf("key %q present at raw position in bintrie mode: %x", key, rawVal)
+					}
+					if len(prefixedVal) == 0 {
+						t.Errorf("key %q missing under v-prefix in bintrie mode", key)
+					}
+				} else {
+					if len(rawVal) == 0 {
+						t.Errorf("key %q missing at raw position in MPT mode", key)
+					}
+					if len(prefixedVal) != 0 {
+						t.Errorf("key %q unexpectedly present under v-prefix in MPT mode: %x", key, prefixedVal)
+					}
+				}
+			}
+		})
+	}
+}
+
+func assertDatabaseVersionAtRawKey(t *testing.T, db ethdb.KeyValueReader) {
+	t.Helper()
+	v := rawdb.ReadDatabaseVersion(db)
+	if v == nil {
+		t.Fatal("DatabaseVersion missing — geth will treat the DB as uninitialized and overwrite it")
+	}
+	if *v != pathdbSchemaVersion {
+		t.Errorf("DatabaseVersion = %d, want %d", *v, pathdbSchemaVersion)
+	}
+}

@@ -16,6 +16,12 @@ import (
 	"github.com/nerolation/state-actor/genesis"
 )
 
+// pathdbSchemaVersion mirrors the on-disk schema constant from
+// triedb/pathdb. Geth's startup uses rawdb.ReadDatabaseVersion as a gate
+// for "is this DB initialized?" — without this entry the DB looks blank
+// and geth silently overwrites it with a fresh dev genesis.
+const pathdbSchemaVersion = 9
+
 // prefixWriter wraps a KeyValueWriter to prepend a fixed prefix to all keys.
 // Used to write PathDB metadata into the "v" (verkle) namespace.
 type prefixWriter struct {
@@ -29,6 +35,33 @@ func (pw *prefixWriter) Put(key, value []byte) error {
 
 func (pw *prefixWriter) Delete(key []byte) error {
 	return pw.w.Delete(append(pw.prefix, key...))
+}
+
+// WritePathDBMetadata persists the metadata that geth's PathDB and snapshot
+// layers expect on a freshly populated database. Without these entries geth
+// treats the DB as uninitialized and either overwrites it with a fresh
+// genesis (missing DatabaseVersion) or triggers a full snapshot
+// regeneration (missing/mismatched SnapshotGenerator).
+//
+// Layout note: in binary trie mode pathdb wraps its diskdb under the "v"
+// (rawdb.VerklePrefix) namespace at construction time
+// (triedb/pathdb/database.go:168-170), so StateID, PersistentStateID,
+// SnapshotRoot, and SnapshotGenerator must be written under that prefix.
+// DatabaseVersion is read by geth before pathdb is constructed, so it
+// always lives at the raw key.
+func WritePathDBMetadata(w ethdb.KeyValueWriter, stateRoot common.Hash, binaryTrie bool) error {
+	pathdbWriter := w
+	if binaryTrie {
+		pathdbWriter = &prefixWriter{prefix: []byte("v"), w: w}
+	}
+	rawdb.WriteStateID(pathdbWriter, stateRoot, 0)
+	rawdb.WritePersistentStateID(pathdbWriter, 0)
+	rawdb.WriteSnapshotRoot(pathdbWriter, stateRoot)
+	if err := WriteCompletedSnapshotGenerator(pathdbWriter, binaryTrie); err != nil {
+		return fmt.Errorf("failed to write snapshot generator: %w", err)
+	}
+	rawdb.WriteDatabaseVersion(w, pathdbSchemaVersion)
+	return nil
 }
 
 // WriteGenesisBlock writes the genesis block and associated metadata to the database.
@@ -147,21 +180,8 @@ func WriteGenesisBlock(db ethdb.KeyValueStore, gen *genesis.Genesis, stateRoot c
 	rawdb.WriteHeadHeaderHash(batch, block.Hash())
 	rawdb.WriteChainConfig(batch, block.Hash(), chainCfg)
 
-	// PathDB metadata: state ID tracking and snapshot root.
-	// Required for geth's PathDB disk layer initialization (loadLayers).
-	//
-	// In binary trie mode, PathDB namespaces all its data under the "v"
-	// prefix (rawdb.VerklePrefix). A prefixWriter wraps the batch to add
-	// this prefix transparently, so rawdb functions write to the correct keys.
-	var metadataWriter ethdb.KeyValueWriter = batch
-	if binaryTrie {
-		metadataWriter = &prefixWriter{prefix: []byte("v"), w: batch}
-	}
-	rawdb.WriteStateID(metadataWriter, stateRoot, 0)
-	rawdb.WritePersistentStateID(metadataWriter, 0)
-	rawdb.WriteSnapshotRoot(metadataWriter, stateRoot)
-	if err := WriteCompletedSnapshotGenerator(metadataWriter); err != nil {
-		return nil, fmt.Errorf("failed to write snapshot generator: %w", err)
+	if err := WritePathDBMetadata(batch, stateRoot, binaryTrie); err != nil {
+		return nil, err
 	}
 
 	if err := batch.Write(); err != nil {
@@ -186,13 +206,18 @@ func WriteGenesisBlock(db ethdb.KeyValueStore, gen *genesis.Genesis, stateRoot c
 // snapshotGenerator mirrors the wire format of pathdb's unexported
 // journalGenerator. The field order, types, and naming must match
 // triedb/pathdb/journal.go exactly so RLP-encoded blobs round-trip.
+//
+// IsBintrie is rlp:"optional" upstream too: legacy v3 entries decode with
+// the field defaulted to false, which is the right answer for any merkle
+// database that wrote them.
 type snapshotGenerator struct {
-	Wiping   bool // deprecated, kept for backward compatibility
-	Done     bool
-	Marker   []byte
-	Accounts uint64
-	Slots    uint64
-	Storage  uint64
+	Wiping    bool // deprecated, kept for backward compatibility
+	Done      bool
+	Marker    []byte
+	Accounts  uint64
+	Slots     uint64
+	Storage   uint64
+	IsBintrie bool `rlp:"optional"`
 }
 
 // WriteCompletedSnapshotGenerator persists a SnapshotGenerator entry marking
@@ -206,10 +231,13 @@ type snapshotGenerator struct {
 //   - in binary trie mode (noBuild=true via isVerkle), prevents AccountIterator
 //     and SnapshotCompleted from succeeding.
 //
-// The generator's binary-trie-ness is encoded by writing under the "v"
-// (rawdb.VerklePrefix) namespace via a prefixWriter, not by a struct field.
-func WriteCompletedSnapshotGenerator(w ethdb.KeyValueWriter) error {
-	blob, err := rlp.EncodeToBytes(snapshotGenerator{Done: true})
+// The generator's binary-trie-ness is encoded both by writing under the "v"
+// (rawdb.VerklePrefix) namespace via a prefixWriter and by setting
+// IsBintrie=true in the RLP blob. pathdb/journal.go enforces a scheme match
+// on the IsBintrie field (triedb/pathdb/journal.go:163-171) and discards
+// generators whose flag does not match the opening database's mode.
+func WriteCompletedSnapshotGenerator(w ethdb.KeyValueWriter, isBintrie bool) error {
+	blob, err := rlp.EncodeToBytes(snapshotGenerator{Done: true, IsBintrie: isBintrie})
 	if err != nil {
 		return fmt.Errorf("encode snapshot generator: %w", err)
 	}
