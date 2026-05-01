@@ -66,11 +66,26 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 		return nil, fmt.Errorf("RunCgo: WriteDatabaseVersion: %w", err)
 	}
 
-	// Phase 4: synthetic account generation.
+	// Phase 4: synthetic account generation + injected accounts.
 	stateRoot := emptyMPTRoot
 	accountsCreated := 0
 	contractsCreated := 0
 	var allAccounts []*entitygen.Account // populated below; passed to writeChainSpec
+
+	// Phase 4a (new): inject pre-funded accounts (e.g. Anvil dev account
+	// 0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266) so spamoor and other test
+	// harnesses have a known-funded sender. Each gets 999_999_999 ETH, nonce 0,
+	// no code, no storage. Address is taken verbatim from cfg.InjectAddresses.
+	for _, addr := range cfg.InjectAddresses {
+		acc := buildInjectedAccount(addr)
+		allAccounts = append(allAccounts, acc)
+	}
+	if len(cfg.InjectAddresses) > 0 {
+		if err := WriteEOAs(envs, allAccounts, 0); err != nil {
+			return nil, fmt.Errorf("RunCgo: WriteEOAs(injected): %w", err)
+		}
+		accountsCreated += len(cfg.InjectAddresses)
+	}
 
 	if cfg.NumAccounts > 0 || cfg.NumContracts > 0 {
 		seed := cfg.Seed
@@ -79,7 +94,7 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 		}
 		rng := mrand.New(mrand.NewSource(seed))
 
-		// Phase 4a: EOAs.
+		// Phase 4b: synthetic EOAs.
 		if cfg.NumAccounts > 0 {
 			eoas := make([]*entitygen.Account, cfg.NumAccounts)
 			for i := 0; i < cfg.NumAccounts; i++ {
@@ -89,10 +104,10 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 				return nil, fmt.Errorf("RunCgo: WriteEOAs: %w", err)
 			}
 			allAccounts = append(allAccounts, eoas...)
-			accountsCreated = cfg.NumAccounts
+			accountsCreated += cfg.NumAccounts
 		}
 
-		// Phase 4b: contracts.
+		// Phase 4c: contracts.
 		if cfg.NumContracts > 0 {
 			codeSize := cfg.CodeSize
 			if codeSize <= 0 {
@@ -115,8 +130,10 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 			allAccounts = append(allAccounts, contracts...)
 			contractsCreated = cfg.NumContracts
 		}
+	}
 
-		// Phase 4c: compute global state root over EOAs + contracts combined.
+	// Phase 4d: compute global state root over injected + EOAs + contracts.
+	if len(allAccounts) > 0 {
 		root, err := ComputeStateRoot(allAccounts)
 		if err != nil {
 			return nil, fmt.Errorf("RunCgo: ComputeStateRoot: %w", err)
