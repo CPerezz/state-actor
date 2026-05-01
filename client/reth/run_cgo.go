@@ -70,6 +70,7 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 	stateRoot := emptyMPTRoot
 	accountsCreated := 0
 	contractsCreated := 0
+	var allAccounts []*entitygen.Account // populated below; passed to writeChainSpec
 
 	if cfg.NumAccounts > 0 || cfg.NumContracts > 0 {
 		seed := cfg.Seed
@@ -77,8 +78,6 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 			seed = 42
 		}
 		rng := mrand.New(mrand.NewSource(seed))
-
-		var allAccounts []*entitygen.Account
 
 		// Phase 4a: EOAs.
 		if cfg.NumAccounts > 0 {
@@ -126,6 +125,9 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 	}
 
 	// Phase 5a: resolve genesis + chainID, persist chainspec.json.
+	// The chainspec alloc is populated with all generated accounts so that
+	// reth's state_root_ref_unhashed(&alloc) matches our ComputeStateRoot,
+	// making the genesis hash consistent between chainspec and database.
 	genesisPath := genesisPathFromCfg(cfg)
 	gen, err := loadGenesisForReth(genesisPath)
 	if err != nil {
@@ -134,7 +136,7 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 	chainID := deriveChainID(chainIDFromCfg(cfg), gen)
 
 	chainspecPath := filepath.Join(cfg.DBPath, "chainspec.json")
-	if err := writeChainSpec(genesisPath, chainspecPath, chainID); err != nil {
+	if err := writeChainSpec(genesisPath, chainspecPath, chainID, allAccounts); err != nil {
 		return nil, fmt.Errorf("RunCgo: writeChainSpec: %w", err)
 	}
 

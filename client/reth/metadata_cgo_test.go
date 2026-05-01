@@ -101,23 +101,10 @@ func TestWriteMetadataAllTables(t *testing.T) {
 		t.Errorf("verify BlockBodyIndices: %v", err)
 	}
 
-	// Verify VersionHistory
-	if err := envs.Mdbx.View(func(txn *mdbx.Txn) error {
-		key := []byte{0, 0, 0, 0, 0, 0, 0, 0}
-		val, err := txn.Get(envs.MdbxDBIs["VersionHistory"], key)
-		if err != nil {
-			return err
-		}
-		var cv iReth.ClientVersion
-		cv.DecodeCompact(val, len(val))
-		if cv.Version != "state-actor-direct-write" {
-			t.Errorf("ClientVersion.Version = %q, want %q", cv.Version, "state-actor-direct-write")
-		}
-		if cv.GitSha != iReth.PinnedRethCommit {
-			t.Errorf("ClientVersion.GitSha = %q, want %q", cv.GitSha, iReth.PinnedRethCommit)
-		}
-		return nil
-	}); err != nil {
-		t.Errorf("verify VersionHistory: %v", err)
-	}
+	// NOTE: VersionHistory is intentionally NOT written by WriteMetadata.
+	// Reth writes its own ClientVersion entry (keyed by Unix timestamp) on
+	// every boot. If we write a pre-seeded entry our encoding must exactly
+	// match reth's Vec<u8>-per-byte Compact format, which is fragile. Leaving
+	// the table empty is safe: reth treats an empty VersionHistory as "no
+	// previous version" and just appends a fresh entry.
 }

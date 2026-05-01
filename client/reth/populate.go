@@ -92,7 +92,9 @@ func Populate(ctx context.Context, cfg generator.Config, opts Options) (*generat
 	}
 	chainID := deriveChainID(chainIDFromCfg(cfg), gen)
 
-	if err := writeChainSpec(genesisPathFromCfg(cfg), chainSpecPath, chainID); err != nil {
+	// populate.go uses reth init-state, so chainspec alloc stays empty (nil accounts).
+	// RunCgo passes the actual accounts to match the genesis hash.
+	if err := writeChainSpec(genesisPathFromCfg(cfg), chainSpecPath, chainID, nil); err != nil {
 		return nil, fmt.Errorf("write chainspec: %w", err)
 	}
 

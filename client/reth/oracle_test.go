@@ -3,14 +3,24 @@
 package reth
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"math/big"
+	mrand "math/rand"
+	"net/http"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/nerolation/state-actor/generator"
+	"github.com/nerolation/state-actor/internal/entitygen"
 	iReth "github.com/nerolation/state-actor/internal/reth"
 )
 
@@ -216,4 +226,438 @@ func TestRethDbStatsSyntheticEOAs(t *testing.T) {
 			t.Errorf("table %q: %d entries, want >= %d", table, count, minEntries)
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// TestRethNodeBootEmptyAlloc — diagnostic: verify genesis hash for empty state
+// ---------------------------------------------------------------------------
+
+// TestRethNodeBootEmptyAlloc generates a datadir with no accounts and boots
+// reth node --dev. This tests whether our genesis header (with empty state root)
+// produces a genesis hash that reth accepts. If this fails, the issue is in
+// header field encoding (not account/storage state). If this passes, the issue
+// is specific to non-empty alloc.
+func TestRethNodeBootEmptyAlloc(t *testing.T) {
+	if testing.Short() {
+		t.Skip("oracle boot test skipped in short mode")
+	}
+
+	dd, cleanup := acquireOracleDatadir(t)
+	defer cleanup()
+
+	cfg := generator.Config{
+		DBPath: dd.hostPath,
+		// No accounts, no contracts — uses empty MPT state root.
+	}
+
+	if _, err := RunCgo(context.Background(), cfg, Options{}); err != nil {
+		t.Fatalf("RunCgo: %v", err)
+	}
+
+	imageRef := rethImageRef()
+	containerName := "state-actor-reth-boot-empty-" + randSuffix(8)
+	chainspecPath := dd.containerDatadir + "/chainspec.json"
+	runCmd := exec.Command("docker", "run", "-d",
+		"--name", containerName,
+		"-v", dd.volMount,
+		imageRef,
+		"node", "--dev",
+		"--chain", chainspecPath,
+		"--datadir", dd.containerDatadir,
+		"--http",
+		"--http.addr", "0.0.0.0",
+		"--http.port", "8545",
+		"--http.api", "eth",
+	)
+	runOut, err := runCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("docker run: %s\n%v", runOut, err)
+	}
+	t.Logf("reth container started: %s", strings.TrimSpace(string(runOut)))
+
+	t.Cleanup(func() {
+		logs, _ := exec.Command("docker", "logs", containerName).CombinedOutput()
+		t.Logf("reth container logs:\n%s", logs)
+		exec.Command("docker", "stop", containerName).Run()    //nolint:errcheck
+		exec.Command("docker", "rm", "-f", containerName).Run() //nolint:errcheck
+	})
+
+	containerIP, err := inspectContainerIP(containerName)
+	if err != nil {
+		logs, _ := exec.Command("docker", "logs", containerName).CombinedOutput()
+		t.Fatalf("inspectContainerIP: %v\nreth logs:\n%s", err, logs)
+	}
+	rpcURL := "http://" + containerIP + ":8545"
+	t.Logf("reth JSON-RPC: %s", rpcURL)
+
+	if err := waitForRPC(rpcURL, 120*time.Second); err != nil {
+		t.Fatalf("RPC never came up (logs in t.Cleanup):\n%v", err)
+	}
+	t.Log("empty-alloc reth node booted successfully")
+}
+
+// ---------------------------------------------------------------------------
+// TestRethNodeBoot — Slice E deliverable
+// ---------------------------------------------------------------------------
+
+// TestRethNodeBoot generates a small state-actor datadir (10 EOAs + 3 contracts),
+// boots a stock paradigmxyz/reth node --dev container against it, then probes
+// via JSON-RPC to confirm:
+//   - eth_getBalance matches every EOA's generated balance
+//   - eth_getCode matches every contract's bytecode
+//   - eth_getStorageAt matches every contract's storage slots
+//
+// The test reproduces the exact RNG sequence used inside RunCgo (same seed,
+// same generation order) so it knows the expected values without any API
+// change to RunCgo.
+//
+// Wall-time budget: up to 120 s for reth to start (--dev mode is fast).
+// Gated by both `cgo_reth` AND `oracle` build tags. Run via
+// `make test-reth-boot` — not included in plain `go test`.
+func TestRethNodeBoot(t *testing.T) {
+	if testing.Short() {
+		t.Skip("oracle boot test skipped in short mode")
+	}
+
+	const (
+		seed        = int64(42)
+		numAccounts = 10
+		numContracts = 3
+		codeSize    = 256
+		minSlots    = 2
+		maxSlots    = 2
+	)
+
+	// Compute slotCount exactly as RunCgo does.
+	slotCount := 5
+	if minSlots > 0 && maxSlots >= minSlots {
+		slotCount = (minSlots + maxSlots) / 2
+		if slotCount < minSlots {
+			slotCount = minSlots
+		}
+	}
+
+	// Acquire oracle datadir (honours RETH_ORACLE_DATADIR / RETH_ORACLE_VOL).
+	dd, cleanup := acquireOracleDatadir(t)
+	defer cleanup()
+
+	cfg := generator.Config{
+		DBPath:       dd.hostPath,
+		NumAccounts:  numAccounts,
+		NumContracts: numContracts,
+		CodeSize:     codeSize,
+		MinSlots:     minSlots,
+		MaxSlots:     maxSlots,
+		Seed:         seed,
+	}
+
+	// Populate the datadir.
+	if _, err := RunCgo(context.Background(), cfg, Options{}); err != nil {
+		t.Fatalf("RunCgo: %v", err)
+	}
+
+	// Reproduce the RNG sequence to capture expected values.
+	rng := mrand.New(mrand.NewSource(seed))
+	eoas := make([]*entitygen.Account, numAccounts)
+	for i := 0; i < numAccounts; i++ {
+		eoas[i] = entitygen.GenerateEOA(rng)
+	}
+	contracts := make([]*entitygen.Account, numContracts)
+	for i := 0; i < numContracts; i++ {
+		contracts[i] = entitygen.GenerateContract(rng, codeSize, slotCount)
+	}
+
+	// Boot reth node --dev.
+	imageRef := rethImageRef()
+	containerName := "state-actor-reth-boot-" + randSuffix(8)
+
+	// Do NOT use --rm: we need to capture logs even if reth exits immediately.
+	// Cleanup removes the container explicitly after capturing logs.
+	// Do NOT publish the port to the host (-p). When this test runs inside a
+	// Docker container (DinD via socket mount), host-published ports are bound
+	// on the Docker host VM — not reachable from inside our test container.
+	// Instead we obtain the reth container's bridge IP via `docker inspect`
+	// and connect directly on port 8545. This works because all containers
+	// sharing the Docker daemon's default bridge network can reach each other
+	// by IP.
+	//
+	// --chain points at the chainspec.json that RunCgo persisted in the datadir.
+	// Without this, reth defaults to its built-in --dev chainspec whose genesis
+	// hash won't match our custom-written datadir.
+	chainspecPath := dd.containerDatadir + "/chainspec.json"
+	runCmd := exec.Command("docker", "run", "-d",
+		"--name", containerName,
+		"-v", dd.volMount,
+		imageRef,
+		"node", "--dev",
+		"--chain", chainspecPath,
+		"--datadir", dd.containerDatadir,
+		"--http",
+		"--http.addr", "0.0.0.0",
+		"--http.port", "8545",
+		"--http.api", "eth",
+	)
+	runOut, err := runCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("docker run: %s\n%v", runOut, err)
+	}
+	t.Logf("reth container started: %s", strings.TrimSpace(string(runOut)))
+
+	// Ensure the container is stopped and removed when the test finishes.
+	// Capture logs first for diagnosis.
+	t.Cleanup(func() {
+		logs, _ := exec.Command("docker", "logs", containerName).CombinedOutput()
+		t.Logf("reth container logs:\n%s", logs)
+		exec.Command("docker", "stop", containerName).Run()  //nolint:errcheck
+		exec.Command("docker", "rm", "-f", containerName).Run() //nolint:errcheck
+	})
+
+	// Resolve the reth container's bridge IP so we can reach it from inside
+	// our own container (or from the host when running locally).
+	containerIP, err := inspectContainerIP(containerName)
+	if err != nil {
+		logs, _ := exec.Command("docker", "logs", containerName).CombinedOutput()
+		t.Fatalf("inspectContainerIP: %v\nreth logs:\n%s", err, logs)
+	}
+	rpcURL := "http://" + containerIP + ":8545"
+	t.Logf("reth JSON-RPC: %s", rpcURL)
+
+	// Poll until the RPC endpoint is accepting connections (max 120 s).
+	if err := waitForRPC(rpcURL, 120*time.Second); err != nil {
+		t.Fatalf("RPC never came up (logs captured in t.Cleanup):\nerr: %v", err)
+	}
+
+	// ---- EOA assertions ----
+	for _, eoa := range eoas {
+		gotBal, err := rpcEthGetBalance(rpcURL, eoa.Address, "0x0")
+		if err != nil {
+			t.Errorf("eth_getBalance %s: %v", eoa.Address.Hex(), err)
+			continue
+		}
+		wantBal := eoa.StateAccount.Balance.ToBig()
+		if gotBal.Cmp(wantBal) != 0 {
+			t.Errorf("eth_getBalance %s: got %s want %s",
+				eoa.Address.Hex(), gotBal.String(), wantBal.String())
+		}
+	}
+
+	// ---- contract assertions ----
+	for _, c := range contracts {
+		// eth_getCode — reth returns the ORIGINAL bytecode (not the analyzed
+		// form), so compare against c.Code directly.
+		gotCode, err := rpcEthGetCode(rpcURL, c.Address, "0x0")
+		if err != nil {
+			t.Errorf("eth_getCode %s: %v", c.Address.Hex(), err)
+		} else if !bytes.Equal(gotCode, c.Code) {
+			t.Errorf("eth_getCode %s: len got=%d want=%d (first 32 bytes: got=%x want=%x)",
+				c.Address.Hex(), len(gotCode), len(c.Code),
+				safePrefix(gotCode, 32), safePrefix(c.Code, 32))
+		}
+
+		// eth_getStorageAt — one call per slot.
+		for _, slot := range c.Storage {
+			gotVal, err := rpcEthGetStorageAt(rpcURL, c.Address, slot.Key, "0x0")
+			if err != nil {
+				t.Errorf("eth_getStorageAt %s slot %s: %v",
+					c.Address.Hex(), slot.Key.Hex(), err)
+				continue
+			}
+			if gotVal != slot.Value {
+				t.Errorf("eth_getStorageAt %s slot %s: got %s want %s",
+					c.Address.Hex(), slot.Key.Hex(), gotVal.Hex(), slot.Value.Hex())
+			}
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// JSON-RPC helpers
+// ---------------------------------------------------------------------------
+
+// jsonRPCRequest is a minimal JSON-RPC 2.0 request.
+type jsonRPCRequest struct {
+	JSONRPC string        `json:"jsonrpc"`
+	Method  string        `json:"method"`
+	Params  []interface{} `json:"params"`
+	ID      int           `json:"id"`
+}
+
+// jsonRPCResponse is a minimal JSON-RPC 2.0 response envelope.
+type jsonRPCResponse struct {
+	JSONRPC string          `json:"jsonrpc"`
+	Result  json.RawMessage `json:"result"`
+	Error   *struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+	ID int `json:"id"`
+}
+
+// callRPC sends a single JSON-RPC call and returns the raw result bytes.
+func callRPC(url, method string, params []interface{}) (json.RawMessage, error) {
+	req := jsonRPCRequest{
+		JSONRPC: "2.0",
+		Method:  method,
+		Params:  params,
+		ID:      1,
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshal: %w", err)
+	}
+	resp, err := http.Post(url, "application/json", bytes.NewReader(body)) //nolint:noctx
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read body: %w", err)
+	}
+	var rpcResp jsonRPCResponse
+	if err := json.Unmarshal(raw, &rpcResp); err != nil {
+		return nil, fmt.Errorf("unmarshal response: %w (body: %s)", err, raw)
+	}
+	if rpcResp.Error != nil {
+		return nil, fmt.Errorf("RPC error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
+	}
+	return rpcResp.Result, nil
+}
+
+// waitForRPC polls eth_blockNumber until it succeeds or deadline is exceeded.
+func waitForRPC(url string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		_, err := callRPC(url, "eth_blockNumber", nil)
+		if err == nil {
+			return nil
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return fmt.Errorf("RPC at %s did not respond within %s", url, timeout)
+}
+
+// rpcEthGetBalance returns the balance of addr at the given block tag.
+func rpcEthGetBalance(url string, addr common.Address, block string) (*big.Int, error) {
+	raw, err := callRPC(url, "eth_getBalance", []interface{}{addr.Hex(), block})
+	if err != nil {
+		return nil, err
+	}
+	var hexStr string
+	if err := json.Unmarshal(raw, &hexStr); err != nil {
+		return nil, fmt.Errorf("unmarshal balance: %w (raw: %s)", err, raw)
+	}
+	hexStr = strings.TrimPrefix(hexStr, "0x")
+	if hexStr == "" || hexStr == "0" {
+		return new(big.Int), nil
+	}
+	n := new(big.Int)
+	if _, ok := n.SetString(hexStr, 16); !ok {
+		return nil, fmt.Errorf("parse hex balance %q", hexStr)
+	}
+	return n, nil
+}
+
+// rpcEthGetCode returns the bytecode at addr at the given block tag.
+func rpcEthGetCode(url string, addr common.Address, block string) ([]byte, error) {
+	raw, err := callRPC(url, "eth_getCode", []interface{}{addr.Hex(), block})
+	if err != nil {
+		return nil, err
+	}
+	var hexStr string
+	if err := json.Unmarshal(raw, &hexStr); err != nil {
+		return nil, fmt.Errorf("unmarshal code: %w (raw: %s)", err, raw)
+	}
+	hexStr = strings.TrimPrefix(hexStr, "0x")
+	if hexStr == "" {
+		return []byte{}, nil
+	}
+	b, err := hexDecode(hexStr)
+	if err != nil {
+		return nil, fmt.Errorf("decode code hex: %w", err)
+	}
+	return b, nil
+}
+
+// rpcEthGetStorageAt returns the value at the given storage slot.
+func rpcEthGetStorageAt(url string, addr common.Address, slot common.Hash, block string) (common.Hash, error) {
+	raw, err := callRPC(url, "eth_getStorageAt", []interface{}{addr.Hex(), slot.Hex(), block})
+	if err != nil {
+		return common.Hash{}, err
+	}
+	var hexStr string
+	if err := json.Unmarshal(raw, &hexStr); err != nil {
+		return common.Hash{}, fmt.Errorf("unmarshal storage: %w (raw: %s)", err, raw)
+	}
+	return common.HexToHash(hexStr), nil
+}
+
+// inspectContainerIP returns the bridge-network IP of a running container.
+// This is the IP that other containers (and the host when running natively)
+// can use to reach the container's exposed ports without a host port mapping.
+// In Docker-in-Docker (socket-mount) mode this is the only reliable way to
+// reach the spawned reth container from inside the test container — host port
+// mappings are bound on the Docker VM, not the test container's network.
+func inspectContainerIP(containerName string) (string, error) {
+	out, err := exec.Command("docker", "inspect",
+		"--format", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+		containerName,
+	).Output()
+	if err != nil {
+		return "", fmt.Errorf("docker inspect %s: %w", containerName, err)
+	}
+	ip := strings.TrimSpace(string(out))
+	if ip == "" {
+		return "", fmt.Errorf("container %s has no bridge IP (not yet started?)", containerName)
+	}
+	return ip, nil
+}
+
+// randSuffix returns a random lower-hex suffix of length n for container names.
+func randSuffix(n int) string {
+	const chars = "abcdef0123456789"
+	r := mrand.New(mrand.NewSource(time.Now().UnixNano()))
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = chars[r.Intn(len(chars))]
+	}
+	return string(b)
+}
+
+// hexDecode decodes a hex string (no 0x prefix) into bytes.
+func hexDecode(s string) ([]byte, error) {
+	if len(s)%2 != 0 {
+		s = "0" + s
+	}
+	b := make([]byte, len(s)/2)
+	for i := range b {
+		hi := hexNibble(s[i*2])
+		lo := hexNibble(s[i*2+1])
+		if hi > 15 || lo > 15 {
+			return nil, fmt.Errorf("invalid hex char at pos %d: %q", i*2, s[i*2:i*2+2])
+		}
+		b[i] = hi<<4 | lo
+	}
+	return b, nil
+}
+
+func hexNibble(c byte) byte {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0'
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 10
+	default:
+		return 255
+	}
+}
+
+// safePrefix returns the first n bytes of b, or all of b if len(b) < n.
+func safePrefix(b []byte, n int) []byte {
+	if len(b) <= n {
+		return b
+	}
+	return b[:n]
 }

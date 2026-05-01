@@ -16,7 +16,7 @@ import (
 // WriteMetadata populates the minimum-boot MDBX metadata into envs.
 // header is the genesis header (block 0). chainID is reth's chain ID.
 //
-// Writes 5 tables in a single atomic transaction:
+// Writes 4 tables in a single atomic transaction:
 //   - Metadata.storage_v2 = Compact-encoded StorageSettings{storage_v2: true}
 //     (1-byte bitflag header with the single bit set = 0x01). Verified
 //     against reth crates/storage/db-api/src/models/metadata.rs at
@@ -26,7 +26,13 @@ import (
 //     Compact-encoded StageCheckpoint{BlockNumber: 0}.
 //   - HeaderNumbers: header.Hash() → BE u64(0).
 //   - BlockBodyIndices: BE u64(0) → Compact StoredBlockBodyIndices{0, 0}.
-//   - VersionHistory: BE u64(0) → Compact ClientVersion identity.
+//
+// VersionHistory is intentionally NOT written here. Reth's init_db writes its
+// own ClientVersion entry keyed by the current Unix timestamp on every boot.
+// If we write a malformed entry (wrong wire format or wrong key), reth panics
+// when calling cursor.last() during record_client_version. Leaving the table
+// empty is safe: reth treats an empty table as "no previous version" and
+// simply writes a fresh entry.
 //
 // ChainState is left empty; reth populates it lazily on finality.
 //
@@ -49,9 +55,6 @@ func WriteMetadata(envs *Envs, header *types.Header, chainID uint64) error {
 		}
 		if err := writeBlockBodyIndices(txn, envs.MdbxDBIs["BlockBodyIndices"], 0); err != nil {
 			return fmt.Errorf("BlockBodyIndices: %w", err)
-		}
-		if err := writeVersionHistory(txn, envs.MdbxDBIs["VersionHistory"]); err != nil {
-			return fmt.Errorf("VersionHistory: %w", err)
 		}
 		return nil
 	})
@@ -94,20 +97,6 @@ func writeBlockBodyIndices(txn *mdbx.Txn, dbi mdbx.DBI, blockNum uint64) error {
 	var buf bytes.Buffer
 	bbi.EncodeCompact(&buf)
 	key := beU64(blockNum)
-	return txn.Put(dbi, key[:], buf.Bytes(), 0)
-}
-
-// writeVersionHistory writes a state-actor identity ClientVersion under
-// the all-zero BE u64 key (sentinel "first write") in VersionHistory.
-func writeVersionHistory(txn *mdbx.Txn, dbi mdbx.DBI) error {
-	cv := iReth.ClientVersion{
-		Version:        "state-actor-direct-write",
-		GitSha:         iReth.PinnedRethCommit,
-		BuildTimestamp: "2026-04-30",
-	}
-	var buf bytes.Buffer
-	cv.EncodeCompact(&buf)
-	key := beU64(0)
 	return txn.Put(dbi, key[:], buf.Bytes(), 0)
 }
 

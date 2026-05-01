@@ -87,53 +87,53 @@ func (a *Account) DecodeCompact(b []byte, totalLen int) int {
 	return cursor
 }
 
-// StorageEntry mirrors reth-db-models 0.3.1's StorageEntry struct.
+// StorageEntry mirrors reth-primitives-traits 0.3.x's StorageEntry Compact impl.
 //
-// Wire format:
-//  1. 1-byte bitflag header: value_length(6) padding=2
-//  2. 32-byte key (fixed, no compaction)
-//  3. Stripped-be value: 0..=32 bytes
+// Wire format (manual Compact impl, NOT derived — no bitflag header):
+//  1. 32-byte key (B256, fixed, no compaction — also serves as DupSort SubKey)
+//  2. Stripped-be value: 0..=32 bytes (length = totalLen - 32)
+//
+// This matches reth's hand-written impl in reth-primitives-traits/src/storage.rs:
+//
+//	fn to_compact(&self, buf) -> usize {
+//	    buf.put_slice(&self.key[..]);
+//	    self.value.to_compact(buf) + 32
+//	}
+//	fn from_compact(buf, len) -> (Self, &[u8]) {
+//	    let key = B256::from_slice(&buf[..32]);
+//	    let (value, out) = U256::from_compact(&buf[32..], len - 32);
+//	    (Self { key, value }, out)
+//	}
+//
+// The len argument to from_compact is the TOTAL encoded length (key+value).
+// MDBX provides this automatically via the value slice length.
 type StorageEntry struct {
 	Key   common.Hash
 	Value *uint256.Int
 }
 
+// EncodeCompact appends key[32] || stripped_be(value) to buf and returns total bytes written.
+// The returned count is needed by the caller to tell MDBX the value length.
 func (s *StorageEntry) EncodeCompact(buf *bytes.Buffer) int {
 	var valBuf bytes.Buffer
 	valN := encodeU256Compact(&valBuf, s.Value)
 
-	var bb bitflagBuilder
-	bb.PutU256Length(valN)
-	header := bb.Finalize(6)
-
 	written := 0
-	written += copy(bufWrite(buf, len(header)), header)
 	written += copy(bufWrite(buf, 32), s.Key[:])
 	written += copy(bufWrite(buf, valN), valBuf.Bytes())
 	return written
 }
 
+// DecodeCompact reads the manual Compact form from b where totalLen = len(b).
+// len(b) = 32 (key) + valN (value).
 func (s *StorageEntry) DecodeCompact(b []byte, totalLen int) int {
-	if len(b) < 1 {
-		panic("StorageEntry: header truncated")
+	if len(b) < 32 {
+		panic("StorageEntry: buffer too short for key")
 	}
-	header := b[:1]
-	cursor := 1
-
-	var br bitflagReader
-	br.Init(header, 6)
-	valN := br.GetU256Length()
-
-	copy(s.Key[:], b[cursor:cursor+32])
-	cursor += 32
-
-	s.Value = decodeU256Compact(b[cursor:], valN)
-	cursor += valN
-
-	if cursor != totalLen {
-		panic("StorageEntry: cursor != totalLen")
-	}
-	return cursor
+	copy(s.Key[:], b[:32])
+	valN := totalLen - 32
+	s.Value = decodeU256Compact(b[32:], valN)
+	return totalLen
 }
 
 // EncodeIntegerList writes the roaring-treemap-serialized form of a sorted u64 list.

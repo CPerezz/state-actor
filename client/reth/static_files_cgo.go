@@ -11,18 +11,27 @@ package reth
 // Format mirrors crates/storage/nippy-jar/src/ at PinnedRethCommit:
 //
 //   - Each segment produces three files in <datadir>/static_files/:
-//       static_file_{segment}_0_499999.conf   — bincode NippyJar<SegmentHeader>
-//       static_file_{segment}_0_499999.sf     — raw compact-encoded data
-//       static_file_{segment}_0_499999.off    — offset table (1+n*8 bytes)
+//       static_file_{segment}_0_499999          — LZ4-compressed column data (NO extension)
+//       static_file_{segment}_0_499999.off      — offset table (1+n*8 bytes)
+//       static_file_{segment}_0_499999.conf     — bincode NippyJar<SegmentHeader>
+//
+//   - Data file: each column value is independently LZ4-compressed (raw block format,
+//     matching lz4_flex::block::compress — no size prefix). Columns are concatenated.
+//     The .off file contains byte offsets into this concatenated compressed data.
 //
 //   - Bincode encoding (little-endian, no padding, length-prefixed strings):
 //       NippyJar: version(u64) + user_header + columns(u64) + rows(u64) +
-//                 compressor(Option) + max_row_size(u64)
+//                 compressor(Option<Lz4>) + max_row_size(u64)
 //       SegmentHeader: expected_block_range(16) + Option<block_range>(1+16) +
 //                      Option<tx_range>(1+16) + segment(u32) [+ csoff_len if change-based]
+//       compressor = Some(Lz4): [0x01] + u32_LE(1) = 5 bytes total
 //
-//   - Offsets file: [offset_size_byte=8] + (rows*columns+1) u64 LE offsets.
-//     Last offset = expected data file length. For rows=0: [8, 0,0,0,0,0,0,0,0] (9 bytes).
+//   - Offsets file: [offset_size_byte=8] + (rows*columns+1) u64 LE offsets into
+//     compressed data. Last offset = expected data file length.
+//     For rows=0: [8, 0,0,0,0,0,0,0,0] (9 bytes).
+//
+//   - max_row_size in conf = sum of UNCOMPRESSED column sizes (reth uses it for
+//     decompression buffer sizing).
 //
 //   - Header data encoding: reth's Compact codec (bitfield + compact fields).
 //     See headerCompactBytes for a detailed layout derivation.
@@ -44,6 +53,7 @@ import (
 	"path/filepath"
 
 	"github.com/ethereum/go-ethereum/core/types"
+	lz4 "github.com/pierrec/lz4/v4"
 )
 
 const (
@@ -121,7 +131,11 @@ func WriteStaticFiles(datadir string, header *types.Header) error {
 // writeSegment produces the three nippy-jar files for one segment.
 //
 // rows: if colData is nil → 0 rows (empty segment); else 1 row with
-// len(colData) columns. colData[i] is the pre-encoded bytes for column i.
+// len(colData) columns. colData[i] is the pre-encoded (uncompressed) bytes for column i.
+//
+// For non-empty segments each column is LZ4-compressed (raw block format) before
+// being written to the data file. The .off file references compressed byte offsets.
+// max_row_size in the conf records the uncompressed total (for reth's buffer sizing).
 func writeSegment(dir string, seg staticFileSegment, header *types.Header, colData [][]byte) error {
 	base := filepath.Join(dir, fmt.Sprintf("static_file_%s_0_%d", seg.name, blockRangeEnd))
 
@@ -130,31 +144,49 @@ func writeSegment(dir string, seg staticFileSegment, header *types.Header, colDa
 		rows = 1
 	}
 
-	// ---- .sf data file ----------------------------------------
-	var sfData []byte
+	// ---- compress each column independently (LZ4 raw block, no size prefix) ----
+	var compressedCols [][]byte
+	var uncompressedSize uint64
 	if colData != nil {
+		compressedCols = make([][]byte, len(colData))
+		for i, col := range colData {
+			uncompressedSize += uint64(len(col))
+			compressed, err := lz4CompressBlock(col)
+			if err != nil {
+				return fmt.Errorf("lz4 compress col %d: %w", i, err)
+			}
+			compressedCols[i] = compressed
+		}
+	}
+
+	// ---- data file (NO extension): concatenated compressed columns ----
+	var sfData []byte
+	if compressedCols != nil {
 		var total int
-		for _, col := range colData {
+		for _, col := range compressedCols {
 			total += len(col)
 		}
 		sfData = make([]byte, 0, total)
-		for _, col := range colData {
+		for _, col := range compressedCols {
 			sfData = append(sfData, col...)
 		}
 	}
 
-	if err := os.WriteFile(base+".sf", sfData, 0o644); err != nil {
-		return fmt.Errorf("write .sf: %w", err)
+	// Reth expects the data file with NO extension (just the base name),
+	// e.g. "static_file_headers_0_499999". The .off and .conf files retain
+	// their extensions.
+	if err := os.WriteFile(base, sfData, 0o644); err != nil {
+		return fmt.Errorf("write data file: %w", err)
 	}
 
-	// ---- .off offsets file ------------------------------------
-	offBytes := buildOffsetsFile(seg.columns, colData)
+	// ---- .off offsets file: offsets into compressed data ----
+	offBytes := buildOffsetsFile(seg.columns, compressedCols)
 	if err := os.WriteFile(base+".off", offBytes, 0o644); err != nil {
 		return fmt.Errorf("write .off: %w", err)
 	}
 
 	// ---- .conf configuration file ---------------------------
-	confBytes, err := buildConfFile(seg, header, rows, sfData)
+	confBytes, err := buildConfFile(seg, header, rows, uncompressedSize)
 	if err != nil {
 		return fmt.Errorf("build .conf: %w", err)
 	}
@@ -218,30 +250,41 @@ func buildOffsetsFile(columns uint64, colData [][]byte) []byte {
 //
 // SegmentHeader field order: expected_block_range, block_range, tx_range, segment
 // (changeset_offsets_len only for is_change_based() segments — not written here).
-func buildConfFile(seg staticFileSegment, header *types.Header, rows uint64, sfData []byte) ([]byte, error) {
-	// Determine max_row_size: for rows=0, it's 0; for rows=1, it's total data size.
-	// max_row_size records the maximum uncompressed row size.
-	maxRowSize := uint64(0)
-	if len(sfData) > 0 {
-		maxRowSize = uint64(len(sfData))
-	}
-
+//
+// uncompressedSize is the sum of uncompressed column byte sizes for the one row
+// (0 for empty segments). It is written as max_row_size so reth allocates a
+// large-enough decompression buffer.
+//
+// For non-empty segments: compressor = Some(Lz4) → [0x01, 0x01, 0x00, 0x00, 0x00].
+// For empty segments (rows=0): compressor = None → [0x00].
+func buildConfFile(seg staticFileSegment, header *types.Header, rows uint64, uncompressedSize uint64) ([]byte, error) {
 	// --- SegmentHeader ---
 	// For headers: block_range=Some(0..=0), tx_range=None
 	// For tx/receipt/senders: block_range=Some(0..=0), tx_range=Some(0..=0)
 	//   (even with 0 rows, block_range=Some tells reth the segment covers block 0)
-
 	userHeaderBytes := buildSegmentHeaderBytes(seg)
 
 	// --- NippyJar ---
-	out := make([]byte, 0, 80+len(userHeaderBytes))
+	out := make([]byte, 0, 85+len(userHeaderBytes))
 	out = appendLE64(out, nippyJarVersion)
 	out = append(out, userHeaderBytes...)
 	out = appendLE64(out, seg.columns)
 	out = appendLE64(out, rows)
-	// compressor: None (0x00)
-	out = append(out, 0x00)
-	out = appendLE64(out, maxRowSize)
+
+	// compressor field: Option<Compressors>
+	// - Empty segments (rows=0): None → [0x00]
+	// - Non-empty segments: Some(Lz4) → [0x01, 0x01, 0x00, 0x00, 0x00]
+	//   (0x01 = Some, u32 LE = 1 = Lz4 enum variant index, Lz4 struct has no fields)
+	if rows > 0 {
+		out = append(out, 0x01)    // Option: Some
+		out = appendLE32(out, 1)   // Compressors::Lz4 discriminant (variant index 1)
+		// Lz4 struct {} has no fields → 0 more bytes
+	} else {
+		out = append(out, 0x00) // Option: None
+	}
+
+	// max_row_size: uncompressed byte count (reth uses this to size decompression buffer)
+	out = appendLE64(out, uncompressedSize)
 
 	return out, nil
 }
@@ -463,6 +506,29 @@ func headerCompactBytes(h *types.Header) ([]byte, error) {
 func tdCompactBytes() []byte {
 	// CompactU256(0) = [length_byte=0x00] (no body bytes since length=0).
 	return []byte{0x00}
+}
+
+// lz4CompressBlock compresses src using LZ4 raw block format (no size prefix),
+// matching lz4_flex::block::compress used by reth's NippyJar writer.
+//
+// pierrec/lz4/v4 CompressBlock produces a raw LZ4 block identical to
+// lz4_flex::block::compress — no 4-byte size prefix is prepended.
+//
+// With a CompressBlockBound-sized destination buffer, compression always succeeds
+// (n > 0) regardless of input incompressibility.
+func lz4CompressBlock(src []byte) ([]byte, error) {
+	bound := lz4.CompressBlockBound(len(src))
+	dst := make([]byte, bound)
+	var c lz4.Compressor
+	n, err := c.CompressBlock(src, dst)
+	if err != nil {
+		return nil, err
+	}
+	if n == 0 {
+		// Should never happen with a CompressBlockBound-sized buffer, but guard anyway.
+		return nil, fmt.Errorf("lz4CompressBlock: unexpected n=0 for src len=%d", len(src))
+	}
+	return dst[:n], nil
 }
 
 // emptyOmmerHash is keccak256(rlp([])) = EMPTY_OMMER_ROOT_HASH in reth.
