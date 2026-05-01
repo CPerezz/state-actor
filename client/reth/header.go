@@ -56,17 +56,25 @@ func buildHeaderFromGenesis(g *genesis.Genesis, chainID int64, number uint64, pa
 	}
 
 	header := &types.Header{
-		Number:     new(big.Int).SetUint64(number),
-		Nonce:      types.EncodeNonce(uint64(g.Nonce)),
-		Time:       uint64(g.Timestamp),
-		ParentHash: parentHash,
-		Extra:      g.ExtraData,
-		GasLimit:   uint64(g.GasLimit),
-		GasUsed:    uint64(g.GasUsed),
-		Difficulty: (*big.Int)(g.Difficulty),
-		MixDigest:  g.Mixhash,
-		Coinbase:   g.Coinbase,
-		Root:       stateRoot,
+		Number:      new(big.Int).SetUint64(number),
+		Nonce:       types.EncodeNonce(uint64(g.Nonce)),
+		Time:        uint64(g.Timestamp),
+		ParentHash:  parentHash,
+		Extra:       g.ExtraData,
+		GasLimit:    uint64(g.GasLimit),
+		GasUsed:     uint64(g.GasUsed),
+		Difficulty:  (*big.Int)(g.Difficulty),
+		MixDigest:   g.Mixhash,
+		Coinbase:    g.Coinbase,
+		Root:        stateRoot,
+		// Canonical empty-body hashes. go-ethereum leaves these as zero when
+		// constructing a header struct directly, but reth encodes them as their
+		// canonical values (EmptyUncleHash = keccak256(rlp([])), EmptyTxsHash =
+		// EmptyRootHash = keccak256(rlp([]))). Without these, go-ethereum's
+		// header.Hash() produces a different value than reth's genesis hash.
+		UncleHash:   types.EmptyUncleHash,
+		TxHash:      types.EmptyTxsHash,
+		ReceiptHash: types.EmptyRootHash,
 	}
 	if header.GasLimit == 0 {
 		header.GasLimit = params.GenesisGasLimit

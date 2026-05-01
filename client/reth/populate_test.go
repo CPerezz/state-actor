@@ -85,12 +85,10 @@ func TestDeriveChainID(t *testing.T) {
 }
 
 // TestWriteChainSpecDefaults asserts the no-genesis path produces a
-// well-formed JSON chainspec. Alloc must be empty: `reth init-state
-// --without-evm` uses our streamed dump as the authoritative state, so
-// duplicating accounts in chainspec.alloc would be wasted bytes.
+// well-formed JSON chainspec. With nil accounts the alloc is empty.
 func TestWriteChainSpecDefaults(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "chainspec.json")
-	if err := writeChainSpec("", out, 0); err != nil {
+	if err := writeChainSpec("", out, 0, nil); err != nil {
 		t.Fatalf("writeChainSpec: %v", err)
 	}
 	spec := decodeChainSpec(t, out)
@@ -106,7 +104,7 @@ func TestWriteChainSpecDefaults(t *testing.T) {
 		t.Fatalf("expected alloc object, got %T", spec["alloc"])
 	}
 	if len(alloc) != 0 {
-		t.Errorf("alloc must be empty (state comes from dump), got %d", len(alloc))
+		t.Errorf("alloc must be empty when accounts=nil, got %d", len(alloc))
 	}
 }
 
@@ -126,7 +124,7 @@ func TestWriteChainSpecWithGenesis(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := filepath.Join(dir, "chainspec.json")
-	if err := writeChainSpec(genPath, out, 42); err != nil {
+	if err := writeChainSpec(genPath, out, 42, nil); err != nil {
 		t.Fatalf("writeChainSpec: %v", err)
 	}
 	spec := decodeChainSpec(t, out)
@@ -139,7 +137,7 @@ func TestWriteChainSpecWithGenesis(t *testing.T) {
 	}
 	alloc := spec["alloc"].(map[string]any)
 	if len(alloc) != 0 {
-		t.Errorf("alloc must always be empty, got %d entries", len(alloc))
+		t.Errorf("alloc must be empty when accounts=nil, got %d entries", len(alloc))
 	}
 }
 
