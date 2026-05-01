@@ -47,8 +47,10 @@ func buildInjectedAccount(addr common.Address) *entitygen.Account {
 		Address:  addr,
 		AddrHash: crypto.Keccak256Hash(addr[:]),
 		StateAccount: &types.StateAccount{
-			Nonce:   0,
-			Balance: balance,
+			Nonce:    0,
+			Balance:  balance,
+			Root:     types.EmptyRootHash,
+			CodeHash: types.EmptyCodeHash.Bytes(),
 		},
 	}
 }
