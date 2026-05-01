@@ -7,7 +7,6 @@ import (
 	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb"
@@ -101,23 +100,16 @@ func (w *Writer) WriteCode(codeHash common.Hash, code []byte) error {
 	return w.bw.put(key, code, &w.codeBytes)
 }
 
-// SetStateRoot writes the snapshot root marker.
-func (w *Writer) SetStateRoot(root common.Hash) error {
-	if err := w.db.Put([]byte("SnapshotRoot"), root[:]); err != nil {
-		return err
-	}
-	// Write PathDB metadata so geth's pathdb.loadLayers() can find the state.
-	// When --genesis is provided, WriteGenesisBlock also writes this metadata
-	// (with proper prefix for binary trie mode). Writing it here too is
-	// idempotent and ensures non-genesis DBs have the metadata.
-	rawdb.WriteStateID(w.db, root, 0)
-	rawdb.WritePersistentStateID(w.db, 0)
-	rawdb.WriteSnapshotRoot(w.db, root)
-	// Mark the snapshot generator as Done so geth doesn't try to regenerate
-	// the snapshot from scratch on first open. See WriteCompletedSnapshotGenerator
-	// for the full rationale.
-	if err := WriteCompletedSnapshotGenerator(w.db); err != nil {
-		return fmt.Errorf("write snapshot generator: %w", err)
+// SetStateRoot writes the snapshot root marker and PathDB initialization
+// metadata. binaryTrie selects the namespace (raw vs "v"-prefixed) for the
+// pathdb keys; geth's pathdb wraps its diskdb under the "v" prefix in
+// bintrie mode (triedb/pathdb/database.go:168-170) so the writes have to
+// match. When --genesis is provided, WriteGenesisBlock writes the same
+// entries; doing it here too is idempotent and ensures non-genesis DBs
+// also boot cleanly.
+func (w *Writer) SetStateRoot(root common.Hash, binaryTrie bool) error {
+	if err := WritePathDBMetadata(w.db, root, binaryTrie); err != nil {
+		return fmt.Errorf("write pathdb metadata: %w", err)
 	}
 	return nil
 }

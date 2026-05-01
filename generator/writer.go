@@ -48,7 +48,10 @@ type Writer interface {
 
 	// SetStateRoot records the post-generation state root and any backend-specific
 	// metadata (geth: PathDB state ID, snapshot generator marker; nethermind: n/a).
-	SetStateRoot(root common.Hash) error
+	// binaryTrie selects the on-disk namespace for clients whose pathdb wraps
+	// its diskdb under a prefix in bintrie mode (geth uses "v"); backends that
+	// do not care may ignore the flag.
+	SetStateRoot(root common.Hash, binaryTrie bool) error
 
 	// Flush commits all pending writes and tears down the async pipeline.
 	// Shutdown-once: do not call mid-run.
