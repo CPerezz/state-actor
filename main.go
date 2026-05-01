@@ -45,7 +45,7 @@ var (
 	minSlots       = flag.Int("min-slots", 1, "Minimum storage slots per contract")
 	distribution   = flag.String("distribution", "power-law", "Storage distribution: 'power-law', 'uniform', or 'exponential'")
 	seed           = flag.Int64("seed", 0, "Random seed (0 = use current time)")
-	batchSize      = flag.Int("batch-size", 100000, "Database batch size")
+	batchSize      = flag.Int("batch-size", 100000, "Database batch size. For --client=reth: per-batch generation size in the streaming Phase 4 (each batch is generated, written to MDBX, RLP-keyed by AddrHash into a temp Pebble sorter, then dropped — Phase 4 RAM stays bounded by one batch + Pebble's 64 MiB buffer regardless of total N).")
 	workers        = flag.Int("workers", 0, "Number of parallel workers (0 = NumCPU)")
 	codeSize       = flag.Int("code-size", 1024, "Average contract code size in bytes")
 	verbose        = flag.Bool("verbose", false, "Verbose output")
