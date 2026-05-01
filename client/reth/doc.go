@@ -28,6 +28,25 @@
 // trie.NewStackTrie produces and what reth itself would compute on a fresh
 // init.
 //
+// # Streaming Phase 4
+//
+// Phase 4 generates entities in batches of cfg.BatchSize (default 100K).
+// Each batch flows through WriteEOAs/WriteContracts to MDBX; the
+// per-account RLP is then keyed by AddrHash and written into a
+// Pebble-backed temp sorter (mirrors client/nethermind/entitygen_cgo.go).
+// After all batches the sorter is iterated in addrHash-sorted order and
+// each leaf is fed into the HashBuilder for the global state root.
+//
+// Peak Phase 4 RAM is bounded by one batch (~20 MiB at 100K accounts ×
+// ~200 B per *Account) plus Pebble's 64 MiB write buffer plus
+// max-slots-per-contract for storage tries — independent of total N.
+//
+// Phase 5a (chainspec.json) still holds the full alloc map in RAM and
+// json.MarshalIndent's it in a single buffer, so chainspec is the new
+// O(N) ceiling — empirically saturating Docker's 7.65 GiB at roughly 3-5M
+// accounts. A separate follow-up plan replaces the chainspec writer with
+// a streaming JSON encoder so total runs can scale past that ceiling.
+//
 // # Build tag gating
 //
 // The cgo path lives behind `//go:build cgo_reth`. Without that tag,
@@ -55,7 +74,8 @@
 //   - static_files_cgo.go: nippy-jar block-0 segment files
 //   - sidecars.go: database.version writer
 //   - state_root.go / storage_root.go: HashBuilder-driven state-root
-//     computation
+//     computation (sliced + streaming variants)
+//   - temp_sort_cgo.go: Pebble-backed temp sorter for streaming Phase 4
 //   - chainspec.go: chainspec JSON + Genesis loading
 //   - header.go: genesis header construction
 //   - options.go: Options struct + GenesisFilePath/ChainIDOverride globals
