@@ -1,45 +1,62 @@
-// Package reth populates a Reth-compatible database from state-actor's
-// generator output.
+// Package reth produces a fully-bootable Reth datadir directly from Go,
+// without spawning the `reth` binary.
 //
 // # How it works
 //
-// Reth's database format (MDBX + 30 tables + custom "Compact" binary codec +
-// AccountsTrie/StoragesTrie emission) is not practical to write directly from
-// Go for this first iteration. Instead, this package uses Reth's own
-// `reth init-state` CLI subcommand, which accepts a JSONL state dump:
+// Build the package with `-tags cgo_reth` (Docker-only — see
+// Dockerfile.reth) and call RunCgo:
 //
-//	line 1:  {"root":"<state-root-hex>"}
-//	line N:  {"address":"0x..", "balance":"0x..", "nonce":N, "code":"0x..",
-//	          "storage":{"0x..":"0x..", ...}}
+//	stats, err := reth.RunCgo(ctx, cfg, reth.Options{})
 //
-// This package:
-//  1. Generates accounts / contracts / storage slots deterministically from
-//     the config's seed.
-//  2. Streams each account as a JSONL line to a temp file.
-//  3. Computes the Merkle-Patricia state root in Go using go-ethereum's
-//     StackTrie primitives, writes it as line 1.
-//  4. Invokes `reth init-state <jsonl> --chain <genesis.json> --datadir <path>`.
+// RunCgo writes the on-disk artifacts reth boot validates:
 //
-// The advantages over a direct MDBX writer:
-//   - Correctness: Reth writes its own DB, so schema/codec drift is handled
-//     by Reth upstream.
-//   - Self-contained: the package only depends on go-ethereum, os/exec, and
-//     the reth binary being in PATH.
-//   - Simple: ~500 lines of Go instead of ~3500.
+//   - <datadir>/db/mdbx.dat — MDBX env with all named DBIs
+//     (PlainAccountState, HashedAccounts, AccountChangeSets,
+//     AccountsHistory, PlainStorageState, HashedStorages,
+//     StorageChangeSets, StoragesHistory, Bytecodes, plus 15 metadata
+//     tables incl. StageCheckpoints/Metadata/HeaderNumbers/etc.)
+//   - <datadir>/db/database.version — schema version sentinel ("2")
+//   - <datadir>/rocksdb/* — RocksDB env with v2 history-table column
+//     families
+//   - <datadir>/static_files/{headers,transactions,receipts,
+//     transaction-senders}/static_file_*_0_499999.{conf,sf,off} — block-0
+//     segment files in the nippy-jar format
+//   - <datadir>/chainspec.json — sidecar reth boot revalidates
 //
-// The disadvantages:
-//   - Requires the `reth` binary in PATH at generation time.
-//   - JSONL streaming is slower than direct MDBX for very large states
-//     (tens of millions of accounts). This is acceptable for devnet testing,
-//     which is state-actor's primary use case.
-//   - The `--target-size` flag of the geth path is not honored; see Populate
-//     for the supported subset of config flags.
+// The state root in the genesis header is computed from the generated
+// entities via the streaming HashBuilder in internal/reth, matching what
+// trie.NewStackTrie produces and what reth itself would compute on a fresh
+// init.
 //
-// # Self-contained
+// # Build tag gating
 //
-// Per the project's multi-client design, this package duplicates the
-// RNG-driven entity-generation primitives from the generator/ package rather
-// than depending on internal generator types. This keeps client/reth/
-// self-contained and mirrors how future client packages (erigon, besu,
-// nethermind) will be organized.
+// The cgo path lives behind `//go:build cgo_reth`. Without that tag,
+// RunCgo returns errNotImplemented pointing at Dockerfile.reth (see
+// run_stub.go). Local Go builds without libmdbx + librocksdb headers
+// remain compilable but cannot exercise the cgo path.
+//
+// # Validation
+//
+// The boot oracle in oracle_test.go (//go:build cgo_reth oracle) drives
+// `paradigmxyz/reth db stats` and `reth node --dev` against
+// state-actor-generated datadirs and verifies via JSON-RPC that
+// eth_getBalance / eth_getCode / eth_getStorageAt return the expected
+// values. Run via `make test-reth-boot`.
+//
+// # Source layout
+//
+//   - run_cgo.go / run_stub.go: build-tag-gated RunCgo entry point
+//   - dbs_cgo.go: MDBX env + RocksDB column families
+//   - data_writer_cgo.go: per-EOA state-table writes
+//   - bytecode_writer_cgo.go: deduped bytecode writes
+//   - storage_writer_cgo.go: per-slot storage-table writes
+//   - contracts_writer_cgo.go: composed contract writes
+//   - metadata_cgo.go: minimum-boot MDBX metadata
+//   - static_files_cgo.go: nippy-jar block-0 segment files
+//   - sidecars.go: database.version writer
+//   - state_root.go / storage_root.go: HashBuilder-driven state-root
+//     computation
+//   - chainspec.go: chainspec JSON + Genesis loading
+//   - header.go: genesis header construction
+//   - options.go: Options struct + GenesisFilePath/ChainIDOverride globals
 package reth

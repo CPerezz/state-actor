@@ -485,13 +485,14 @@ func main() {
 		}
 
 	case "reth":
-		// Reth's machinery streams a JSONL state dump and shells out to
-		// `reth init-state`, which writes the genesis block itself — no
-		// separate WriteGenesisBlock call here.
+		// Reth path writes a complete v2 datadir directly via mdbx-go +
+		// grocksdb (cgo). Without -tags cgo_reth, RunCgo returns a clear
+		// error pointing at Dockerfile.reth — local builds without
+		// libmdbx/librocksdb cannot exercise this path.
 		reth.GenesisFilePath = *genesisPath
 		reth.ChainIDOverride = *chainID
 		var err error
-		stats, err = reth.Populate(context.Background(), config, reth.Options{})
+		stats, err = reth.RunCgo(context.Background(), config, reth.Options{})
 		if err != nil {
 			log.Fatalf("Failed to populate Reth DB: %v", err)
 		}
