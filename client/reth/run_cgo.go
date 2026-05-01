@@ -10,10 +10,17 @@ import (
 	"path/filepath"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/rlp"
 
 	"github.com/nerolation/state-actor/generator"
 	"github.com/nerolation/state-actor/internal/entitygen"
 )
+
+// defaultStreamBatchSize is the per-iteration generation batch when
+// cfg.BatchSize is zero. Sized so one batch of pointers ≈ 20 MiB
+// (100_000 × ~200 B) — comfortably below the 64 MiB Pebble flush
+// threshold so even worst-case allocator slack stays in budget.
+const defaultStreamBatchSize = 100_000
 
 // runCgoNotAvailableError is nil under -tags cgo_reth. Kept as a symbol so
 // TestRunCgoStubBuildPath compiles in both build modes.
@@ -30,18 +37,24 @@ var emptyMPTRoot = common.HexToHash("0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b9
 //  1. Pre-flight: DBPath required, mkdir, freshDir precondition (via OpenEnvs)
 //  2. OpenEnvs (MDBX env + RocksDB CFs)
 //  3. WriteDatabaseVersion sidecar
-//  4. Synthetic accounts (if NumAccounts > 0 or NumContracts > 0):
-//     a. Generate EOAs (NumAccounts) via entitygen.GenerateEOA → WriteEOAs
-//     b. Generate contracts (NumContracts) via entitygen.GenerateContract → WriteContracts
-//     c. Combine EOAs + contracts; ComputeStateRoot over the merged set
-//     Else: state root = emptyMPTRoot
-//  5. Persist chainspec.json
+//  4. Streaming synthetic-account generation. Memory bounded by one batch
+//     (~cfg.BatchSize accounts) plus Pebble's 64 MiB write buffer,
+//     regardless of total N. Mirrors client/nethermind/entitygen_cgo.go.
+//     a. Inject pre-funded accounts (cfg.InjectAddresses).
+//     b. Synthetic EOAs in batches of cfg.BatchSize (default 100K).
+//     c. Synthetic contracts in batches of cfg.BatchSize. WriteContracts
+//        mutates each contract's StateAccount.Root + .CodeHash IN-PLACE
+//        before the per-account RLP is written into the sorter, so the
+//        global state root sees the correct trie/code linkage.
+//     d. Drain the Pebble sorter (ascending addrHash order) into the
+//        streaming HashBuilder for the global state root.
+//     Empty alloc (no inject + NumAccounts=0 + NumContracts=0) yields the
+//     canonical empty-MPT hash 0x56e81f17...
+//  5. Persist chainspec.json (still O(N) RAM — separate follow-up plan
+//     covers the chainspec workaround).
 //  6. Build genesis header with computed state root + WriteMetadata (5 tables)
 //  7. WriteStaticFiles (block-0 segment files)
 //  8. Return Stats (Close deferred)
-//
-// For empty alloc (NumAccounts=0, NumContracts=0) the state root is the
-// canonical empty-MPT hash 0x56e81f17...
 //
 // On error, partially written files in cfg.DBPath are NOT cleaned up; the
 // freshDir precondition will reject the next invocation until the caller
@@ -66,24 +79,65 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 		return nil, fmt.Errorf("RunCgo: WriteDatabaseVersion: %w", err)
 	}
 
-	// Phase 4: synthetic account generation + injected accounts.
+	// Phase 4: streaming synthetic-account generation.
 	stateRoot := emptyMPTRoot
 	accountsCreated := 0
 	contractsCreated := 0
-	var allAccounts []*entitygen.Account // populated below; passed to writeChainSpec
 
-	// Phase 4a (new): inject pre-funded accounts (e.g. Anvil dev account
+	// allAccounts is the accumulator passed to writeChainSpec in Phase 5a.
+	// It still grows linearly with N for now — the chainspec rewrite is a
+	// separate follow-up plan. The streaming sorter below decouples the
+	// state-root computation from this accumulator so a future chainspec
+	// refactor can drop the accumulator entirely.
+	var allAccounts []*entitygen.Account
+
+	// Pebble-backed sorter colocated with the datadir. The temp dir lives
+	// under cfg.DBPath/reth-sort-* so it shares disk budget with the (often
+	// large) datadir rather than competing with /tmp. Defer-Close runs on
+	// every return path; the explicit Close before Phase 5 frees the disk
+	// before chainspec/static-file writes (and is a no-op on the deferred
+	// call due to idempotency).
+	sorter, err := NewSorter(cfg.DBPath)
+	if err != nil {
+		return nil, fmt.Errorf("RunCgo: NewSorter: %w", err)
+	}
+	defer sorter.Close()
+
+	// putAccountRLP encodes an account's StateAccount and writes it to the
+	// sorter keyed by AddrHash. Used by all three sub-phases below. The
+	// HashBuilder requires sorted-by-key input; Pebble's LSM auto-sorts on
+	// iterate, so we can Put in any order here.
+	putAccountRLP := func(acc *entitygen.Account) error {
+		rlpBytes, err := rlp.EncodeToBytes(acc.StateAccount)
+		if err != nil {
+			return fmt.Errorf("RLP encode %s: %w", acc.Address.Hex(), err)
+		}
+		return sorter.Put(acc.AddrHash[:], rlpBytes)
+	}
+
+	batchSize := cfg.BatchSize
+	if batchSize <= 0 {
+		batchSize = defaultStreamBatchSize
+	}
+
+	// Phase 4a: inject pre-funded accounts (e.g. Anvil dev account
 	// 0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266) so spamoor and other test
 	// harnesses have a known-funded sender. Each gets 999_999_999 ETH, nonce 0,
 	// no code, no storage. Address is taken verbatim from cfg.InjectAddresses.
-	for _, addr := range cfg.InjectAddresses {
-		acc := buildInjectedAccount(addr)
-		allAccounts = append(allAccounts, acc)
-	}
 	if len(cfg.InjectAddresses) > 0 {
-		if err := WriteEOAs(envs, allAccounts, 0); err != nil {
+		injected := make([]*entitygen.Account, len(cfg.InjectAddresses))
+		for i, addr := range cfg.InjectAddresses {
+			injected[i] = buildInjectedAccount(addr)
+		}
+		if err := WriteEOAs(envs, injected, 0); err != nil {
 			return nil, fmt.Errorf("RunCgo: WriteEOAs(injected): %w", err)
 		}
+		for _, acc := range injected {
+			if err := putAccountRLP(acc); err != nil {
+				return nil, fmt.Errorf("RunCgo: putAccountRLP(injected): %w", err)
+			}
+		}
+		allAccounts = append(allAccounts, injected...)
 		accountsCreated += len(cfg.InjectAddresses)
 	}
 
@@ -94,20 +148,37 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 		}
 		rng := mrand.New(mrand.NewSource(seed))
 
-		// Phase 4b: synthetic EOAs.
-		if cfg.NumAccounts > 0 {
-			eoas := make([]*entitygen.Account, cfg.NumAccounts)
-			for i := 0; i < cfg.NumAccounts; i++ {
-				eoas[i] = entitygen.GenerateEOA(rng)
+		// Phase 4b: synthetic EOAs in batches of batchSize. The RNG is
+		// drawn from in the same order as the legacy single-shot loop, so
+		// state-root determinism is preserved (locked in by
+		// TestStreaming_GoldenEqualsLegacy).
+		remaining := cfg.NumAccounts
+		for remaining > 0 {
+			b := batchSize
+			if remaining < b {
+				b = remaining
 			}
-			if err := WriteEOAs(envs, eoas, 0); err != nil {
+			batch := make([]*entitygen.Account, b)
+			for i := 0; i < b; i++ {
+				batch[i] = entitygen.GenerateEOA(rng)
+			}
+			if err := WriteEOAs(envs, batch, 0); err != nil {
 				return nil, fmt.Errorf("RunCgo: WriteEOAs: %w", err)
 			}
-			allAccounts = append(allAccounts, eoas...)
-			accountsCreated += cfg.NumAccounts
+			for _, acc := range batch {
+				if err := putAccountRLP(acc); err != nil {
+					return nil, fmt.Errorf("RunCgo: putAccountRLP(EOA): %w", err)
+				}
+			}
+			allAccounts = append(allAccounts, batch...)
+			accountsCreated += b
+			remaining -= b
 		}
 
-		// Phase 4c: contracts.
+		// Phase 4c: synthetic contracts in batches of batchSize. The
+		// contract param resolution must happen exactly once (slot count
+		// derived from cfg.MinSlots/MaxSlots) so every batch uses the same
+		// shape — drift here would corrupt the RNG draw budget.
 		if cfg.NumContracts > 0 {
 			codeSize := cfg.CodeSize
 			if codeSize <= 0 {
@@ -120,25 +191,48 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 					slotCount = cfg.MinSlots
 				}
 			}
-			contracts := make([]*entitygen.Account, cfg.NumContracts)
-			for i := 0; i < cfg.NumContracts; i++ {
-				contracts[i] = entitygen.GenerateContract(rng, codeSize, slotCount)
+			remaining := cfg.NumContracts
+			for remaining > 0 {
+				b := batchSize
+				if remaining < b {
+					b = remaining
+				}
+				batch := make([]*entitygen.Account, b)
+				for i := 0; i < b; i++ {
+					batch[i] = entitygen.GenerateContract(rng, codeSize, slotCount)
+				}
+				// WriteContracts mutates each contract's StateAccount.Root
+				// (storage trie root) and .CodeHash in-place BEFORE
+				// returning, so the per-account RLP-encode below captures
+				// the correct values for the global state trie.
+				if err := WriteContracts(envs, batch, 0); err != nil {
+					return nil, fmt.Errorf("RunCgo: WriteContracts: %w", err)
+				}
+				for _, c := range batch {
+					if err := putAccountRLP(c); err != nil {
+						return nil, fmt.Errorf("RunCgo: putAccountRLP(contract): %w", err)
+					}
+				}
+				allAccounts = append(allAccounts, batch...)
+				contractsCreated += b
+				remaining -= b
 			}
-			if err := WriteContracts(envs, contracts, 0); err != nil {
-				return nil, fmt.Errorf("RunCgo: WriteContracts: %w", err)
-			}
-			allAccounts = append(allAccounts, contracts...)
-			contractsCreated = cfg.NumContracts
 		}
 	}
 
-	// Phase 4d: compute global state root over injected + EOAs + contracts.
-	if len(allAccounts) > 0 {
-		root, err := ComputeStateRoot(allAccounts)
+	// Phase 4d: drain sorter (ascending addrHash) into the HashBuilder.
+	if accountsCreated+contractsCreated > 0 {
+		root, err := ComputeStateRootStreaming(sorter.Iterate)
 		if err != nil {
-			return nil, fmt.Errorf("RunCgo: ComputeStateRoot: %w", err)
+			return nil, fmt.Errorf("RunCgo: ComputeStateRootStreaming: %w", err)
 		}
 		stateRoot = root
+	}
+
+	// Free the sorter (and its temp Pebble files) before Phase 5 so disk
+	// budget is reclaimed for chainspec.json + static-files writes.
+	if err := sorter.Close(); err != nil {
+		return nil, fmt.Errorf("RunCgo: sorter.Close: %w", err)
 	}
 
 	// Phase 5a: resolve genesis + chainID, persist chainspec.json.
