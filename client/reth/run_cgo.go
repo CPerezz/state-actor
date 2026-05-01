@@ -30,15 +30,18 @@ var emptyMPTRoot = common.HexToHash("0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b9
 //  1. Pre-flight: DBPath required, mkdir, freshDir precondition (via OpenEnvs)
 //  2. OpenEnvs (MDBX env + RocksDB CFs)
 //  3. WriteDatabaseVersion sidecar
-//  4. Synthetic EOAs (if NumAccounts > 0): generate via entitygen, WriteEOAs,
-//     ComputeStateRoot; else state root = emptyMPTRoot
+//  4. Synthetic accounts (if NumAccounts > 0 or NumContracts > 0):
+//     a. Generate EOAs (NumAccounts) via entitygen.GenerateEOA → WriteEOAs
+//     b. Generate contracts (NumContracts) via entitygen.GenerateContract → WriteContracts
+//     c. Combine EOAs + contracts; ComputeStateRoot over the merged set
+//     Else: state root = emptyMPTRoot
 //  5. Persist chainspec.json
 //  6. Build genesis header with computed state root + WriteMetadata (5 tables)
-//  7. Return Stats (Close deferred)
+//  7. WriteStaticFiles (block-0 segment files)
+//  8. Return Stats (Close deferred)
 //
 // For empty alloc (NumAccounts=0, NumContracts=0) the state root is the
-// canonical empty-MPT hash 0x56e81f17... Slice E will extend this for
-// contracts (storage tables + StoragesTrie).
+// canonical empty-MPT hash 0x56e81f17...
 //
 // On error, partially written files in cfg.DBPath are NOT cleaned up; the
 // freshDir precondition will reject the next invocation until the caller
@@ -63,29 +66,63 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 		return nil, fmt.Errorf("RunCgo: WriteDatabaseVersion: %w", err)
 	}
 
-	// Phase 4 (new): synthetic EOA generation when NumAccounts > 0.
+	// Phase 4: synthetic account generation.
 	stateRoot := emptyMPTRoot
 	accountsCreated := 0
+	contractsCreated := 0
 
-	if cfg.NumAccounts > 0 {
+	if cfg.NumAccounts > 0 || cfg.NumContracts > 0 {
 		seed := cfg.Seed
 		if seed == 0 {
 			seed = 42
 		}
 		rng := mrand.New(mrand.NewSource(seed))
-		accounts := make([]*entitygen.Account, cfg.NumAccounts)
-		for i := 0; i < cfg.NumAccounts; i++ {
-			accounts[i] = entitygen.GenerateEOA(rng)
+
+		var allAccounts []*entitygen.Account
+
+		// Phase 4a: EOAs.
+		if cfg.NumAccounts > 0 {
+			eoas := make([]*entitygen.Account, cfg.NumAccounts)
+			for i := 0; i < cfg.NumAccounts; i++ {
+				eoas[i] = entitygen.GenerateEOA(rng)
+			}
+			if err := WriteEOAs(envs, eoas, 0); err != nil {
+				return nil, fmt.Errorf("RunCgo: WriteEOAs: %w", err)
+			}
+			allAccounts = append(allAccounts, eoas...)
+			accountsCreated = cfg.NumAccounts
 		}
-		if err := WriteEOAs(envs, accounts, 0); err != nil {
-			return nil, fmt.Errorf("RunCgo: WriteEOAs: %w", err)
+
+		// Phase 4b: contracts.
+		if cfg.NumContracts > 0 {
+			codeSize := cfg.CodeSize
+			if codeSize <= 0 {
+				codeSize = 256
+			}
+			slotCount := 5
+			if cfg.MinSlots > 0 && cfg.MaxSlots >= cfg.MinSlots {
+				slotCount = (cfg.MinSlots + cfg.MaxSlots) / 2
+				if slotCount < cfg.MinSlots {
+					slotCount = cfg.MinSlots
+				}
+			}
+			contracts := make([]*entitygen.Account, cfg.NumContracts)
+			for i := 0; i < cfg.NumContracts; i++ {
+				contracts[i] = entitygen.GenerateContract(rng, codeSize, slotCount)
+			}
+			if err := WriteContracts(envs, contracts, 0); err != nil {
+				return nil, fmt.Errorf("RunCgo: WriteContracts: %w", err)
+			}
+			allAccounts = append(allAccounts, contracts...)
+			contractsCreated = cfg.NumContracts
 		}
-		root, err := ComputeStateRoot(accounts)
+
+		// Phase 4c: compute global state root over EOAs + contracts combined.
+		root, err := ComputeStateRoot(allAccounts)
 		if err != nil {
 			return nil, fmt.Errorf("RunCgo: ComputeStateRoot: %w", err)
 		}
 		stateRoot = root
-		accountsCreated = len(accounts)
 	}
 
 	// Phase 5a: resolve genesis + chainID, persist chainspec.json.
@@ -106,17 +143,22 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 	if err != nil {
 		return nil, fmt.Errorf("RunCgo: buildBlock0Header: %w", err)
 	}
-	// Use the computed state root (empty-MPT for no alloc, or trie root for EOAs).
+	// Use the computed state root (empty-MPT for no alloc, or trie root for accounts).
 	header.Root = stateRoot
 
 	if err := WriteMetadata(envs, header, uint64(chainID)); err != nil {
 		return nil, fmt.Errorf("RunCgo: WriteMetadata: %w", err)
 	}
 
-	// Phase 6: return stats (envs.Close is deferred above).
+	// Phase 6: write block-0 static-files segments.
+	if err := WriteStaticFiles(cfg.DBPath, header); err != nil {
+		return nil, fmt.Errorf("RunCgo: WriteStaticFiles: %w", err)
+	}
+
+	// Phase 7: return stats (envs.Close is deferred above).
 	return &generator.Stats{
 		StateRoot:        stateRoot,
 		AccountsCreated:  accountsCreated,
-		ContractsCreated: 0,
+		ContractsCreated: contractsCreated,
 	}, nil
 }
