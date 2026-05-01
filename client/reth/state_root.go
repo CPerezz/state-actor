@@ -48,6 +48,40 @@ func ComputeStateRoot(accounts []*entitygen.Account) (common.Hash, error) {
 	return hb.Root(), nil
 }
 
+// ComputeStateRootStreaming returns the MPT state root from a sorted-by-key
+// stream of (addrHash, accountRLP) pairs. The supplied iter callback is
+// invoked exactly once and is expected to call yield for each pair in
+// ascending addrHash order — the HashBuilder enforces that invariant.
+//
+// This is the streaming counterpart of ComputeStateRoot used by RunCgo
+// Phase 4 to drain a Sorter (Pebble auto-sorts on iterate) without holding
+// every account in RAM. The resulting root is byte-identical to what
+// ComputeStateRoot would produce over the same set, given the same
+// sort-by-AddrHash order.
+//
+// Memory bound: O(trie depth * 33 bytes) ≈ 2 KB regardless of how many
+// pairs the iterator emits. HashBuilder.AddLeaf copies its inputs, so the
+// caller's slices (e.g. Pebble's iter.Key()/iter.Value() which alias
+// internal buffers) can be safely reused after each yield call.
+func ComputeStateRootStreaming(iter func(yield func(addrHash, accountRLP []byte) error) error) (common.Hash, error) {
+	hb := iReth.NewHashBuilder(func(p iReth.StoredNibbles, n iReth.BranchNodeCompact) error {
+		return nil // emissions go nowhere; we only want the root
+	})
+
+	err := iter(func(addrHash, accountRLP []byte) error {
+		nibbles := addrHashToNibbles(addrHash)
+		if err := hb.AddLeaf(nibbles, accountRLP); err != nil {
+			return fmt.Errorf("AddLeaf: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("ComputeStateRootStreaming: iter: %w", err)
+	}
+
+	return hb.Root(), nil
+}
+
 // sortAccountsByAddrHash sorts in place by AddrHash ascending.
 func sortAccountsByAddrHash(accounts []*entitygen.Account) {
 	sort.Slice(accounts, func(i, j int) bool {

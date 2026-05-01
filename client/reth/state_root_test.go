@@ -1,6 +1,7 @@
 package reth
 
 import (
+	"errors"
 	"math/rand"
 	"sort"
 	"testing"
@@ -280,5 +281,78 @@ func TestComputeStateRootWithContracts(t *testing.T) {
 
 	if got != want {
 		t.Errorf("state root with contracts mismatch:\n  got  = %s\n  want = %s", got.Hex(), want.Hex())
+	}
+}
+
+// TestComputeStateRootStreaming_MatchesLegacy drives the streaming helper
+// with a hand-built sorted iterator over the same accounts the legacy path
+// would consume. Both must produce the same root — that's the whole point
+// of the streaming variant existing.
+func TestComputeStateRootStreaming_MatchesLegacy(t *testing.T) {
+	const seed, n = int64(1234), 200
+	rng := rand.New(rand.NewSource(seed))
+	accounts := make([]*entitygen.Account, n)
+	for i := range accounts {
+		accounts[i] = entitygen.GenerateEOA(rng)
+	}
+
+	legacyRoot, err := ComputeStateRoot(accounts)
+	if err != nil {
+		t.Fatalf("ComputeStateRoot: %v", err)
+	}
+
+	// Pre-sort by AddrHash to honour the streaming contract.
+	sorted := make([]*entitygen.Account, n)
+	copy(sorted, accounts)
+	sortAccountsByAddrHash(sorted)
+
+	streamRoot, err := ComputeStateRootStreaming(func(yield func(addrHash, accountRLP []byte) error) error {
+		for _, a := range sorted {
+			rlpBytes := mustRLP(t, a.StateAccount)
+			if err := yield(a.AddrHash[:], rlpBytes); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ComputeStateRootStreaming: %v", err)
+	}
+	if legacyRoot != streamRoot {
+		t.Fatalf("streaming root mismatch:\n  legacy = %s\n  stream = %s",
+			legacyRoot.Hex(), streamRoot.Hex())
+	}
+}
+
+// TestComputeStateRootStreaming_Empty mirrors the legacy empty-input case:
+// the canonical empty-MPT root must come back when the iterator yields
+// nothing.
+func TestComputeStateRootStreaming_Empty(t *testing.T) {
+	got, err := ComputeStateRootStreaming(func(yield func(addrHash, accountRLP []byte) error) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ComputeStateRootStreaming: %v", err)
+	}
+	want := common.HexToHash("0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421")
+	if got != want {
+		t.Errorf("empty streaming root: got=%s want=%s", got.Hex(), want.Hex())
+	}
+}
+
+// TestComputeStateRootStreaming_IterErrorPropagates confirms that an error
+// returned from the iter callback short-circuits and surfaces unchanged
+// (wrapped) so RunCgo can attribute Pebble iterate failures to the right
+// phase.
+func TestComputeStateRootStreaming_IterErrorPropagates(t *testing.T) {
+	sentinel := errors.New("iter sentinel")
+	_, err := ComputeStateRootStreaming(func(yield func(addrHash, accountRLP []byte) error) error {
+		return sentinel
+	})
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("got %v, want error wrapping sentinel %v", err, sentinel)
 	}
 }
