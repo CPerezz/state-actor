@@ -86,8 +86,31 @@ func writeStateAndCollectRoot(
 		return nil
 	}
 
+	// Phase 1 target-size cap — mirror generator/generator.go:1050-1069.
+	// Track cumulative raw bytes (32B addrHash key + entity blob) and stop
+	// emission once cfg.TargetSize is reached. This is intentionally an
+	// over-estimate of what the final Bonsai DB will hold (raw entity bytes
+	// don't include trie node overhead) but on the safer side — we tend to
+	// land slightly under target. Without this cap, --target-size=50GB
+	// would require user to also pass --accounts/--contracts large enough
+	// to hit it; this makes target-size the governing constraint.
+	totalRawBytes := uint64(0)
+	targetReached := false
+	checkTarget := func(blobLen int) bool {
+		totalRawBytes += uint64(32 + blobLen)
+		if cfg.TargetSize > 0 && totalRawBytes >= cfg.TargetSize {
+			if cfg.Verbose {
+				log.Printf("besu Phase 1: raw bytes %d MiB >= target %d MiB — stopping entity emission early",
+					totalRawBytes>>20, cfg.TargetSize>>20)
+			}
+			targetReached = true
+			return true
+		}
+		return false
+	}
+
 	// Emit count: EOA and contract counts from cfg.
-	for i := 0; i < cfg.NumAccounts; i++ {
+	for i := 0; i < cfg.NumAccounts && !targetReached; i++ {
 		if err := ctx.Err(); err != nil {
 			pdb.Close()
 			return common.Hash{}, nil, nil, err
@@ -105,6 +128,9 @@ func writeStateAndCollectRoot(
 				pdb.Close()
 				return common.Hash{}, nil, nil, err
 			}
+		}
+		if checkTarget(len(blob)) {
+			break
 		}
 	}
 
@@ -141,7 +167,7 @@ func writeStateAndCollectRoot(
 		}
 	}
 
-	for i := 0; i < cfg.NumContracts; i++ {
+	for i := 0; i < cfg.NumContracts && !targetReached; i++ {
 		if err := ctx.Err(); err != nil {
 			pdb.Close()
 			return common.Hash{}, nil, nil, err
@@ -159,6 +185,9 @@ func writeStateAndCollectRoot(
 				pdb.Close()
 				return common.Hash{}, nil, nil, err
 			}
+		}
+		if checkTarget(len(blob)) {
+			break
 		}
 	}
 	if err := flush(); err != nil {
