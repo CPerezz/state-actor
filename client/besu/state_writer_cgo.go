@@ -107,6 +107,39 @@ func writeStateAndCollectRoot(
 		}
 	}
 
+	// --- Phase 1b: inject any explicitly-requested addresses (e.g. Anvil's
+	// default account). Mirrors generator.Generator's InjectAddresses
+	// handling at generator/generator.go:925-949: each address gets a fresh
+	// EOA with 999_999_999 ETH balance, nonce=0, no code/storage. We append
+	// them BEFORE Phase 1 flush so they hit the temp Pebble alongside the
+	// synthetic EOAs and naturally sort into the right position.
+	injectBalance := new(uint256.Int).Mul(uint256.NewInt(999_999_999), uint256.NewInt(1_000_000_000_000_000_000))
+	seenInjected := make(map[common.Address]struct{}, len(cfg.InjectAddresses))
+	for _, addr := range cfg.InjectAddresses {
+		if err := ctx.Err(); err != nil {
+			pdb.Close()
+			return common.Hash{}, nil, nil, err
+		}
+		if _, dup := seenInjected[addr]; dup {
+			continue
+		}
+		seenInjected[addr] = struct{}{}
+		addrHash := crypto.Keccak256Hash(addr[:])
+		// Inject as an EOA with the canonical large balance.
+		blob := encodeEntityEOA(0, injectBalance)
+		if err := batch.Set(addrHash[:], blob, nil); err != nil {
+			pdb.Close()
+			return common.Hash{}, nil, nil, err
+		}
+		pendingBytes += 32 + len(blob)
+		if pendingBytes >= phase1FlushBytes {
+			if err := flush(); err != nil {
+				pdb.Close()
+				return common.Hash{}, nil, nil, err
+			}
+		}
+	}
+
 	for i := 0; i < cfg.NumContracts; i++ {
 		if err := ctx.Err(); err != nil {
 			pdb.Close()
