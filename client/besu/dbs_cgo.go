@@ -140,7 +140,7 @@ func openBesuDB(datadir string) (*besuDB, error) {
 		// matches RocksDBColumnarKeyValueStorage.configureBlobDBForSegment
 		// at lines 239-263.
 		if i == cfIdxBlockchain || i == cfIdxTrieLogStorage {
-			opts.SetEnableBlobFiles(true)
+			opts.EnableBlobFiles(true)
 			opts.SetMinBlobSize(100)
 			opts.SetBlobCompressionType(grocksdb.LZ4Compression)
 			// Garbage collection: Besu enables it on TRIE_LOG_STORAGE
@@ -148,7 +148,7 @@ func openBesuDB(datadir string) (*besuDB, error) {
 			// KeyValueSegmentIdentifier.java:41). For BLOCKCHAIN it's
 			// off by default. We mirror.
 			if i == cfIdxTrieLogStorage {
-				opts.SetEnableBlobGC(true)
+				opts.EnableBlobGC(true)
 			}
 		}
 		cfOpts[i] = opts
