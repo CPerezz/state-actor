@@ -3,29 +3,25 @@ package reth
 import (
 	"encoding/json"
 	"fmt"
-	"math/big"
 	"os"
 
-	"github.com/ethereum/go-ethereum/common"
-
 	"github.com/nerolation/state-actor/genesis"
-	"github.com/nerolation/state-actor/internal/entitygen"
 )
 
 // writeChainSpec writes a Reth-compatible chainspec JSON to outPath.
 //
-// The alloc map is derived from accounts: each account's balance, nonce, code,
-// and storage are written verbatim so that reth's state_root_ref_unhashed(&alloc)
-// computes the same state root as our Go-side ComputeStateRoot — ensuring the
-// genesis hash stored in MDBX + static files matches the chainspec.
-//
-// For large-scale generation (millions of accounts) this file may be large;
-// callers may choose to pass nil accounts for scenarios where genesis-hash
-// matching is not required (e.g. reth init-state import pipelines).
+// The chainspec carries only the chain config (chainID + hardfork timestamps)
+// and the header bits reth needs to derive the genesis header (gasLimit,
+// baseFeePerGas, difficulty, etc.). The `alloc` field is intentionally
+// emitted as an empty object: state-actor direct-writes the genesis state
+// into MDBX, and reth is launched with `--debug.skip-genesis-validation` so
+// it trusts the DB-resident state instead of recomputing the genesis hash
+// from alloc. This keeps chainspec.json size constant regardless of how many
+// accounts the run generates.
 //
 // `chainID` overrides `config.chainId` when non-zero. When genesisPath is
 // non-empty, every top-level field from that file EXCEPT alloc is copied in.
-func writeChainSpec(genesisPath, outPath string, chainID int64, accounts []*entitygen.Account) error {
+func writeChainSpec(genesisPath, outPath string, chainID int64) error {
 	spec := buildChainSpec(chainID)
 
 	if genesisPath != "" {
@@ -50,7 +46,10 @@ func writeChainSpec(genesisPath, outPath string, chainID int64, accounts []*enti
 		}
 	}
 
-	spec["alloc"] = buildAllocMap(accounts)
+	// Empty object (not nil/missing) so alloy_genesis's parser reads it as
+	// "no genesis accounts in chainspec" rather than tripping on a missing
+	// required field.
+	spec["alloc"] = map[string]any{}
 
 	out, err := json.MarshalIndent(spec, "", "  ")
 	if err != nil {
@@ -60,55 +59,6 @@ func writeChainSpec(genesisPath, outPath string, chainID int64, accounts []*enti
 		return fmt.Errorf("write chainspec: %w", err)
 	}
 	return nil
-}
-
-// buildAllocMap converts a slice of entitygen accounts into the Go-Ethereum
-// genesis alloc format that reth's JSON parser understands.
-//
-// Each entry is keyed by the 0x-prefixed checksummed address. Fields written:
-//   - "balance": hex-encoded balance (0x + hex, no leading zeros except 0x0)
-//   - "nonce": hex u64 (omitted if 0)
-//   - "code": hex bytecode (omitted if empty or nil)
-//   - "storage": map of 0x-prefixed slot→value (omitted if empty)
-func buildAllocMap(accounts []*entitygen.Account) map[string]any {
-	alloc := make(map[string]any, len(accounts))
-	for _, acc := range accounts {
-		if acc == nil || acc.StateAccount == nil {
-			continue
-		}
-		entry := make(map[string]any)
-
-		// Balance: hex string "0x..."
-		bal := acc.StateAccount.Balance.ToBig()
-		if bal == nil {
-			bal = new(big.Int)
-		}
-		entry["balance"] = "0x" + fmt.Sprintf("%x", bal)
-
-		// Nonce (omit if 0)
-		if acc.StateAccount.Nonce != 0 {
-			entry["nonce"] = fmt.Sprintf("0x%x", acc.StateAccount.Nonce)
-		}
-
-		// Code (omit if empty)
-		if len(acc.Code) > 0 {
-			entry["code"] = "0x" + common.Bytes2Hex(acc.Code)
-		}
-
-		// Storage (omit if empty)
-		if len(acc.Storage) > 0 {
-			storage := make(map[string]any, len(acc.Storage))
-			for _, slot := range acc.Storage {
-				k := "0x" + common.Bytes2Hex(slot.Key.Bytes())
-				v := "0x" + common.Bytes2Hex(slot.Value.Bytes())
-				storage[k] = v
-			}
-			entry["storage"] = storage
-		}
-
-		alloc[acc.Address.Hex()] = entry
-	}
-	return alloc
 }
 
 // buildChainSpec returns the default "dev-like" chainspec used when no

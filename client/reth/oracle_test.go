@@ -264,6 +264,9 @@ func TestRethNodeBootEmptyAlloc(t *testing.T) {
 		"node", "--dev",
 		"--chain", chainspecPath,
 		"--datadir", dd.containerDatadir,
+		// state-actor's chainspec.json carries an empty alloc; the genesis
+		// state was direct-written into MDBX. Tell reth to trust the DB.
+		"--debug.skip-genesis-validation",
 		"--http",
 		"--http.addr", "0.0.0.0",
 		"--http.port", "8545",
@@ -392,6 +395,9 @@ func TestRethNodeBoot(t *testing.T) {
 		"node", "--dev",
 		"--chain", chainspecPath,
 		"--datadir", dd.containerDatadir,
+		// state-actor's chainspec.json carries an empty alloc; the genesis
+		// state was direct-written into MDBX. Tell reth to trust the DB.
+		"--debug.skip-genesis-validation",
 		"--http",
 		"--http.addr", "0.0.0.0",
 		"--http.port", "8545",
