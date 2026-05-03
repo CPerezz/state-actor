@@ -21,11 +21,11 @@ const (
 	// boots against in CI. Bump when validating against a new release.
 	//
 	// SHA-pinned to the CPerezz/reth fork branch `skip-genesis-validation`
-	// while paradigmxyz/reth is reviewing the upstream PR for that flag.
-	// The fork's GHA workflow (.github/workflows/build-and-push-on-push.yml)
-	// auto-publishes per-commit Docker images on every push to that branch.
-	// Once the upstream PR merges and a release is cut, flip this back to
-	// `vX.Y.Z` and `PinnedRethImage` back to ghcr.io/paradigmxyz/reth.
+	// while paradigmxyz/reth#23919 is in review. The fork's GHA workflow
+	// (.github/workflows/build-and-push-on-push.yml) auto-publishes
+	// per-commit Docker images on every push to that branch. Once the
+	// upstream PR merges and a release is cut, flip this back to `vX.Y.Z`
+	// and `PinnedRethImage` back to ghcr.io/paradigmxyz/reth.
 	PinnedRethRelease = "00b3cbb5f2e31af0f13ec234dd6956f7e2e49225"
 
 	// PinnedRethImage is the fully-qualified image reference (registry + name)
