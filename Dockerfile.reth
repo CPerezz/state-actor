@@ -1,25 +1,42 @@
 # syntax=docker/dockerfile:1
-# Slice C skeleton — Slice D/E will extend with state generation pipeline.
+# Dockerfile.reth — builds state-actor with the cgo_reth tag so
+# --client=reth works.
 #
-# Builds state-actor with -tags cgo_reth, linking librocksdb.
+# RocksDB strategy: build from source. Distro packages (debian: 7.8,
+# ubuntu: 8.9) lag the rocksdb release line; grocksdb v1.10.x needs
+# RocksDB 10.x. We pin both versions together at the top of this file —
+# this keeps the reth and nethermind paths on the same RocksDB version
+# so go.mod can carry a single `linxGnu/grocksdb` entry.
+#
 # mdbx-go bundles its own C sources (mdbx.c / mdbxgo.c) so no system
 # libmdbx package is needed.
-# Run-time stage produces a binary that can write a reth-compatible datadir
-# directly without spawning `reth init-state`.
-#
-# Uses Debian bookworm's librocksdb 7.8.3 with grocksdb v1.7.14 (last
-# release that doesn't use rocksdb API extensions absent in 7.8.3).
 
+# grocksdb's build.sh pins this exact version. If you bump grocksdb in
+# go.mod, sync ROCKSDB_VERSION here to whatever its build.sh expects
+# (look for `rocksdb_version=` in the grocksdb repo at that tag).
+ARG ROCKSDB_VERSION=10.10.1
+
+# ---------- Stage 1: builder (rocksdb + state-actor) ----------
+# Both the RocksDB shared library and the state-actor binary are built in
+# this stage to avoid header/lib path drift between separate stages. Stage
+# 2 (runtime) carries only the .so + state-actor binary, not the toolchain.
 FROM golang:1.24-bookworm AS builder
+
+ARG ROCKSDB_VERSION
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    librocksdb-dev \
-    libsnappy-dev \
-    libzstd-dev \
-    liblz4-dev \
-    libbz2-dev \
-    pkg-config \
     ca-certificates \
     curl \
+    git \
+    build-essential \
+    cmake \
+    pkg-config \
+    libgflags-dev \
+    libsnappy-dev \
+    liblz4-dev \
+    libzstd-dev \
+    libbz2-dev \
+    zlib1g-dev \
     gnupg \
     && install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://download.docker.com/linux/debian/gpg \
@@ -30,19 +47,51 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
        > /etc/apt/sources.list.d/docker.list \
     && apt-get update && apt-get install -y --no-install-recommends docker-ce-cli \
     && rm -rf /var/lib/apt/lists/*
+
+# Build RocksDB from source. -j2 keeps peak memory under ~4GB; rocksdb's
+# larger C++ files need 1-2GB per gcc instance and Docker Desktop's
+# default 8GB can't sustain $(nproc) parallel compiles on Apple Silicon.
+# DISABLE_WARNING_AS_ERROR=1 is needed because gcc 12 (debian bookworm)
+# tags a -Wrestrict warning in rocksdb 10.10.1's table/unique_id.cc as
+# an error. Building without -Werror is the standard workaround; gcc 13+
+# fixes the false positive.
+RUN mkdir -p /src && cd /src \
+    && curl -fsSL "https://github.com/facebook/rocksdb/archive/refs/tags/v${ROCKSDB_VERSION}.tar.gz" \
+       | tar xz \
+    && cd rocksdb-${ROCKSDB_VERSION} \
+    && PORTABLE=1 USE_RTTI=1 DISABLE_WARNING_AS_ERROR=1 make -j2 shared_lib \
+    && make install-shared INSTALL_PATH=/usr/local \
+    && ldconfig \
+    && cd /src && rm -rf rocksdb-${ROCKSDB_VERSION}
+
+ENV CGO_ENABLED=1 \
+    CGO_CFLAGS="-I/usr/local/include" \
+    CGO_LDFLAGS="-L/usr/local/lib -lrocksdb -lstdc++ -lm -lz -lbz2 -lsnappy -llz4 -lzstd"
+
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN mkdir -p /out && CGO_ENABLED=1 go build -tags cgo_reth -o /out/state-actor ./
+RUN mkdir -p /out && go build -tags cgo_reth -o /out/state-actor ./
 
+# ---------- Stage 2: minimal runtime image ----------
 FROM debian:bookworm-slim AS runtime
+
+# Compression libs (rocksdb runtime links against these). RocksDB's own
+# .so comes from the builder stage.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    librocksdb7.8 \
+    ca-certificates \
     libsnappy1v5 \
-    libzstd1 \
     liblz4-1 \
+    libzstd1 \
     libbz2-1.0 \
+    libstdc++6 \
+    libgflags2.2 \
+    zlib1g \
     && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /usr/local/lib/librocksdb.so* /usr/local/lib/
+RUN ldconfig
+
 COPY --from=builder /out/state-actor /usr/local/bin/state-actor
 ENTRYPOINT ["state-actor"]
