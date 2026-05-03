@@ -26,7 +26,7 @@ const (
 	// per-commit Docker images on every push to that branch. Once the
 	// upstream PR merges and a release is cut, flip this back to `vX.Y.Z`
 	// and `PinnedRethImage` back to ghcr.io/paradigmxyz/reth.
-	PinnedRethRelease = "00b3cbb5f2e31af0f13ec234dd6956f7e2e49225"
+	PinnedRethRelease = "fea06894fc251861b4a0d13523612f8385c00955"
 
 	// PinnedRethImage is the fully-qualified image reference (registry + name)
 	// without the tag. Reth is published to GHCR.
