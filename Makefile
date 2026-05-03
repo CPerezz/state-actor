@@ -169,9 +169,11 @@ smoke-besu: docker-besu
 	bash $(PWD)/client/besu/testdata/validate-big-db-besu.sh $(SA_BESU_DB)
 
 ## smoke-besu-spamoor: Generate a DB, boot hyperledger/besu:26.5.0, then run
-##                     spamoor erc20_bloater for 100 blocks of real workload.
-##   Usage: make smoke-besu-spamoor ACCOUNTS=1000 CONTRACTS=100 [SPAMOOR=/abs/path/spamoor]
-##   Pre-req: spamoor binary on PATH (or pass SPAMOOR=/path/to/spamoor).
+##                     spamoor erc20_bloater until BLOCKS blocks have been mined.
+##   Usage: make smoke-besu-spamoor ACCOUNTS=1000 CONTRACTS=100 BLOCKS=200
+##   Pre-req: SPAMOOR=/path/to/spamoor (default /Users/random_anon/dev/spamoor/bin/spamoor)
+SPAMOOR ?= /Users/random_anon/dev/spamoor/bin/spamoor
+BLOCKS ?= 200
 smoke-besu-spamoor: docker-besu
 	rm -rf $(SA_BESU_DB) && mkdir -p $(SA_BESU_DB)
 	docker run --rm \
@@ -202,7 +204,7 @@ smoke-besu-spamoor: docker-besu
 	    --data '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' http://127.0.0.1:8545; do \
 	    printf '.' ; sleep 1 ; \
 	  done ; echo ' up'
-	SPAMOOR=$(SPAMOOR) bash $(PWD)/client/besu/testdata/spamoor-100-blocks-besu.sh ; \
+	BLOCKS=$(BLOCKS) SPAMOOR=$(SPAMOOR) bash $(PWD)/client/besu/testdata/spamoor-blocks-besu.sh ; \
 	  rc=$$? ; docker stop besu-smoke-spamoor >/dev/null ; exit $$rc
 
 ## tidy: Tidy go modules
