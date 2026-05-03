@@ -72,7 +72,15 @@ func (l *leafNode) EncodedBytes() []byte {
 	if l.cachedRLP != nil {
 		return l.cachedRLP
 	}
-	hp := CompactEncode(l.path, true)
+	// Besu's CompactEncoding.encode strips the trailing 0x10 leaf
+	// terminator before HP-encoding (CompactEncoding.java:79-112). Mirror
+	// that here so callers can pass the trie-internal path representation
+	// (which includes the terminator) directly.
+	pathNibbles := l.path
+	if n := len(pathNibbles); n > 0 && pathNibbles[n-1] == 0x10 {
+		pathNibbles = pathNibbles[:n-1]
+	}
+	hp := CompactEncode(pathNibbles, true)
 	rlp, err := gethrlp.EncodeToBytes([][]byte{hp, l.value})
 	if err != nil {
 		panic("besu/trie: leaf RLP encode: " + err.Error())
