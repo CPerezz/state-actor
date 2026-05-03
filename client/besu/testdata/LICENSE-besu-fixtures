@@ -1,0 +1,20 @@
+Vendored test fixtures from the Hyperledger Besu project.
+
+Source: https://github.com/hyperledger/besu (tag 26.5.0)
+License: Apache License, Version 2.0
+
+Copyright contributors to the Hyperledger Besu project.
+
+The following files in this directory are covered by this notice:
+
+  genesis1.json
+    from ethereum/core/src/test/resources/org/hyperledger/besu/ethereum/chain/
+
+  genesisNonce.json
+    from ethereum/core/src/test/resources/org/hyperledger/besu/ethereum/chain/
+
+These fixtures are used by client/besu/oracle_test.go to verify that
+state-actor's Besu writer produces the same state root and genesis block
+hash that Besu's own GenesisStateTest.java pins for the same alloc input.
+
+Full Apache 2.0 license text: https://www.apache.org/licenses/LICENSE-2.0
