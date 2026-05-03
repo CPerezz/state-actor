@@ -29,6 +29,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 
+	"github.com/nerolation/state-actor/client/besu"
 	"github.com/nerolation/state-actor/client/geth"
 	"github.com/nerolation/state-actor/client/nethermind"
 	"github.com/nerolation/state-actor/generator"
@@ -74,7 +75,7 @@ var (
 	// Client dispatch — selects which on-disk format the writer produces.
 	// Default 'geth' preserves the historical behavior; 'nethermind' is
 	// implemented progressively (see PR#3 in the deep-feature-planning plan).
-	client = flag.String("client", "geth", "Target Ethereum client: 'geth' (default), 'nethermind'. Other clients (reth, erigon, besu) are tracked in follow-up PRs.")
+	client = flag.String("client", "geth", "Target Ethereum client: 'geth' (default), 'nethermind', 'besu'. Other clients (reth, erigon) are tracked in follow-up PRs.")
 )
 
 func main() {
@@ -98,12 +99,12 @@ func main() {
 	// this at CLI parse time (before any generation work) means misconfigured
 	// runs fail fast instead of burning minutes producing a wrong output.
 	switch *client {
-	case "geth", "nethermind":
+	case "geth", "nethermind", "besu":
 		// supported
-	case "reth", "erigon", "besu":
-		log.Fatalf("--client=%s is not yet implemented on this branch (planned in a follow-up PR); use --client=geth or --client=nethermind", *client)
+	case "reth", "erigon":
+		log.Fatalf("--client=%s is not yet implemented on this branch (planned in a follow-up PR); use --client=geth, --client=nethermind, or --client=besu", *client)
 	default:
-		log.Fatalf("--client=%s is not recognized; valid values: geth, nethermind", *client)
+		log.Fatalf("--client=%s is not recognized; valid values: geth, nethermind, besu", *client)
 	}
 	if *client == "nethermind" {
 		// Nethermind doesn't implement EIP-7864 (binary trie) and the
@@ -114,6 +115,18 @@ func main() {
 		}
 		if *deepBranchAccounts > 0 {
 			log.Fatalf("--deep-branch-accounts is geth-specific and not supported with --client=nethermind")
+		}
+	}
+	if *client == "besu" {
+		// Besu doesn't implement EIP-7864 (binary trie) and the deep-branch
+		// flag is geth/Pebble-specific. Reject up front. --chain-id is
+		// warn-and-ignored inside client/besu/run_cgo.go (Besu reads chainId
+		// from --genesis-file at boot, not from the DB).
+		if *binaryTrie {
+			log.Fatalf("--binary-trie is not supported with --client=besu (Besu does not implement EIP-7864)")
+		}
+		if *deepBranchAccounts > 0 {
+			log.Fatalf("--deep-branch-accounts is geth-specific and not supported with --client=besu")
 		}
 	}
 
@@ -436,6 +449,23 @@ func main() {
 		stats, err = nethermind.Run(context.Background(), config, nethermind.Options{})
 		if err != nil {
 			log.Fatalf("Failed to populate Nethermind DB: %v", err)
+		}
+		if liveStats != nil && stats != nil {
+			liveStats.SetStateRoot(stats.StateRoot.Hex())
+		}
+
+	case "besu":
+		// Besu path: writer in client/besu/ owns the full pipeline
+		// (entitygen → Phase 1 temp Pebble → Phase 2 sorted iter →
+		// Bonsai trie.Builder → single grocksdb instance with 8 column
+		// families). Behind the cgo_besu build tag; vanilla local builds
+		// get a stub redirecting users at Docker.
+		besu.GenesisFilePath = *genesisPath
+		besu.ChainIDOverride = *chainID
+		var err error
+		stats, err = besu.Run(context.Background(), config, besu.Options{})
+		if err != nil {
+			log.Fatalf("Failed to populate Besu DB: %v", err)
 		}
 		if liveStats != nil && stats != nil {
 			liveStats.SetStateRoot(stats.StateRoot.Hex())
