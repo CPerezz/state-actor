@@ -1,6 +1,8 @@
 .PHONY: all build test clean docker install lint fmt help \
 	docker-nethermind docker-nethermind-test test-nethermind-oracle \
-	smoke-nethermind smoke-nethermind-spamoor
+	smoke-nethermind smoke-nethermind-spamoor \
+	docker-besu docker-besu-test test-besu-oracle \
+	smoke-besu smoke-besu-spamoor
 
 # Binary name
 BINARY=state-actor
@@ -129,6 +131,79 @@ smoke-nethermind-spamoor: docker-nethermind
 	  done ; echo ' up'
 	SPAMOOR=$(SPAMOOR) bash $(PWD)/client/nethermind/testdata/spamoor-100-blocks.sh ; \
 	  rc=$$? ; docker stop neth-smoke-spamoor >/dev/null ; exit $$rc
+
+# ---------------------------------------------------------------------------
+# Besu targets (Approach A from the deep-feature-planning multi-client-besu plan)
+#
+# Pinned RocksDB 10.6.2 (matches Besu's rocksdbjni:10.6.2). go.mod stays at
+# grocksdb v1.10.8; if the C-side ABI link fails at first build, downgrade
+# to grocksdb v1.10.4 (which pairs exactly with RocksDB 10.6.2) per C20
+# fallback in the plan's risk register.
+# ---------------------------------------------------------------------------
+
+## docker-besu: Build the Besu-capable image (cgo+grocksdb+rocksdb-from-source, pinned 10.6.2)
+docker-besu:
+	docker build -f Dockerfile.besu -t state-actor-besu:latest -t state-actor-besu:$(VERSION) .
+
+## docker-besu-test: Build the builder stage so we can run cgo_besu go tests inside it
+docker-besu-test:
+	docker build -f Dockerfile.besu --target builder -t state-actor-besu-builder:latest .
+
+## test-besu-oracle: Run the Tier 2 differential oracle (Besu genesis1 + genesisNonce golden hashes)
+test-besu-oracle: docker-besu-test
+	docker run --rm --entrypoint bash state-actor-besu-builder:latest \
+	  -c 'cd /app && go test -tags cgo_besu -run TestDifferentialOracle -v ./client/besu/...'
+
+## smoke-besu: End-to-end smoke — generate a small DB, boot hyperledger/besu:26.5.0, send 100 dev-mode txs
+##   Usage: make smoke-besu ACCOUNTS=1000 CONTRACTS=100
+SA_BESU_DB ?= /tmp/sa-besu-smoke
+smoke-besu: docker-besu
+	rm -rf $(SA_BESU_DB) && mkdir -p $(SA_BESU_DB)
+	docker run --rm \
+	  -v $(SA_BESU_DB):/data \
+	  -v $(PWD)/client/besu/testdata:/test:ro \
+	  state-actor-besu:latest \
+	  --client=besu --db=/data \
+	  --accounts=$(ACCOUNTS) --contracts=$(CONTRACTS) --seed=$(SEED) \
+	  --genesis=/test/genesis-funded.json --verbose
+	bash $(PWD)/client/besu/testdata/validate-big-db-besu.sh $(SA_BESU_DB)
+
+## smoke-besu-spamoor: Generate a DB, boot hyperledger/besu:26.5.0, then run
+##                     spamoor erc20_bloater for 100 blocks of real workload.
+##   Usage: make smoke-besu-spamoor ACCOUNTS=1000 CONTRACTS=100 [SPAMOOR=/abs/path/spamoor]
+##   Pre-req: spamoor binary on PATH (or pass SPAMOOR=/path/to/spamoor).
+smoke-besu-spamoor: docker-besu
+	rm -rf $(SA_BESU_DB) && mkdir -p $(SA_BESU_DB)
+	docker run --rm \
+	  -v $(SA_BESU_DB):/data \
+	  -v $(PWD)/client/besu/testdata:/test:ro \
+	  state-actor-besu:latest \
+	  --client=besu --db=/data \
+	  --accounts=$(ACCOUNTS) --contracts=$(CONTRACTS) --seed=$(SEED) \
+	  --genesis=/test/genesis-funded.json --verbose
+	docker rm -f besu-smoke-spamoor 2>/dev/null || true
+	docker run --rm -d --name besu-smoke-spamoor \
+	  -v $(PWD)/client/besu/testdata:/test:ro \
+	  -v $(SA_BESU_DB):/data \
+	  -p 127.0.0.1:8545:8545 \
+	  hyperledger/besu:26.5.0 \
+	  --data-path=/data \
+	  --genesis-file=/test/genesis-funded.json \
+	  --network-id=1337 \
+	  --rpc-http-enabled --rpc-http-port=8545 --rpc-http-host=0.0.0.0 \
+	  --rpc-http-api=ETH,NET,WEB3,PERSONAL,ADMIN \
+	  --rpc-http-cors-origins="*" --host-allowlist="*" \
+	  --data-storage-format=BONSAI \
+	  --min-gas-price=0 \
+	  --miner-enabled --miner-coinbase=0x7e5f4552091a69125d5dfcb7b8c2659029395bdf \
+	  --logging=INFO
+	@printf 'waiting for Besu RPC ' ; \
+	  until curl -s -o /dev/null --connect-timeout 1 -X POST -H 'Content-Type: application/json' \
+	    --data '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' http://127.0.0.1:8545; do \
+	    printf '.' ; sleep 1 ; \
+	  done ; echo ' up'
+	SPAMOOR=$(SPAMOOR) bash $(PWD)/client/besu/testdata/spamoor-100-blocks-besu.sh ; \
+	  rc=$$? ; docker stop besu-smoke-spamoor >/dev/null ; exit $$rc
 
 ## tidy: Tidy go modules
 tidy:
