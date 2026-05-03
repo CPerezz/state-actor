@@ -41,11 +41,20 @@
 // ~200 B per *Account) plus Pebble's 64 MiB write buffer plus
 // max-slots-per-contract for storage tries — independent of total N.
 //
-// Phase 5a (chainspec.json) still holds the full alloc map in RAM and
-// json.MarshalIndent's it in a single buffer, so chainspec is the new
-// O(N) ceiling — empirically saturating Docker's 7.65 GiB at roughly 3-5M
-// accounts. A separate follow-up plan replaces the chainspec writer with
-// a streaming JSON encoder so total runs can scale past that ceiling.
+// Phase 5a (chainspec.json) is now a fixed ~1 KB regardless of N: the
+// chainspec carries only the chain config (chainID + hardfork timestamps)
+// and the header bits reth needs (gasLimit, baseFeePerGas, difficulty,
+// etc.). The `alloc` field is intentionally an empty object — state-actor
+// direct-writes the genesis state into MDBX, and reth boots with
+// `--debug.skip-genesis-validation` so it trusts the DB-resident state
+// instead of recomputing the genesis hash from chainspec.alloc.
+//
+// The `--debug.skip-genesis-validation` flag is an upstream paradigmxyz/reth
+// addition (currently SHA-pinned via internal/reth/constants.go to a
+// CPerezz/reth fork branch with the patch). Without that flag, reth's
+// init_genesis_with_settings will reject the boot with GenesisHashMismatch
+// because the alloc-derived genesis hash (empty MPT root) differs from the
+// DB-resident genesis hash.
 //
 // # Build tag gating
 //

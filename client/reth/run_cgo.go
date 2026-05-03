@@ -84,13 +84,6 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 	accountsCreated := 0
 	contractsCreated := 0
 
-	// allAccounts is the accumulator passed to writeChainSpec in Phase 5a.
-	// It still grows linearly with N for now — the chainspec rewrite is a
-	// separate follow-up plan. The streaming sorter below decouples the
-	// state-root computation from this accumulator so a future chainspec
-	// refactor can drop the accumulator entirely.
-	var allAccounts []*entitygen.Account
-
 	// Pebble-backed sorter colocated with the datadir. The temp dir lives
 	// under cfg.DBPath/reth-sort-* so it shares disk budget with the (often
 	// large) datadir rather than competing with /tmp. Defer-Close runs on
@@ -137,7 +130,6 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 				return nil, fmt.Errorf("RunCgo: putAccountRLP(injected): %w", err)
 			}
 		}
-		allAccounts = append(allAccounts, injected...)
 		accountsCreated += len(cfg.InjectAddresses)
 	}
 
@@ -170,7 +162,6 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 					return nil, fmt.Errorf("RunCgo: putAccountRLP(EOA): %w", err)
 				}
 			}
-			allAccounts = append(allAccounts, batch...)
 			accountsCreated += b
 			remaining -= b
 		}
@@ -213,7 +204,6 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 						return nil, fmt.Errorf("RunCgo: putAccountRLP(contract): %w", err)
 					}
 				}
-				allAccounts = append(allAccounts, batch...)
 				contractsCreated += b
 				remaining -= b
 			}
@@ -235,10 +225,10 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 		return nil, fmt.Errorf("RunCgo: sorter.Close: %w", err)
 	}
 
-	// Phase 5a: resolve genesis + chainID, persist chainspec.json.
-	// The chainspec alloc is populated with all generated accounts so that
-	// reth's state_root_ref_unhashed(&alloc) matches our ComputeStateRoot,
-	// making the genesis hash consistent between chainspec and database.
+	// Phase 5a: resolve genesis + chainID, persist chainspec.json. The
+	// chainspec is now alloc-free (just config + header bits) — reth boots
+	// with --debug.skip-genesis-validation and trusts the DB-resident
+	// genesis state. File size is constant in N, no longer the OOM ceiling.
 	genesisPath := genesisPathFromCfg(cfg)
 	gen, err := loadGenesisForReth(genesisPath)
 	if err != nil {
@@ -247,7 +237,7 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 	chainID := deriveChainID(chainIDFromCfg(cfg), gen)
 
 	chainspecPath := filepath.Join(cfg.DBPath, "chainspec.json")
-	if err := writeChainSpec(genesisPath, chainspecPath, chainID, allAccounts); err != nil {
+	if err := writeChainSpec(genesisPath, chainspecPath, chainID); err != nil {
 		return nil, fmt.Errorf("RunCgo: writeChainSpec: %w", err)
 	}
 
