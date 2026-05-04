@@ -133,15 +133,10 @@ smoke-nethermind-spamoor: docker-nethermind
 	  rc=$$? ; docker stop neth-smoke-spamoor >/dev/null ; exit $$rc
 
 # ---------------------------------------------------------------------------
-# Besu targets (Approach A from the deep-feature-planning multi-client-besu plan)
-#
-# Pinned RocksDB 10.6.2 (matches Besu's rocksdbjni:10.6.2). go.mod stays at
-# grocksdb v1.10.8; if the C-side ABI link fails at first build, downgrade
-# to grocksdb v1.10.4 (which pairs exactly with RocksDB 10.6.2) per C20
-# fallback in the plan's risk register.
+# Besu targets — see Dockerfile.besu for the RocksDB / grocksdb version pairing.
 # ---------------------------------------------------------------------------
 
-## docker-besu: Build the Besu-capable image (cgo+grocksdb+rocksdb-from-source, pinned 10.6.2)
+## docker-besu: Build the Besu-capable image (cgo+grocksdb+rocksdb-from-source)
 docker-besu:
 	docker build -f Dockerfile.besu -t state-actor-besu:latest -t state-actor-besu:$(VERSION) .
 
@@ -149,7 +144,7 @@ docker-besu:
 docker-besu-test:
 	docker build -f Dockerfile.besu --target builder -t state-actor-besu-builder:latest .
 
-## test-besu-oracle: Run the Tier 2 differential oracle (Besu genesis1 + genesisNonce golden hashes)
+## test-besu-oracle: Run the differential oracle (Besu genesis1 + genesisNonce golden hashes)
 test-besu-oracle: docker-besu-test
 	docker run --rm --entrypoint bash state-actor-besu-builder:latest \
 	  -c 'cd /app && go test -tags cgo_besu -run TestDifferentialOracle -v ./client/besu/...'

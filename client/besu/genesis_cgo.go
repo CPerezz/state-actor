@@ -109,13 +109,10 @@ func (b *besuDB) writeGenesisBlock(header *types.Header, totalDifficulty *big.In
 }
 
 // supportedFork returns nil if the genesis JSON's config block targets a
-// fork through Shanghai (the v1 supported window). Cancun+ configs
-// (cancunTime / pragueTime / shanghaiTime > 0 with subsequent forks) are
-// rejected with a clear error so users don't get a silent "wrong genesis
-// hash" boot failure.
-//
-// v1 scope per the deep-feature-planning artifact: support through Shanghai;
-// Cancun+ deferred to v2 follow-up.
+// fork through Shanghai. Cancun+ configs (cancunTime / pragueTime /
+// shanghaiTime > 0 with subsequent forks) are rejected with a clear error so
+// users don't get a silent "wrong genesis hash" boot failure. Cancun+ support
+// is a possible future addition.
 func supportedFork(g *genesisJSONConfig) error {
 	if g == nil {
 		return nil

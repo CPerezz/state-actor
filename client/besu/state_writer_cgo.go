@@ -49,10 +49,8 @@ const phase1FlushBytes = 64 * 1024 * 1024
 //
 // Memory bound: O(max storage slots per single contract). The full account
 // set never lives in RAM simultaneously — Phase 1 streams entities through
-// Pebble, Phase 2 streams them back out one at a time.
-//
-// v1 deferred: cross-account parallelism in Phase 2 (per amendment from
-// Tier 4 review). v1 is sequential per account.
+// Pebble, Phase 2 streams them back out one at a time. Phase 2 is sequential
+// per account; cross-account parallelism is a possible future optimization.
 func writeStateAndCollectRoot(
 	ctx context.Context,
 	cfg generator.Config,

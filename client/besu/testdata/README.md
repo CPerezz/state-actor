@@ -6,7 +6,7 @@ Test fixtures and smoke-test scripts for the Besu client adapter.
 
 `genesis1.json` and `genesisNonce.json` are vendored from
 hyperledger/besu tag 26.5.0 — see `LICENSE-besu-fixtures` for attribution.
-They anchor the Tier 2 differential oracle (`oracle_test.go`):
+They anchor the differential oracle (`oracle_test.go`):
 
 - `genesis1.json` (2 EOAs, chainId=15) — expected stateRoot
   `0x92683e6af0f8a932e5fe08c870f2ae9d287e39d4518ec544b0be451f1035fd39`
