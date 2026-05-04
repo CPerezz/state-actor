@@ -12,26 +12,14 @@ import (
 	"github.com/ethereum/go-ethereum/trie"
 )
 
-// TestCanonicalEntitygenMPTRoot pins the canonical hexary-MPT state root for a
-// known entitygen configuration, computed via go-ethereum's reference
-// StackTrie implementation. This is the cross-client invariant every MPT-mode
-// client adapter (nethermind, besu, reth — anything using entitygen + hexary MPT)
-// MUST match.
+// TestCanonicalEntitygenMPTRoot pins the canonical hexary-MPT state root
+// computed via go-ethereum's StackTrie for a known entitygen config. Every
+// MPT-mode client adapter (nethermind, besu, reth) MUST match — same RNG
+// draws → same state → same root, regardless of on-disk node layout.
+// Drift here requires a coordinated update across all client adapters.
 //
-// Same RNG draws → same accounts/codes/slots → same MPT root, regardless of
-// on-disk node layout (geth flat snapshot vs nethermind HalfPath vs Besu Bonsai
-// path-keyed vs reth MDBX). The state root is a function of state content + trie
-// type, NOT storage format.
-//
-// If a client adapter produces a different hash for this seed/config, either
-// its entity generation diverges from entitygen's RNG draw sequence, or its
-// trie/RLP encoding has a bug. This test is the reference oracle.
-//
-// Note: the geth-MPT path in generator/generator.go currently uses inline RNG
-// draws that don't match entitygen — its golden hash for the same config is a
-// different value. That's a pre-existing generator inconsistency, tracked
-// separately. The entitygen-pinned hash here is the value all entitygen-using
-// adapters share.
+// (geth-MPT in generator/generator.go uses inline RNG draws that don't match
+// entitygen — known pre-existing inconsistency, tracked separately.)
 func TestCanonicalEntitygenMPTRoot(t *testing.T) {
 	const (
 		seed         = int64(12345)

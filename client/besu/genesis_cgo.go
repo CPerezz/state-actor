@@ -13,34 +13,14 @@ import (
 	"github.com/nerolation/state-actor/internal/besu/keys"
 )
 
-// writeGenesisBlock persists the genesis block + canonical-hash mapping +
-// total-difficulty + chain head pointer.
+// writeGenesisBlock persists the genesis block (header / body / receipts /
+// canonical-hash / total-difficulty in BLOCKCHAIN CF) and the chain head
+// pointer in VARIABLES.
 //
-// Per Besu's BLOCKCHAIN CF layout (KeyValueStoragePrefixedKeyBlockchainStorage.java:64-70):
-//
-//	BLOCKCHAIN[0x02 ++ blockHash]    = RLP(header)
-//	BLOCKCHAIN[0x03 ++ blockHash]    = RLP(body) — empty txs/ommers/withdrawals
-//	BLOCKCHAIN[0x04 ++ blockHash]    = RLP(receipts) — 0xC0 (empty list)
-//	BLOCKCHAIN[0x05 ++ UInt256(0)]   = blockHash (canonical num→hash)
-//	BLOCKCHAIN[0x06 ++ blockHash]    = totalDifficulty (Bytes32)
-//
-// Then VARIABLES["chainHeadHash"] = blockHash (32 bytes).
-//
-// # Write order: chainHeadHash LAST (mirror nethermind e4722af)
-//
-// Besu's DefaultBlockchain.setGenesis (DefaultBlockchain.java:1027-1057)
-// reads VARIABLES["chainHeadHash"] on boot. If empty, Besu writes the
-// genesis itself from --genesis-file. If present and matching the
-// recomputed genesis hash, Besu skips writeStateTo and starts. If present
-// but mismatched, Besu throws InvalidConfigurationException.
-//
-// We write the chainHeadHash LAST so that a partial run leaves the BLOCKCHAIN
-// rows orphan but the boot gate (chainHeadHash) absent. Combined with the
-// fresh-dir precondition, this ensures the DB is either fully-bootable or
-// not bootable — never silently mis-bootable.
-//
-// The chainHeadHash write is sync (putSync) so that a power loss after
-// the function returns doesn't strand the DB in a half-durable state.
+// chainHeadHash MUST be written LAST and with sync. Besu's
+// DefaultBlockchain.setGenesis reads it as the boot gate: a partial run
+// leaves the BLOCKCHAIN rows orphan but the gate absent → Besu refuses
+// to boot, never silently mis-boots.
 func (b *besuDB) writeGenesisBlock(header *types.Header, totalDifficulty *big.Int) error {
 	blockHash := header.Hash()
 
@@ -51,18 +31,9 @@ func (b *besuDB) writeGenesisBlock(header *types.Header, totalDifficulty *big.In
 		return fmt.Errorf("besu: encode header: %w", err)
 	}
 
-	// Body RLP layout per types.Block.EncodeRLP:
-	//   RLP_LIST [ transactions, ommers ]   (legacy)
-	//   RLP_LIST [ transactions, ommers, withdrawals ]   (Shanghai+)
-	//
-	// For genesis, all three lists are empty. We use legacy 2-tuple shape
-	// because v1 supports through Shanghai but the genesis block itself
-	// doesn't need withdrawals (those land starting at the Shanghai fork
-	// block, which is post-genesis on a custom dev chain). If the operator
-	// configures shanghaiTime=0 in the genesis JSON, Besu adds an empty
-	// withdrawals list to the body RLP automatically on its first read of
-	// the block — but the GENESIS body is always 2-tuple per
-	// GenesisState.buildGenesisBlock at GenesisState.java:201-233.
+	// Genesis body is always 2-tuple [txs, ommers] per
+	// GenesisState.buildGenesisBlock — withdrawals land in post-genesis
+	// blocks even with shanghaiTime=0.
 	bodyRLP, err := gethrlp.EncodeToBytes(struct {
 		Txs    []*types.Transaction
 		Ommers []*types.Header
@@ -74,16 +45,12 @@ func (b *besuDB) writeGenesisBlock(header *types.Header, totalDifficulty *big.In
 		return fmt.Errorf("besu: encode body: %w", err)
 	}
 
-	// Receipts: empty RLP list = single byte 0xC0. Direct constant write
-	// (NOT RLP.encodeOne([]byte{0xC0}) which would double-wrap).
+	// Receipts: empty RLP list = single byte 0xC0. Direct write — NOT
+	// RLP.encodeOne([]byte{0xC0}) which would double-wrap.
 	receiptsRLP := []byte{0xC0}
 
-	// Total difficulty as Bytes32 (32-byte big-endian).
 	tdHash := common.BigToHash(totalDifficulty)
 
-	// Now perform the writes via the besuDB.put fast path. All targets are
-	// in BLOCKCHAIN CF except the final chainHeadHash which goes to
-	// VARIABLES.
 	if err := b.put(cfIdxBlockchain, keys.BlockHeaderKey(blockHash), headerRLP); err != nil {
 		return fmt.Errorf("besu: write header: %w", err)
 	}
@@ -100,7 +67,7 @@ func (b *besuDB) writeGenesisBlock(header *types.Header, totalDifficulty *big.In
 		return fmt.Errorf("besu: write total difficulty: %w", err)
 	}
 
-	// LAST: chainHeadHash (with sync). This is the boot gate.
+	// chainHeadHash LAST, synced — boot gate per setGenesis.
 	if err := b.putSync(cfIdxVariables, keys.ChainHeadHashKey, blockHash[:]); err != nil {
 		return fmt.Errorf("besu: write chainHeadHash: %w", err)
 	}

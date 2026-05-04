@@ -99,11 +99,10 @@ func testDifferentialOracleGenesisNonce(t *testing.T) {
 	}
 }
 
-// loadFixtureAllocs loads only the alloc map from a Besu genesis JSON.
-//
-// state-actor's genesis.LoadGenesis is geth-shaped; it will refuse genesis1
-// because of its non-standard config block. Use a relaxed loader that only
-// extracts alloc — the test doesn't care about chain config.
+// loadFixtureAllocs loads the alloc map from a Besu genesis JSON. Handles
+// both 0x-prefixed hex and bare-decimal balances (Besu source fixtures use
+// each in different files); state-actor's geth-shaped genesis.LoadGenesis
+// would refuse genesis1.json's non-standard config block.
 func loadFixtureAllocs(t *testing.T, path string) map[common.Address]genesis.GenesisAccount {
 	t.Helper()
 	abs, err := filepath.Abs(path)
@@ -114,41 +113,7 @@ func loadFixtureAllocs(t *testing.T, path string) map[common.Address]genesis.Gen
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
 	}
-
-	type rawGenesis struct {
-		Alloc map[string]struct {
-			Balance *hexutil.Big                `json:"balance"`
-			Nonce   hexutil.Uint64              `json:"nonce,omitempty"`
-			Code    hexutil.Bytes               `json:"code,omitempty"`
-			Storage map[common.Hash]common.Hash `json:"storage,omitempty"`
-		} `json:"alloc"`
-	}
-
-	var rg rawGenesis
-	if err := json.Unmarshal(raw, &rg); err != nil {
-		// Some Besu fixtures use decimal balances ("111111111") which
-		// hexutil.Big rejects. Fall back to a string-balance loader.
-		return loadFixtureAllocsDecimal(t, raw)
-	}
-
-	out := make(map[common.Address]genesis.GenesisAccount, len(rg.Alloc))
-	for addrHex, a := range rg.Alloc {
-		addr := common.HexToAddress(addrHex)
-		out[addr] = genesis.GenesisAccount{
-			Balance: a.Balance,
-			Nonce:   a.Nonce,
-			Code:    a.Code,
-			Storage: a.Storage,
-		}
-	}
-	return out
-}
-
-// loadFixtureAllocsDecimal handles fixtures (like genesis1.json) where
-// balances are decimal strings rather than hex.
-func loadFixtureAllocsDecimal(t *testing.T, raw []byte) map[common.Address]genesis.GenesisAccount {
-	t.Helper()
-	type rawDecGenesis struct {
+	var rg struct {
 		Alloc map[string]struct {
 			Balance string                      `json:"balance"`
 			Nonce   string                      `json:"nonce,omitempty"`
@@ -156,30 +121,22 @@ func loadFixtureAllocsDecimal(t *testing.T, raw []byte) map[common.Address]genes
 			Storage map[common.Hash]common.Hash `json:"storage,omitempty"`
 		} `json:"alloc"`
 	}
-	var rg rawDecGenesis
 	if err := json.Unmarshal(raw, &rg); err != nil {
-		t.Fatalf("unmarshal alloc (decimal): %v", err)
+		t.Fatalf("unmarshal alloc: %v", err)
 	}
 	out := make(map[common.Address]genesis.GenesisAccount, len(rg.Alloc))
 	for addrHex, a := range rg.Alloc {
-		addr := common.HexToAddress(addrHex)
 		bal, ok := new(big.Int).SetString(a.Balance, 0)
 		if !ok {
-			// Try base 10 (common for Besu test fixtures).
-			bal, ok = new(big.Int).SetString(a.Balance, 10)
-			if !ok {
-				t.Fatalf("parse balance %q for %s", a.Balance, addrHex)
-			}
+			t.Fatalf("parse balance %q for %s", a.Balance, addrHex)
 		}
 		var nonce hexutil.Uint64
 		if a.Nonce != "" {
 			n, ok := new(big.Int).SetString(a.Nonce, 0)
-			if !ok {
-				n, _ = new(big.Int).SetString(a.Nonce, 16)
+			if !ok || !n.IsUint64() {
+				t.Fatalf("parse nonce %q for %s", a.Nonce, addrHex)
 			}
-			if n != nil {
-				nonce = hexutil.Uint64(n.Uint64())
-			}
+			nonce = hexutil.Uint64(n.Uint64())
 		}
 		var code hexutil.Bytes
 		if a.Code != "" && a.Code != "0x" {
@@ -189,7 +146,7 @@ func loadFixtureAllocsDecimal(t *testing.T, raw []byte) map[common.Address]genes
 			}
 			code = b
 		}
-		out[addr] = genesis.GenesisAccount{
+		out[common.HexToAddress(addrHex)] = genesis.GenesisAccount{
 			Balance: (*hexutil.Big)(bal),
 			Nonce:   nonce,
 			Code:    code,

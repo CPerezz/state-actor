@@ -23,34 +23,20 @@ import (
 	"github.com/nerolation/state-actor/internal/entitygen"
 )
 
-// phase1FlushBytes is the temp-Pebble batch flush threshold during entity
-// streaming. Mirrors nethermind's entitygen_cgo.go:80 — 64 MiB keeps Phase 1
-// memory bounded while amortizing per-batch syscall overhead.
+// phase1FlushBytes caps the temp-Pebble write batch at 64 MiB to bound Phase 1
+// memory while amortizing per-batch syscall overhead.
 const phase1FlushBytes = 64 * 1024 * 1024
 
-// writeStateAndCollectRoot drives the two-phase streaming pipeline:
+// writeStateAndCollectRoot drives the two-phase streaming pipeline.
 //
-//	Phase 1: generate entities (single-goroutine RNG, math/rand.Rand is
-//	         not thread-safe). For each, compute addrHash and serialize
-//	         (addrHash → entityBlob) into a temp Pebble DB. Pebble's LSM
-//	         auto-sorts by key so Phase 2 can iterate in addrHash-sorted
-//	         order.
-//
-//	Phase 2: iterate the temp Pebble. For each entity:
-//	         - If contract: build per-account storage trie via
-//	           Builder.BeginStorage; write flat slots + code; embed
-//	           storageRoot in the account RLP.
-//	         - Write flat ACCOUNT_INFO_STATE.
-//	         - Feed addrHash + accountRLP into the account trie builder.
-//
-// Returns the state root and a Stats summary. NodeSink.SaveWorldState is
-// invoked here at the end of Phase 2; the caller (run_cgo.go) does NOT
-// need to call it again.
+// Phase 1 generates entities via a single-goroutine RNG (math/rand.Rand is
+// not thread-safe) and writes (addrHash → entityBlob) to a temp Pebble DB,
+// which auto-sorts by key. Phase 2 iterates the sorted DB, builds per-account
+// storage tries, writes flat state and code, and feeds (addrHash, accountRLP)
+// into the account trie builder. SaveWorldState is invoked here at the end.
 //
 // Memory bound: O(max storage slots per single contract). The full account
-// set never lives in RAM simultaneously — Phase 1 streams entities through
-// Pebble, Phase 2 streams them back out one at a time. Phase 2 is sequential
-// per account; cross-account parallelism is a possible future optimization.
+// set never lives in RAM at once.
 func writeStateAndCollectRoot(
 	ctx context.Context,
 	cfg generator.Config,
@@ -84,14 +70,10 @@ func writeStateAndCollectRoot(
 		return nil
 	}
 
-	// Phase 1 target-size cap — mirror generator/generator.go:1050-1069.
-	// Track cumulative raw bytes (32B addrHash key + entity blob) and stop
-	// emission once cfg.TargetSize is reached. This is intentionally an
-	// over-estimate of what the final Bonsai DB will hold (raw entity bytes
-	// don't include trie node overhead) but on the safer side — we tend to
-	// land slightly under target. Without this cap, --target-size=50GB
-	// would require user to also pass --accounts/--contracts large enough
-	// to hit it; this makes target-size the governing constraint.
+	// Phase 1 target-size cap. Tracks raw entity bytes (32B addrHash key + blob)
+	// and stops emission once cfg.TargetSize is reached. Over-estimates the
+	// final Bonsai DB size (no trie-node overhead) but lands slightly under
+	// target — preferred over going over.
 	totalRawBytes := uint64(0)
 	targetReached := false
 	checkTarget := func(blobLen int) bool {
@@ -107,13 +89,6 @@ func writeStateAndCollectRoot(
 		return false
 	}
 
-	// Emit count: EOA and contract counts from cfg.
-	//
-	// Uses internal/entitygen.GenerateEOA so the RNG draw sequence (and therefore
-	// the resulting state) matches the geth/nethermind/reth paths exactly — same
-	// --seed produces identical (addr → nonce/balance/code/storage) tuples across
-	// all clients. The state root differs only by trie scheme (binary vs MPT),
-	// not by content.
 	for i := 0; i < cfg.NumAccounts && !targetReached; i++ {
 		if err := ctx.Err(); err != nil {
 			pdb.Close()
@@ -138,12 +113,9 @@ func writeStateAndCollectRoot(
 		}
 	}
 
-	// --- Phase 1b: inject any explicitly-requested addresses (e.g. Anvil's
-	// default account). Mirrors generator.Generator's InjectAddresses
-	// handling at generator/generator.go:925-949: each address gets a fresh
-	// EOA with 999_999_999 ETH balance, nonce=0, no code/storage. We append
-	// them BEFORE Phase 1 flush so they hit the temp Pebble alongside the
-	// synthetic EOAs and naturally sort into the right position.
+	// Inject explicitly-requested addresses (e.g. Anvil default) as EOAs with
+	// 999_999_999 ETH, nonce=0, no code/storage. Mirrors generator.Generator's
+	// InjectAddresses handling.
 	injectBalance := new(uint256.Int).Mul(uint256.NewInt(999_999_999), uint256.NewInt(1_000_000_000_000_000_000))
 	seenInjected := make(map[common.Address]struct{}, len(cfg.InjectAddresses))
 	for _, addr := range cfg.InjectAddresses {
@@ -180,13 +152,10 @@ func writeStateAndCollectRoot(
 			pdb.Close()
 			return common.Hash{}, nil, nil, err
 		}
-		// CRITICAL ordering: GenerateSlotCount draws (Float64 / Intn) BEFORE
-		// GenerateContract draws (addr, code, balance, slots, nonce). Reordering
-		// these breaks cross-client state-root parity.
+		// GenerateSlotCount MUST draw before GenerateContract — same RNG
+		// sequence as the other entitygen-using clients.
 		numSlots := entitygen.GenerateSlotCount(rng, cfg.Distribution, cfg.MinSlots, cfg.MaxSlots)
 		contract := entitygen.GenerateContract(rng, codeSize, numSlots)
-		// Convert pre-sorted []StorageSlot to map for blob encoding. Phase 2
-		// re-sorts by keccak(slotKey) anyway, so map iteration order is fine.
 		slotMap := make(map[common.Hash]common.Hash, len(contract.Storage))
 		for _, s := range contract.Storage {
 			slotMap[s.Key] = s.Value

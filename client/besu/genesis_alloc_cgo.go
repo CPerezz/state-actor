@@ -19,23 +19,8 @@ import (
 )
 
 // writeGenesisAllocAccounts feeds a genesis JSON's `alloc` map directly into
-// the Phase 2 pipeline (skipping Phase 1 synthetic-entity generation).
-//
-// Used by the differential oracle (oracle_test.go) to verify that
-// state-actor's Besu writer produces the same state root Besu would compute
-// from the same genesis JSON.
-//
-// The flow mirrors writeStateAndCollectRoot's Phase 2 exactly:
-//
-//   - Sort allocations by addrHash ascending.
-//   - For each contract: build per-account storage trie via
-//     Builder.BeginStorage; flat slot writes through nodeSink.
-//   - Compute account RLP with embedded storageRoot + codeHash.
-//   - Flat ACCOUNT_INFO_STATE write.
-//   - Add to account trie.
-//
-// On return, the account trie is committed and rootHash + rootRLP are
-// available for SaveWorldState.
+// Phase 2 (skipping synthetic entity generation). Used by the differential
+// oracle to compare our writer's state root against Besu's pinned values.
 func writeGenesisAllocAccounts(
 	ctx context.Context,
 	db *besuDB,
