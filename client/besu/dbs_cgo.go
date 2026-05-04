@@ -12,17 +12,10 @@ import (
 	"github.com/nerolation/state-actor/internal/besu/keys"
 )
 
-// Besu's RocksDB layout differs structurally from Nethermind's. Where
-// Nethermind opens 7 separate RocksDB instances under <datadir>/<name>/,
-// Besu opens ONE instance under <datadir>/database/ with N declared column
-// families (KeyValueStorageProvider.java; verified at TIer 1 §A).
-//
-// We declare the 8 CFs Besu Bonsai expects on a fresh DB. Even
-// TRIE_LOG_STORAGE — which receives no writes during genesis — must be
-// declared on OpenDb or RocksDB will reject the open later when Besu adds
-// it (per RocksDBColumnarKeyValueStorage.java:144-179, the factory passes
-// its full segments list to RocksDB.listColumnFamilies on every open and
-// fails if any declared CF is missing).
+// Besu opens ONE RocksDB instance under <datadir>/database/ with all 8 column
+// families declared. Even TRIE_LOG_STORAGE (no genesis-time writes) must be
+// declared on OpenDb — RocksDB compares the open's CF list against on-disk
+// CFs and fails if any is missing on subsequent reopens.
 
 // CF indices into besuDB.cfs. Must match the order of cfNames in openBesuDB.
 const (
@@ -52,20 +45,14 @@ type besuDB struct {
 }
 
 // openBesuDB creates a fresh Besu Bonsai RocksDB at <datadir>/database/.
+// Refuses to open into an existing dir: re-running on top of a partial run
+// could leave genesis block keys, world-state sentinels, and chainHeadHash
+// inconsistent, with Besu booting off whichever wrote last.
 //
-// Fresh-dir precondition: refuses to open if <datadir>/database/ already
-// exists. Mirrors nethermind's e4722af partial-state hazard fix —
-// without this, a re-run on top of a half-finished previous run could leave
-// the genesis block keys, world-state sentinels, and chainHeadHash in
-// inconsistent states, with Besu then keying its boot off whichever wrote
-// last. Combined with the "VARIABLES['chainHeadHash'] LAST" write order in
-// genesis_cgo.go, this gives us "all-or-nothing within a single run".
-//
-// Note: we open with vanilla grocksdb.OpenDbColumnFamilies, NOT
-// OpenOptimisticTransactionDb. The on-disk file format is identical between
-// the two open modes (the optimistic-tx wrapper only adds in-memory
-// conflict checking at commit time), so Besu's OptimisticTransactionDB boot
-// reads what we write here.
+// We open with plain OpenDbColumnFamilies, not OpenOptimisticTransactionDb —
+// the on-disk file format is identical (the optimistic-tx wrapper only adds
+// in-memory conflict checking), so Besu's OptimisticTransactionDB boot reads
+// what we write here.
 func openBesuDB(datadir string) (*besuDB, error) {
 	dbPath := filepath.Join(datadir, "database")
 
@@ -86,36 +73,25 @@ func openBesuDB(datadir string) (*besuDB, error) {
 		return nil, fmt.Errorf("besu: mkdir datadir: %w", err)
 	}
 
-	// CF names, in the order matching the cfIdx* constants above. CF byte
-	// names are LITERAL bytes (single-byte 0x01..0x0b for the segment-id
-	// CFs, UTF-8 "default" for the default CF) per
-	// KeyValueSegmentIdentifier.java:27-77. See internal/besu/keys/cf.go
-	// for the per-CF byte definitions.
+	// CF names use LITERAL bytes (0x01..0x0b for segment CFs, UTF-8 "default"
+	// for the default CF) per KeyValueSegmentIdentifier.java:27-77. Order
+	// must match the cfIdx* constants above.
 	cfNames := []string{
-		string(keys.CFDefault),               // {default}
-		string(keys.CFBlockchain),            // {1} — BlobDB on
-		string(keys.CFAccountInfoState),      // {6}
-		string(keys.CFCodeStorage),           // {7}
-		string(keys.CFAccountStorageStorage), // {8}
-		string(keys.CFTrieBranchStorage),     // {9}
-		string(keys.CFTrieLogStorage),        // {10} — declared, BlobDB on, NO writes
-		string(keys.CFVariables),             // {11}
+		string(keys.CFDefault),
+		string(keys.CFBlockchain),
+		string(keys.CFAccountInfoState),
+		string(keys.CFCodeStorage),
+		string(keys.CFAccountStorageStorage),
+		string(keys.CFTrieBranchStorage),
+		string(keys.CFTrieLogStorage),
+		string(keys.CFVariables),
 	}
 
 	// Match Besu's per-CF settings from RocksDBColumnarKeyValueStorage.java:
-	//   - LZ4 compression for ALL CFs (line 229)
-	//   - Block-based table with format_version=5 (line 76), block_size=32KB
-	//     (line 77), BloomFilter(10, false), partition_filters=true,
-	//     cacheIndexAndFilterBlocks=false (lines 283-297)
-	//   - Dynamic level compaction (default true)
-	//   - BlobDB on BLOCKCHAIN and TRIE_LOG_STORAGE only (containsStaticData=true
-	//     in KeyValueSegmentIdentifier.java:29, :41)
-	//
-	// Note: we tune defaults to match Besu's writer so files produced here
-	// "look like" what Besu would write itself. RocksDB doesn't strictly
-	// require this — Besu can read files written with different per-CF
-	// options — but matching reduces the surface area for "looks weird,
-	// might silently re-tune on first open" failures.
+	// LZ4 compression, block-based table format_version=5, 32KB blocks,
+	// BloomFilter(10), dynamic-level compaction, BlobDB on BLOCKCHAIN +
+	// TRIE_LOG_STORAGE only. Matching avoids "files look weird, Besu silently
+	// re-tunes on first open" surprises.
 	bf := grocksdb.NewBloomFilter(10)
 
 	mkTable := func() *grocksdb.BlockBasedTableOptions {
@@ -136,17 +112,11 @@ func openBesuDB(datadir string) (*besuDB, error) {
 		opts.SetLevelCompactionDynamicLevelBytes(true)
 		t := mkTable()
 		opts.SetBlockBasedTableFactory(t)
-		// BlobDB on BLOCKCHAIN ({1}) and TRIE_LOG_STORAGE ({10}) only —
-		// matches RocksDBColumnarKeyValueStorage.configureBlobDBForSegment
-		// at lines 239-263.
 		if i == cfIdxBlockchain || i == cfIdxTrieLogStorage {
 			opts.EnableBlobFiles(true)
 			opts.SetMinBlobSize(100)
 			opts.SetBlobCompressionType(grocksdb.LZ4Compression)
-			// Garbage collection: Besu enables it on TRIE_LOG_STORAGE
-			// (staticDataGarbageCollectionEnabled=true at
-			// KeyValueSegmentIdentifier.java:41). For BLOCKCHAIN it's
-			// off by default. We mirror.
+			// Besu enables blob GC on TRIE_LOG_STORAGE only.
 			if i == cfIdxTrieLogStorage {
 				opts.EnableBlobGC(true)
 			}
@@ -237,8 +207,8 @@ func (b *besuDB) put(cfIdx int, key, value []byte) error {
 }
 
 // putSync writes with sync=true. Used for the final chainHeadHash write to
-// guarantee ordered durability per the partial-state hazard mitigation
-// (mirrors nethermind e4722af blockInfos-last write order).
+// guarantee ordered durability — chainHeadHash MUST be the last on-disk write
+// or a crash mid-write can leave Besu booting against partial state.
 func (b *besuDB) putSync(cfIdx int, key, value []byte) error {
 	wo := grocksdb.NewDefaultWriteOptions()
 	defer wo.Destroy()

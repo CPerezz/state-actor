@@ -16,26 +16,11 @@ import (
 	"github.com/nerolation/state-actor/internal/besu/keys"
 )
 
-// TestBesuGoldenStateRoot pins the synthetic-account state root produced by
-// the full cgo_besu pipeline (Phase 1 → Phase 2 → SaveWorldState) for a
-// deterministic config.
-//
-// Cross-client invariant: this hash MUST match the canonical entitygen-MPT
-// root pinned by internal/entitygen.TestCanonicalEntitygenMPTRoot. Same RNG
-// draws (via internal/entitygen) → same accounts/codes/slots → same hexary-MPT
-// state root, regardless of on-disk storage layout (Besu Bonsai path-keyed vs
-// nethermind HalfPath vs reth MDBX). If the entitygen anchor test changes,
-// every entitygen-using adapter (this one, nethermind, reth) needs the same
-// update. The two hashes are deliberately the same constant.
-//
-// (The geth-MPT path in generator/generator.go uses inline RNG draws that
-// don't match entitygen and produces a different hash for the same config —
-// that's a pre-existing generator-side inconsistency, separate from this PR.)
-//
-// Source config:
-//
-//	seed=12345, NumAccounts=10, NumContracts=5, MaxSlots=100, MinSlots=1,
-//	CodeSize=256, Distribution=PowerLaw
+// TestBesuGoldenStateRoot pins the state root the full cgo_besu pipeline
+// produces for seed=12345/10/5/PowerLaw/MaxSlots=100/CodeSize=256. The hash
+// MUST equal internal/entitygen.TestCanonicalEntitygenMPTRoot — every
+// entitygen-using MPT adapter shares this constant. Drift requires a
+// coordinated update across nethermind, besu, reth.
 func TestBesuGoldenStateRoot(t *testing.T) {
 	const expectedRoot = "0xddbfa7c1941ff70fe5a692f7552149adc1ae29ebb2b5dc8bb3544c1368bcb0c3"
 

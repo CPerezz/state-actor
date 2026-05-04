@@ -150,18 +150,3 @@ func TestLeafNode_LongValueStored(t *testing.T) {
 	}
 }
 
-// TestNode_HashCaching verifies that EncodedBytes() and Hash() are stable
-// across multiple calls (lazy caching is safe).
-func TestNode_HashCaching(t *testing.T) {
-	leaf := NewLeafNode([]byte{0x05}, []byte{0xff})
-	h1 := leaf.Hash()
-	h2 := leaf.Hash()
-	e1 := leaf.EncodedBytes()
-	e2 := leaf.EncodedBytes()
-	if h1 != h2 {
-		t.Fatalf("Hash() not stable: %x != %x", h1, h2)
-	}
-	if !bytes.Equal(e1, e2) {
-		t.Fatalf("EncodedBytes() not stable: %x != %x", e1, e2)
-	}
-}

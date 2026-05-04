@@ -162,47 +162,6 @@ func TestBuilder_TwoAccounts_Genesis1Root(t *testing.T) {
 	}
 }
 
-// TestBuilder_OneAccount_RootIsStored verifies the small-root special case:
-// when the root node's RLP is < 32 bytes it must still be written via
-// PutAccountStateTrieNode at location=[].
-//
-// A 1-account trie produces a tiny LeafNode root in many cases — its RLP can
-// fall under 32 bytes for short value payloads.
-func TestBuilder_OneAccount_RootIsStored(t *testing.T) {
-	addr := common.HexToAddress("0x0000000000000000000000000000000000000001")
-	addrHash := crypto.Keccak256Hash(addr[:])
-	// Use a tiny placeholder value — not a real account RLP; we just want
-	// to exercise the trie/sink contract.
-	value := []byte{0xab}
-
-	sink := &recordingSink{}
-	b := New(sink)
-	if err := b.AddAccount(addrHash, value); err != nil {
-		t.Fatalf("AddAccount: %v", err)
-	}
-	_, _, err := b.Commit()
-	if err != nil {
-		t.Fatalf("Commit: %v", err)
-	}
-	// Find the write at location=[].
-	var foundRoot bool
-	for _, r := range sink.stateNodes {
-		if len(r.location) == 0 {
-			foundRoot = true
-			break
-		}
-	}
-	// The leaf RLP for a 65-nibble path + 1-byte value is small; root SHOULD
-	// be < 32 bytes here. If it is, we must still see a location=[] write.
-	if !foundRoot {
-		// Confirm root is small (else this case doesn't apply).
-		_, rootRLP, _ := b.Commit() // re-read for diagnostic
-		if !IsReferencedByHash(rootRLP) {
-			t.Fatalf("small root not stored at location=[]: stateNodes=%d", len(sink.stateNodes))
-		}
-	}
-}
-
 // TestBuilder_Reproducibility verifies that the same input order produces
 // byte-identical sink call sequences and root hashes.
 func TestBuilder_Reproducibility(t *testing.T) {

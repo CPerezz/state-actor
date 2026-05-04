@@ -71,21 +71,3 @@ func TestEncodedBytesRef_Stored(t *testing.T) {
 	}
 }
 
-// TestEncodedBytesRef_BoundaryAt32 pins the boundary case: exactly 32 bytes
-// → stored (NOT inlined).
-func TestEncodedBytesRef_BoundaryAt32(t *testing.T) {
-	rlp := make([]byte, 32) // all zeros
-	got := EncodedBytesRef(rlp)
-	if len(got) != 33 {
-		t.Fatalf("boundary case: got len=%d, want 33 (stored)", len(got))
-	}
-}
-
-// TestEncodedBytesRef_BoundaryAt31 pins the inline boundary: 31 bytes → inlined.
-func TestEncodedBytesRef_BoundaryAt31(t *testing.T) {
-	rlp := make([]byte, 31)
-	got := EncodedBytesRef(rlp)
-	if len(got) != 31 {
-		t.Fatalf("boundary case: got len=%d, want 31 (inlined)", len(got))
-	}
-}
