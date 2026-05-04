@@ -1,13 +1,13 @@
 // Package entitygen provides deterministic, RNG-driven primitives for
 // generating Ethereum-shaped state-actor entities (EOAs, contracts, storage
-// slots) shared across client backends (geth, reth, nethermind).
+// slots) shared across client backends (geth, reth, nethermind, besu).
 //
 // All primitives take a *math/rand.Rand explicitly so the caller controls the
 // RNG seed and lifetime. Determinism is the package's load-bearing contract:
 // the exact sequence of rng.Read / rng.Intn / rng.Float64 / rng.Int63 calls
 // must not change between releases without coordinated golden-hash updates
 // across all client backends. The sequence is what produces matching state
-// roots for the same --seed across geth, reth, nethermind.
+// roots for the same --seed across geth (MPT mode), reth, nethermind, besu.
 //
 // The package is internal/ — only state-actor's own packages may import it.
 package entitygen
