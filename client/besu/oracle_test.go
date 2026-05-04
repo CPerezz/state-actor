@@ -74,16 +74,7 @@ func testDifferentialOracleGenesis1(t *testing.T) {
 // testDifferentialOracleGenesisNonce — 2-account alloc with one contract
 // (code 0x6010ff, nonce=3) and chain config homestead/eip150/eip158/byzantium/
 // constantinople = 0. Expected genesis BLOCK HASH per GenesisStateTest.java:157-159.
-//
-// XXX (2026-05): currently fails on the BLOCK HASH comparison (the stateRoot
-// computation passes, as confirmed by testDifferentialOracleGenesis1). The
-// header-field encoding for non-default coinbase/mixHash/extraData/nonce
-// genesis configs has an off-by-one we haven't fully debugged. The Genesis1
-// subtest is the load-bearing oracle for trie correctness; GenesisNonce
-// verifies header-field plumbing and is tracked as follow-up work.
 func testDifferentialOracleGenesisNonce(t *testing.T) {
-	t.Skip("genesisNonce blockHash — header-field encoding mismatch tracked as follow-up; Genesis1 covers stateRoot correctness")
-
 	const wantBlockHash = "0x36750291f1a8429aeb553a790dc2d149d04dbba0ca4cfc7fd5eb12d478117c9f"
 
 	g, allocs := loadFixtureGenesis(t, "testdata/genesisNonce.json")
@@ -241,7 +232,7 @@ func loadFixtureGenesis(t *testing.T, path string) (*besuGenesis, map[common.Add
 
 	g := &besuGenesis{}
 	g.coinbase = common.HexToAddress(h.Coinbase)
-	g.difficulty = parseHexBigOrZero(h.Difficulty)
+	g.difficulty = parseHexBig(t, "difficulty", h.Difficulty)
 	if h.ExtraData != "" && h.ExtraData != "0x" {
 		ed, err := hexutil.Decode(h.ExtraData)
 		if err != nil {
@@ -249,33 +240,58 @@ func loadFixtureGenesis(t *testing.T, path string) (*besuGenesis, map[common.Add
 		}
 		g.extraData = ed
 	}
-	g.gasLimit = parseHexU64OrZero(h.GasLimit)
+	g.gasLimit = parseHexU64(t, "gasLimit", h.GasLimit)
 	g.mixHash = common.HexToHash(h.MixHash)
-	g.nonce = parseHexU64OrZero(h.Nonce)
-	g.timestamp = parseHexU64OrZero(h.Timestamp)
+	g.nonce = parseHexU64(t, "nonce", h.Nonce)
+	g.timestamp = parseHexU64(t, "timestamp", h.Timestamp)
 	g.parentHash = common.Hash{}
 
 	return g, allocs
 }
 
-func parseHexU64OrZero(s string) uint64 {
+// parseHexU64 parses a 0x-prefixed hex string into a uint64. Unlike
+// hexutil.DecodeUint64, it tolerates leading zeros (e.g. "0x0102030405060708"
+// from Besu fixtures) — go-ethereum's strict parser rejects those, which
+// silently zeroed Nonce/Difficulty in earlier versions of this loader and
+// produced the wrong block hash. Errors bubble through *testing.T per the
+// pattern locked in by commit 1362de0.
+func parseHexU64(t *testing.T, field, s string) uint64 {
+	t.Helper()
 	if s == "" {
 		return 0
 	}
-	v, err := hexutil.DecodeUint64(s)
-	if err != nil {
+	if len(s) >= 2 && s[:2] == "0x" {
+		s = s[2:]
+	}
+	if s == "" {
 		return 0
 	}
-	return v
+	v, ok := new(big.Int).SetString(s, 16)
+	if !ok {
+		t.Fatalf("parseHexU64(%s): invalid hex %q", field, s)
+	}
+	if !v.IsUint64() {
+		t.Fatalf("parseHexU64(%s): value %s overflows uint64", field, v)
+	}
+	return v.Uint64()
 }
 
-func parseHexBigOrZero(s string) *big.Int {
+// parseHexBig parses a 0x-prefixed hex string into a *big.Int. Tolerates
+// leading zeros (see parseHexU64).
+func parseHexBig(t *testing.T, field, s string) *big.Int {
+	t.Helper()
 	if s == "" {
 		return big.NewInt(0)
 	}
-	v, err := hexutil.DecodeBig(s)
-	if err != nil {
+	if len(s) >= 2 && s[:2] == "0x" {
+		s = s[2:]
+	}
+	if s == "" {
 		return big.NewInt(0)
+	}
+	v, ok := new(big.Int).SetString(s, 16)
+	if !ok {
+		t.Fatalf("parseHexBig(%s): invalid hex %q", field, s)
 	}
 	return v
 }

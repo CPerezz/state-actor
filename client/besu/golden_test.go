@@ -18,26 +18,26 @@ import (
 
 // TestBesuGoldenStateRoot pins the synthetic-account state root produced by
 // the full cgo_besu pipeline (Phase 1 → Phase 2 → SaveWorldState) for a
-// deterministic config. Mirrors generator's TestBinaryTrieStateRootValue
-// (golden hash 0xee656cf3... for seed=12345/10 accts/5 contracts on the geth
-// path) but for the Besu Bonsai pipeline with the same input.
+// deterministic config.
 //
-// The hash is pinned by running the test once green, capturing the value,
-// and freezing it as expectedRoot. Any subsequent change in account RLP,
-// path-key encoding, sentinel writes, or trie-builder logic that affects
-// the state root will break this test loud — exactly the regression fence
-// the Nethermind path's TestDifferentialOracle provides for that adapter.
+// Cross-client invariant: this hash MUST match the canonical entitygen-MPT
+// root pinned by internal/entitygen.TestCanonicalEntitygenMPTRoot. Same RNG
+// draws (via internal/entitygen) → same accounts/codes/slots → same hexary-MPT
+// state root, regardless of on-disk storage layout (Besu Bonsai path-keyed vs
+// nethermind HalfPath vs reth MDBX). If the entitygen anchor test changes,
+// every entitygen-using adapter (this one, nethermind, reth) needs the same
+// update. The two hashes are deliberately the same constant.
 //
-// Source config matches MEMORY.md's golden hash test config:
+// (The geth-MPT path in generator/generator.go uses inline RNG draws that
+// don't match entitygen and produces a different hash for the same config —
+// that's a pre-existing generator-side inconsistency, separate from this PR.)
 //
-//	seed=12345, NumAccounts=10, NumContracts=5, MaxSlots=100, MinSlots=1
+// Source config:
 //
-// Note that the Besu pipeline produces a DIFFERENT hash than the geth path
-// for the same input — they store state under different schemes (geth flat
-// snapshot keys vs Besu Bonsai flat + path-keyed trie). The golden hash
-// here is the Besu-specific output.
+//	seed=12345, NumAccounts=10, NumContracts=5, MaxSlots=100, MinSlots=1,
+//	CodeSize=256, Distribution=PowerLaw
 func TestBesuGoldenStateRoot(t *testing.T) {
-	const expectedRoot = "0x388e2f2483f733d9e02b81dffa95434e7869462cbbc79618dbf77655cfadd863"
+	const expectedRoot = "0xddbfa7c1941ff70fe5a692f7552149adc1ae29ebb2b5dc8bb3544c1368bcb0c3"
 
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "besu-golden")

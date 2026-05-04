@@ -7,7 +7,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
-	"math/big"
 	mrand "math/rand"
 	"os"
 	"sort"
@@ -21,6 +20,7 @@ import (
 	"github.com/nerolation/state-actor/internal/besu"
 	besurlp "github.com/nerolation/state-actor/internal/besu/rlp"
 	besutrie "github.com/nerolation/state-actor/internal/besu/trie"
+	"github.com/nerolation/state-actor/internal/entitygen"
 )
 
 // phase1FlushBytes is the temp-Pebble batch flush threshold during entity
@@ -110,14 +110,20 @@ func writeStateAndCollectRoot(
 	}
 
 	// Emit count: EOA and contract counts from cfg.
+	//
+	// Uses internal/entitygen.GenerateEOA so the RNG draw sequence (and therefore
+	// the resulting state) matches the geth/nethermind/reth paths exactly — same
+	// --seed produces identical (addr → nonce/balance/code/storage) tuples across
+	// all clients. The state root differs only by trie scheme (binary vs MPT),
+	// not by content.
 	for i := 0; i < cfg.NumAccounts && !targetReached; i++ {
 		if err := ctx.Err(); err != nil {
 			pdb.Close()
 			return common.Hash{}, nil, nil, err
 		}
-		addr, nonce, balance := genEOA(rng)
-		addrHash := crypto.Keccak256Hash(addr[:])
-		blob := encodeEntityEOA(nonce, balance)
+		acc := entitygen.GenerateEOA(rng)
+		addrHash := acc.AddrHash
+		blob := encodeEntityEOA(acc.StateAccount.Nonce, acc.StateAccount.Balance)
 		if err := batch.Set(addrHash[:], blob, nil); err != nil {
 			pdb.Close()
 			return common.Hash{}, nil, nil, err
@@ -167,14 +173,28 @@ func writeStateAndCollectRoot(
 		}
 	}
 
+	codeSize := cfg.CodeSize
+	if codeSize <= 0 {
+		codeSize = 1024
+	}
 	for i := 0; i < cfg.NumContracts && !targetReached; i++ {
 		if err := ctx.Err(); err != nil {
 			pdb.Close()
 			return common.Hash{}, nil, nil, err
 		}
-		addr, nonce, balance, code, slots := genContract(rng, cfg)
-		addrHash := crypto.Keccak256Hash(addr[:])
-		blob := encodeEntityContract(nonce, balance, code, slots)
+		// CRITICAL ordering: GenerateSlotCount draws (Float64 / Intn) BEFORE
+		// GenerateContract draws (addr, code, balance, slots, nonce). Reordering
+		// these breaks cross-client state-root parity.
+		numSlots := entitygen.GenerateSlotCount(rng, cfg.Distribution, cfg.MinSlots, cfg.MaxSlots)
+		contract := entitygen.GenerateContract(rng, codeSize, numSlots)
+		// Convert pre-sorted []StorageSlot to map for blob encoding. Phase 2
+		// re-sorts by keccak(slotKey) anyway, so map iteration order is fine.
+		slotMap := make(map[common.Hash]common.Hash, len(contract.Storage))
+		for _, s := range contract.Storage {
+			slotMap[s.Key] = s.Value
+		}
+		addrHash := contract.AddrHash
+		blob := encodeEntityContract(contract.StateAccount.Nonce, contract.StateAccount.Balance, contract.Code, slotMap)
 		if err := batch.Set(addrHash[:], blob, nil); err != nil {
 			pdb.Close()
 			return common.Hash{}, nil, nil, err
@@ -332,62 +352,6 @@ type entity struct {
 	slots   map[common.Hash]common.Hash
 }
 
-// genEOA produces a synthetic EOA via the rng.
-func genEOA(rng *mrand.Rand) (common.Address, uint64, *uint256.Int) {
-	var addr common.Address
-	rng.Read(addr[:])
-	nonce := rng.Uint64() % 1024
-	balance := uint256.NewInt(rng.Uint64()).Mul(
-		uint256.NewInt(rng.Uint64()),
-		uint256.NewInt(1_000_000_000),
-	)
-	return addr, nonce, balance
-}
-
-// genContract produces a synthetic contract with code + storage slots.
-//
-// Mask 0xEF code prefix to 0x60 (PUSH1) per EIP-3541. Mirror of nethermind
-// entitygen_cgo.go behavior.
-func genContract(rng *mrand.Rand, cfg generator.Config) (common.Address, uint64, *uint256.Int, []byte, map[common.Hash]common.Hash) {
-	var addr common.Address
-	rng.Read(addr[:])
-	nonce := rng.Uint64() % 1024
-	balance := uint256.NewInt(rng.Uint64()).Mul(
-		uint256.NewInt(rng.Uint64()),
-		uint256.NewInt(1_000_000_000),
-	)
-
-	// Random bytecode, length [32, 256].
-	codeLen := 32 + rng.Intn(225)
-	code := make([]byte, codeLen)
-	rng.Read(code)
-	// EIP-3541: forbid 0xEF prefix. Mask to PUSH1 (0x60) — same fix nethermind uses.
-	if len(code) > 0 && code[0] == 0xEF {
-		code[0] = 0x60
-	}
-
-	// Slot count between MinSlots..MaxSlots inclusive.
-	minSlots := cfg.MinSlots
-	if minSlots < 1 {
-		minSlots = 1
-	}
-	maxSlots := cfg.MaxSlots
-	if maxSlots < minSlots {
-		maxSlots = minSlots
-	}
-	span := maxSlots - minSlots + 1
-	count := minSlots + rng.Intn(span)
-
-	slots := make(map[common.Hash]common.Hash, count)
-	for i := 0; i < count; i++ {
-		var k, v common.Hash
-		rng.Read(k[:])
-		rng.Read(v[:])
-		slots[k] = v
-	}
-	return addr, nonce, balance, code, slots
-}
-
 // --- Entity blob serialization for temp Pebble ---
 //
 // Format (single-byte kind tag + fields):
@@ -469,6 +433,3 @@ func decodeEntity(blob []byte) entity {
 	}
 	return e
 }
-
-// suppress unused warning for big import — the field is used via uint256.ToBig.
-var _ = (*big.Int)(nil)
