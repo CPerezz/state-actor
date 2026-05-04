@@ -1,4 +1,4 @@
-// Package besu writes a fully-bootable Hyperledger Besu 26.5.0 RocksDB
+// Package besu writes a fully-bootable Hyperledger Besu Bonsai RocksDB
 // database directly via cgo+grocksdb, bypassing Besu's GenesisState
 // in-memory recompute on first boot.
 //
@@ -14,9 +14,18 @@
 // block (header / body / receipts / canonical hash / TD), and finally write
 // VARIABLES["chainHeadHash"] last.
 //
-// The result boots `hyperledger/besu:26.5.0` against the produced datadir
-// without any flags — Besu reads the chainHeadHash, validates the stored
-// genesis block, and starts from block 0 ready.
+// The result boots `hyperledger/besu:25.11.0` against the produced datadir
+// with `--genesis-state-hash-cache-enabled` — Besu reads the stored stateRoot
+// directly (the synthetic state can't match a recompute from the genesis
+// JSON's alloc map by definition), validates the genesis block hash, and
+// starts from block 0 ready.
+//
+// Why pin to 25.11.0 specifically: Besu 26.x removed the standalone
+// --miner-enabled / --miner-coinbase flags (post-merge consolidation —
+// block production is now Engine-API-driven via a paired consensus
+// client). Without those flags, mining stops working against custom
+// genesis configs. Sticking with 25.11.0 keeps single-binary block
+// production until the Engine-API path is plumbed.
 //
 // # Build
 //
@@ -32,9 +41,11 @@
 // # Pinned target
 //
 // internal/besu/'s RLP shapes, key encodings, and trie/builder.go's
-// Bonsai path-keyed MPT mirror Besu upstream tag 26.5.0 (May 2026). End-to-end
-// smoke and the Tier 2 differential oracle run against the released image
-// hyperledger/besu:26.5.0 — the boot contract Besu enforces (chainHeadHash
+// Bonsai path-keyed MPT mirror Besu upstream tag 26.5.0 (May 2026; the
+// Bonsai schema is stable across the released line, so the slightly older
+// 25.11.0 boot image accepts what we write). End-to-end smoke and the
+// Tier 2 differential oracle run against the released image
+// hyperledger/besu:25.11.0 — the boot contract Besu enforces (chainHeadHash
 // pointer, genesis block hash match, Bonsai trie path-keyed encoding) is
 // stable across the released line.
 package besu
