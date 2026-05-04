@@ -118,9 +118,11 @@ func writeGenesisAllocAccounts(
 		// Account RLP.
 		balance := uint256.NewInt(0)
 		if e.acc.Balance != nil {
-			b, ok := uint256.FromBig(e.acc.Balance.ToInt())
-			if !ok {
-				return common.Hash{}, nil, fmt.Errorf("besu: balance overflow for %s", e.addr.Hex())
+			// uint256.FromBig returns (value, overflowed). The bool is true
+			// only when the input exceeds 2^256-1 — NOT a success indicator.
+			b, overflow := uint256.FromBig(e.acc.Balance.ToInt())
+			if overflow {
+				return common.Hash{}, nil, fmt.Errorf("besu: balance overflow (>2^256) for %s", e.addr.Hex())
 			}
 			balance = b
 		}

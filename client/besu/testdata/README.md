@@ -25,7 +25,7 @@ supports through Shanghai), 3 funded addresses with 1M ETH each. Used by
 
 ## Smoke scripts
 
-- `validate-big-db-besu.sh` — boot `hyperledger/besu:26.5.0` against a
+- `validate-big-db-besu.sh` — boot `hyperledger/besu:25.11.0` against a
   state-actor-produced datadir, verify chainId, block 0, balance, then
   send 100 self-transfers via `send-100-txs-besu.sh`.
 - `send-100-txs-besu.sh` — send 100 self-transfers via personal_unlock +
