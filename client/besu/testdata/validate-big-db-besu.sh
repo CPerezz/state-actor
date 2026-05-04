@@ -26,7 +26,7 @@ echo "expected stateRoot: ${EXPECTED_ROOT:-<not provided — will skip equality 
 echo "size:               $(du -sh "$DBPATH" | awk '{print $1}')"
 echo
 
-echo "[1/6] Booting hyperledger/besu:26.5.0 ..."
+echo "[1/6] Booting hyperledger/besu:25.11.0 ..."
 # CRITICAL: pass the same --genesis-file state-actor consumed. Besu's
 # DefaultBlockchain.setGenesis (DefaultBlockchain.java:1027-1057) re-reads
 # the genesis JSON on every boot and compares the recomputed genesis block
@@ -42,17 +42,18 @@ docker run --rm -d \
   -v "$TESTDATA:/test:ro" \
   -v "$DBPATH:/data" \
   -p 127.0.0.1:8545:8545 \
-  hyperledger/besu:26.5.0 \
+  hyperledger/besu:25.11.0 \
   --data-path=/data \
   --genesis-file=/test/genesis-funded.json \
   --network-id=1337 \
   --rpc-http-enabled \
   --rpc-http-host=0.0.0.0 \
   --rpc-http-port=8545 \
-  --rpc-http-api=ETH,NET,WEB3,PERSONAL,ADMIN \
+  --rpc-http-api=ETH,NET,WEB3,ADMIN,MINER \
   --rpc-http-cors-origins="*" \
   --host-allowlist="*" \
   --data-storage-format=BONSAI \
+  --genesis-state-hash-cache-enabled \
   --min-gas-price=0 \
   --miner-enabled \
   --miner-coinbase="$COINBASE" \
