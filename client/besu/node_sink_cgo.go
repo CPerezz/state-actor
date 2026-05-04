@@ -21,8 +21,7 @@ const flushThresholdBytes = 16 * 1024 * 1024
 // nodeSink implements internal/besu/trie.NodeSink and is also the central
 // sink for flat-state writes from state_writer_cgo.go's Phase 2 loop.
 //
-// Per the Tier 4 amendment (C19), trie-node writes and flat-state writes
-// share a SINGLE WriteBatch. Reasons:
+// Trie-node writes and flat-state writes share a SINGLE WriteBatch. Reasons:
 //   - Cross-CF atomicity: in a single RocksDB instance, Put + flush of one
 //     batch is the only atomic-across-CFs primitive. Two parallel batches
 //     can interleave their flushes such that a crash leaves

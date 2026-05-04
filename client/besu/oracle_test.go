@@ -5,7 +5,6 @@ package besu
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -13,7 +12,6 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
-	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/linxGnu/grocksdb"
 
 	"github.com/nerolation/state-actor/genesis"
@@ -321,11 +319,3 @@ func verifyWorldRootOnDisk(t *testing.T, db *besuDB, wantRoot common.Hash) {
 			gotHash.Hex(), wantRoot.Hex())
 	}
 }
-
-// suppress unused — errors is used only on the sentinel-error path inside
-// SaveWorldState (no t.Fatal here uses it directly).
-var _ = errors.New
-
-// types is used by this file via the internal/besu trie interactions; keep
-// the import via a build-time reference.
-var _ = (*types.Header)(nil)

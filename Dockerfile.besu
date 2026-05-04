@@ -8,20 +8,13 @@
 # compatible between 10.6.x and 10.10.x — Besu reading SSTs we wrote with
 # 10.10.1 just works.
 #
-# Version-delta note (C20 from the multi-client-besu plan's risk register):
-#
-#   * go.mod pins `grocksdb v1.10.8` ↔ RocksDB 10.10.1.
-#   * VERIFIED at first build: grocksdb v1.10.8's C bindings reference
-#     `rocksdb_slice_t` which doesn't exist in RocksDB 10.6.2 headers.
-#     `go build -tags cgo_besu` fails with:
-#       grocksdb/array.go:17:23: could not determine what C.rocksdb_slice_t refers to
-#     This is the predicted C20 link failure. Two ways out:
-#       (a) Bump ROCKSDB_VERSION here to 10.10.1 (chosen path).
-#       (b) Downgrade go.mod to grocksdb v1.10.4 (which pairs with
-#           RocksDB 10.6.2). Rejected because go.mod is shared with
-#           cgo_neth which currently uses 10.10.1 — downgrading would
-#           force the nethermind path through a separate dependency
-#           replace directive, expanding scope beyond this PR.
+# Why 10.10.1 specifically: grocksdb v1.10.8's C bindings reference
+# `rocksdb_slice_t`, which doesn't exist in RocksDB 10.6.2 headers — building
+# against 10.6.2 fails with:
+#   grocksdb/array.go:17:23: could not determine what C.rocksdb_slice_t refers to
+# Bumping RocksDB to 10.10.1 (this file) is the easier fix vs downgrading
+# grocksdb to v1.10.4 — go.mod is shared with cgo_neth which already pairs
+# with 10.10.1.
 #
 #   * Verified pairings (from grocksdb's build.sh per tag):
 #       grocksdb v1.10.4 → RocksDB 10.6.2

@@ -44,7 +44,7 @@
 // Bonsai path-keyed MPT mirror Besu upstream tag 26.5.0 (May 2026; the
 // Bonsai schema is stable across the released line, so the slightly older
 // 25.11.0 boot image accepts what we write). End-to-end smoke and the
-// Tier 2 differential oracle run against the released image
+// differential oracle run against the released image
 // hyperledger/besu:25.11.0 — the boot contract Besu enforces (chainHeadHash
 // pointer, genesis block hash match, Bonsai trie path-keyed encoding) is
 // stable across the released line.

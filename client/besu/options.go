@@ -3,10 +3,10 @@ package besu
 // Options carries Besu-specific knobs that don't fit naturally on
 // generator.Config (which is shared across client backends).
 //
-// Currently both fields are reserved for an in-process boot validation
-// that wasn't wired up in this PR — Tier 3 boot smoke runs as a Docker
-// `make smoke-besu` target instead. The fields are still parsed so callers
-// can pre-set them; runImpl ignores them today.
+// Both fields are reserved for an in-process post-write boot validation that
+// isn't wired up yet — boot smoke is currently a Docker `make smoke-besu`
+// target. The fields are still parsed so callers can pre-set them; runImpl
+// ignores them today.
 type Options struct {
 	// BesuBin is an absolute path to a Besu binary (or `besu` shell
 	// wrapper) to spawn for a post-write boot validation. Empty disables

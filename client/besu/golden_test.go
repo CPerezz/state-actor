@@ -59,12 +59,6 @@ func TestBesuGoldenStateRoot(t *testing.T) {
 		Verbose:      false,
 	}
 
-	// Reset package-level vars in case TestRun_StubReturnsNotImplemented
-	// or any other test-influenced state leaked through (no-op under
-	// !cgo_besu, but defensive here).
-	GenesisFilePath = ""
-	ChainIDOverride = 0
-
 	stats, err := Run(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -72,19 +66,12 @@ func TestBesuGoldenStateRoot(t *testing.T) {
 	if stats == nil {
 		t.Fatal("Run returned nil stats")
 	}
-
-	gotRoot := stats.StateRoot.Hex()
-	if gotRoot == "0x"+string([]byte{
-		'0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0',
-		'0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0',
-		'0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0',
-		'0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0',
-	}) {
+	if stats.StateRoot == (common.Hash{}) {
 		t.Fatal("Run returned zero state root — pipeline didn't populate stats.StateRoot")
 	}
-	if gotRoot != expectedRoot {
-		t.Fatalf("besu golden state root mismatch:\n  got:  %s\n  want: %s\n  (run with -v and copy got: into expectedRoot if this is the intended new value)",
-			gotRoot, expectedRoot)
+	if got := stats.StateRoot.Hex(); got != expectedRoot {
+		t.Fatalf("besu golden state root mismatch:\n  got:  %s\n  want: %s\n  Diverging here means a coordinated update across all entitygen-using adapters is needed (see internal/entitygen/canonical_mpt_test.go).",
+			got, expectedRoot)
 	}
 }
 
@@ -104,9 +91,6 @@ func TestBesuReproducibility(t *testing.T) {
 		Workers:      1,
 		CodeSize:     256,
 	}
-
-	GenesisFilePath = ""
-	ChainIDOverride = 0
 
 	runOnce := func() (common.Hash, []byte) {
 		dbPath := filepath.Join(t.TempDir(), "besu-repro")
@@ -198,7 +182,3 @@ func readWorldRoot(datadir string) (common.Hash, []byte, error) {
 	copy(raw, got.Data())
 	return common.BytesToHash(raw), raw, nil
 }
-
-// disableUnused prevents goimports/lint from removing the bytes import
-// when the diskRoot variables are only used for byte-equal comparison.
-var _ = bytes.Equal

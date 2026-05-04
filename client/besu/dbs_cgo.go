@@ -64,8 +64,8 @@ type besuDB struct {
 // Note: we open with vanilla grocksdb.OpenDbColumnFamilies, NOT
 // OpenOptimisticTransactionDb. The on-disk file format is identical between
 // the two open modes (the optimistic-tx wrapper only adds in-memory
-// conflict checking at commit time). Besu reopens the produced files as
-// OptimisticTransactionDB on its boot — Tier 1 §B confirmed this works.
+// conflict checking at commit time), so Besu's OptimisticTransactionDB boot
+// reads what we write here.
 func openBesuDB(datadir string) (*besuDB, error) {
 	dbPath := filepath.Join(datadir, "database")
 

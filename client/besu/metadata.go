@@ -27,9 +27,8 @@ const metadataJSON = `{
 // file Besu's RocksDBKeyValueStorageFactory.init() requires whenever the
 // database/ directory exists.
 //
-// Constraint C2 from the plan's risk register: this MUST be written before
-// the first openBesuDB call AND after the database/ directory is populated.
-// Without it, Besu refuses to open the DB:
+// MUST be written before the first openBesuDB call AND after the database/
+// directory is populated. Without it, Besu refuses to open the DB:
 //
 //	StorageException("Database exists but metadata file ... not found")
 //	  RocksDBKeyValueStorageFactory.java:243-245
