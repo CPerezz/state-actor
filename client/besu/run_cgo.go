@@ -112,6 +112,9 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 		return nil, err
 	}
 
+	// Surface the computed state root in Stats so main.go's print block
+	// and live-stats hooks see the real value (not 0x000...).
+	stats.StateRoot = rootHash
 	return stats, nil
 }
 
@@ -129,6 +132,7 @@ type besuGenesis struct {
 	mixHash    common.Hash
 	parentHash common.Hash
 	nonce      uint64
+	baseFee    *big.Int // nil if pre-London; *big.Int if londonBlock <= 0
 	unstable   genesisJSONConfig
 }
 
@@ -169,6 +173,10 @@ func loadOrDefault(path string) (*besuGenesis, error) {
 	} else {
 		chainID = big.NewInt(1337)
 	}
+	var baseFee *big.Int
+	if g.BaseFee != nil {
+		baseFee = g.BaseFee.ToInt()
+	}
 	out := &besuGenesis{
 		chainID:    chainID,
 		gasLimit:   uint64(g.GasLimit),
@@ -179,6 +187,7 @@ func loadOrDefault(path string) (*besuGenesis, error) {
 		mixHash:    g.Mixhash,
 		parentHash: g.ParentHash,
 		nonce:      uint64(g.Nonce),
+		baseFee:    baseFee,
 		unstable:   top.Config,
 	}
 	return out, nil
@@ -213,6 +222,7 @@ func buildGenesisHeader(g *besuGenesis, stateRoot common.Hash) *types.Header {
 		Extra:       g.extraData,
 		MixDigest:   g.mixHash,
 		Nonce:       types.EncodeNonce(g.nonce),
+		BaseFee:     g.baseFee, // nil if pre-London; *big.Int if londonBlock=0
 	}
 	return header
 }

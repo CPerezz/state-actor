@@ -154,7 +154,7 @@ test-besu-oracle: docker-besu-test
 	docker run --rm --entrypoint bash state-actor-besu-builder:latest \
 	  -c 'cd /app && go test -tags cgo_besu -run TestDifferentialOracle -v ./client/besu/...'
 
-## smoke-besu: End-to-end smoke — generate a small DB, boot hyperledger/besu:26.5.0, send 100 dev-mode txs
+## smoke-besu: End-to-end smoke — generate a small DB, boot hyperledger/besu:25.11.0, send 100 dev-mode txs
 ##   Usage: make smoke-besu ACCOUNTS=1000 CONTRACTS=100
 SA_BESU_DB ?= /tmp/sa-besu-smoke
 smoke-besu: docker-besu
@@ -168,7 +168,7 @@ smoke-besu: docker-besu
 	  --genesis=/test/genesis-funded.json --verbose
 	bash $(PWD)/client/besu/testdata/validate-big-db-besu.sh $(SA_BESU_DB)
 
-## smoke-besu-spamoor: Generate a DB, boot hyperledger/besu:26.5.0, then run
+## smoke-besu-spamoor: Generate a DB, boot hyperledger/besu:25.11.0, then run
 ##                     spamoor erc20_bloater until BLOCKS blocks have been mined.
 ##   Usage: make smoke-besu-spamoor ACCOUNTS=1000 CONTRACTS=100 BLOCKS=200
 ##   Pre-req: SPAMOOR=/path/to/spamoor (default /Users/random_anon/dev/spamoor/bin/spamoor)
@@ -188,14 +188,15 @@ smoke-besu-spamoor: docker-besu
 	  -v $(PWD)/client/besu/testdata:/test:ro \
 	  -v $(SA_BESU_DB):/data \
 	  -p 127.0.0.1:8545:8545 \
-	  hyperledger/besu:26.5.0 \
+	  hyperledger/besu:25.11.0 \
 	  --data-path=/data \
 	  --genesis-file=/test/genesis-funded.json \
 	  --network-id=1337 \
 	  --rpc-http-enabled --rpc-http-port=8545 --rpc-http-host=0.0.0.0 \
-	  --rpc-http-api=ETH,NET,WEB3,PERSONAL,ADMIN \
+	  --rpc-http-api=ETH,NET,WEB3,ADMIN,MINER \
 	  --rpc-http-cors-origins="*" --host-allowlist="*" \
 	  --data-storage-format=BONSAI \
+	  --genesis-state-hash-cache-enabled \
 	  --min-gas-price=0 \
 	  --miner-enabled --miner-coinbase=0x7e5f4552091a69125d5dfcb7b8c2659029395bdf \
 	  --logging=INFO
