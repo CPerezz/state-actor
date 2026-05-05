@@ -134,11 +134,7 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 	}
 
 	if cfg.NumAccounts > 0 || cfg.NumContracts > 0 {
-		seed := cfg.Seed
-		if seed == 0 {
-			seed = 42
-		}
-		rng := mrand.New(mrand.NewSource(seed))
+		rng := mrand.New(mrand.NewSource(cfg.Seed))
 
 		// Phase 4b: synthetic EOAs in batches of batchSize. The RNG is
 		// drawn from in the same order as the legacy single-shot loop, so
@@ -166,21 +162,15 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 			remaining -= b
 		}
 
-		// Phase 4c: synthetic contracts in batches of batchSize. The
-		// contract param resolution must happen exactly once (slot count
-		// derived from cfg.MinSlots/MaxSlots) so every batch uses the same
-		// shape — drift here would corrupt the RNG draw budget.
+		// Phase 4c: synthetic contracts in batches of batchSize. Slot count
+		// is drawn per-contract via entitygen.GenerateSlotCount so the RNG
+		// draw sequence matches besu/nethermind/geth — same --seed →
+		// identical canonical entitygen MPT root across MPT clients
+		// (locked in by client/reth/golden_test.go).
 		if cfg.NumContracts > 0 {
 			codeSize := cfg.CodeSize
 			if codeSize <= 0 {
 				codeSize = 256
-			}
-			slotCount := 5
-			if cfg.MinSlots > 0 && cfg.MaxSlots >= cfg.MinSlots {
-				slotCount = (cfg.MinSlots + cfg.MaxSlots) / 2
-				if slotCount < cfg.MinSlots {
-					slotCount = cfg.MinSlots
-				}
 			}
 			remaining := cfg.NumContracts
 			for remaining > 0 {
@@ -190,6 +180,7 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 				}
 				batch := make([]*entitygen.Account, b)
 				for i := 0; i < b; i++ {
+					slotCount := entitygen.GenerateSlotCount(rng, cfg.Distribution, cfg.MinSlots, cfg.MaxSlots)
 					batch[i] = entitygen.GenerateContract(rng, codeSize, slotCount)
 				}
 				// WriteContracts mutates each contract's StateAccount.Root
