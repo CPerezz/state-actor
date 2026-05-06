@@ -29,7 +29,17 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    # No branch filter: triggers on every push.
+    #
+    # Default protection (`branches: [main]`) created a bootstrap problem
+    # for THIS PR — a fork-to-upstream PR uses the upstream's main copy of
+    # the workflow, but main hasn't seen the workflow yet (this is the PR
+    # that adds it), so nothing fires. Widening the trigger lets feature
+    # branches validate themselves on the contributor's fork before merge.
+    #
+    # Post-merge, the side effect is that maintainer pushes to any branch
+    # of the upstream repo also trigger CI — desirable, since maintainers
+    # mostly push via PRs and direct pushes are usually intentional.
 
 # One run per branch — supersede stale runs when a PR gets new pushes.
 concurrency:
