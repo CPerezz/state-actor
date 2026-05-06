@@ -274,12 +274,18 @@ func main() {
 	var stats *generator.Stats
 	switch *client {
 	case "geth":
-		// MPT mode routes through client/geth/Populate (the new
-		// direct-Pebble pipeline added in PR #38; reads cfg.Genesis
-		// directly and writes the genesis block as part of Populate).
-		// Binary-trie mode still uses the legacy generator.New /
-		// gen.Generate / geth.WriteGenesisBlock path because
-		// generator/binary_stack_trie.go is intentionally untouched.
+		// MPT mode goes through the new direct-Pebble pipeline in
+		// client/geth/ (entitygen → temp Pebble → keccak-sorted writes
+		// to production). Binary-trie mode still routes through the
+		// legacy generator.New().Generate() path because
+		// generator/binary_stack_trie.go is intentionally untouched per
+		// the design doc.
+		//
+		// Both paths read the synthesized genesisConfig — main.go's
+		// BuildSynthetic call always populates it, replacing the old
+		// --genesis JSON flow. config.Genesis is the canonical surface;
+		// Populate reads it directly, and the binary path threads
+		// genesisConfig into WriteGenesisBlock explicitly.
 		if config.TrieMode == generator.TrieModeMPT {
 			var err error
 			stats, err = geth.Populate(context.Background(), config, geth.Options{})
@@ -307,9 +313,13 @@ func main() {
 				liveStats.SetStateRoot(stats.StateRoot.Hex())
 			}
 
+<<<<<<< feat/cli-chainid-embedding
+			// Always write genesis block — synthesized config is always present.
+=======
 			// Write genesis block (binary-trie path). genesisConfig is
 			// always non-nil now that main.go synthesizes it via
 			// genesis.BuildSynthetic.
+>>>>>>> main
 			if *verbose {
 				log.Printf("Writing genesis block with state root: %s", stats.StateRoot.Hex())
 			}

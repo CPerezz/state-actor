@@ -5,6 +5,10 @@ package besu
 import (
 	"context"
 	"errors"
+<<<<<<< feat/cli-chainid-embedding
+	"fmt"
+=======
+>>>>>>> main
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -71,6 +75,13 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 	}
 	if err := WriteDatabaseMetadata(cfg.DBPath); err != nil {
 		return nil, err
+	}
+
+	// Write besu-bootable chainspec next to the DB so the chainID the
+	// caller passed via --chain-id is honoured at boot time. Smoke
+	// scripts pass --genesis-file=<dbPath>/besu-chainspec.json.
+	if _, err := writeChainSpec(cfg.DBPath, g); err != nil {
+		return nil, fmt.Errorf("besu: %w", err)
 	}
 
 	stats.StateRoot = rootHash

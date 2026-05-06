@@ -193,7 +193,7 @@ smoke-besu-spamoor: docker-besu
 	  -p 127.0.0.1:8545:8545 \
 	  hyperledger/besu:25.11.0 \
 	  --data-path=/data \
-	  --genesis-file=/test/genesis-funded.json \
+	  --genesis-file=/data/besu-chainspec.json \
 	  --network-id=1337 \
 	  --rpc-http-enabled --rpc-http-port=8545 --rpc-http-host=0.0.0.0 \
 	  --rpc-http-api=ETH,NET,WEB3,ADMIN,MINER \
@@ -239,14 +239,20 @@ GETH_SMOKE_CONTRACTS ?= 100
 GETH_SMOKE_SEED ?= 42
 smoke-geth: docker-geth
 	rm -rf $(SA_DB_GETH) && mkdir -p $(SA_DB_GETH)/geth/chaindata
+	# --fork=shanghai because state-actor's BuildSynthetic doesn't yet
+	# emit a BlobSchedule, which modern geth requires once Cancun or
+	# Prague are active in the chain config. Stop short at shanghai
+	# until the blobSchedule wiring lands; the smoke's purpose is
+	# boot-readability of the geth-MPT writer's on-disk format, not
+	# post-Cancun protocol coverage.
 	docker run --rm \
 	  -v $(SA_DB_GETH):/datadir \
-	  -v $(PWD)/client/geth/testdata:/test:ro \
 	  state-actor-geth:latest \
 	  --client=geth --db=/datadir/geth/chaindata \
 	  --accounts=$(GETH_SMOKE_ACCOUNTS) --contracts=$(GETH_SMOKE_CONTRACTS) \
 	  --seed=$(GETH_SMOKE_SEED) \
-	  --genesis=/test/genesis-funded.json --verbose 2>&1 \
+	  --chain-id=1337 --fork=shanghai --inject-accounts=$(SMOKE_INJECT_ADDRS) \
+	  --verbose 2>&1 \
 	  | tee $(SA_DB_GETH)/smoke.log
 	@expected_root=$$(grep -E '^State Root:' $(SA_DB_GETH)/smoke.log | awk '{print $$NF}'); \
 	bash $(PWD)/client/geth/testdata/validate-big-db-geth.sh $(SA_DB_GETH) "$$expected_root"
