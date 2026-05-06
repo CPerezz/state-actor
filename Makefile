@@ -4,7 +4,7 @@
 	smoke-nethermind smoke-nethermind-spamoor \
 	docker-besu docker-besu-test test-besu-oracle \
 	smoke-besu smoke-besu-spamoor \
-	docker-geth smoke-geth
+	docker-geth smoke-geth test-geth-boot
 
 # Binary name
 BINARY=state-actor
@@ -257,6 +257,15 @@ smoke-geth: docker-geth
 	@expected_root=$$(grep -E '^State Root:' $(SA_DB_GETH)/smoke.log | awk '{print $$NF}'); \
 	bash $(PWD)/client/geth/testdata/validate-big-db-geth.sh $(SA_DB_GETH) "$$expected_root"
 
+## test-geth-boot: Boot upstream geth against a state-actor datadir and verify via JSON-RPC.
+##   Mirrors test-reth-boot. Requires the Docker daemon on the host (no DinD)
+##   and pulls $(GETH_IMAGE) (default ethereum/client-go:v1.17.2). The test
+##   itself launches the geth container with -p <freeport>:8545 and probes
+##   eth_getBalance / eth_getCode / eth_getStorageAt via internal/rpcprobe.
+##   Override the image via GETH_IMAGE=ethereum/client-go:vX.Y.Z.
+test-geth-boot:
+	$(GOTEST) -tags oracle -run TestGethNodeBoot -v -timeout 300s ./client/geth/...
+
 ## example: Run example generation
 example:
 	./$(BINARY) \
@@ -308,7 +317,8 @@ test-reth-oracle: image-reth
 	  -v /var/run/docker.sock:/var/run/docker.sock \
 	  -e RETH_ORACLE_DATADIR=/oracle-data \
 	  -e RETH_ORACLE_VOL=$(ORACLE_VOL) \
-	  state-actor-reth go test -tags 'cgo_reth oracle' ./client/reth/ -run TestRethDbStats -v -timeout 300s
+	  -e RETH_DOCKER_PLATFORM \
+	  state-actor-reth go test -tags 'cgo_reth oracle' ./client/reth/ -run TestRethDbStats -v -timeout 900s
 	docker volume rm -f $(ORACLE_VOL) >/dev/null 2>&1 || true
 
 ## test-reth-boot: Boot reth node --dev against a state-actor datadir and verify via JSON-RPC
@@ -325,5 +335,6 @@ test-reth-boot: image-reth
 	  -v /var/run/docker.sock:/var/run/docker.sock \
 	  -e RETH_ORACLE_DATADIR=/oracle-data \
 	  -e RETH_ORACLE_VOL=$(BOOT_VOL) \
-	  state-actor-reth go test -tags 'cgo_reth oracle' ./client/reth/ -run TestRethNodeBoot -v -timeout 600s
+	  -e RETH_DOCKER_PLATFORM \
+	  state-actor-reth go test -tags 'cgo_reth oracle' ./client/reth/ -run TestRethNodeBoot -v -timeout 1800s
 	docker volume rm -f $(BOOT_VOL) >/dev/null 2>&1 || true
