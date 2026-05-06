@@ -35,6 +35,7 @@ import (
 	"github.com/nerolation/state-actor/client/reth"
 	"github.com/nerolation/state-actor/generator"
 	"github.com/nerolation/state-actor/genesis"
+	"github.com/nerolation/state-actor/internal/clientpolicy"
 )
 
 var (
@@ -50,6 +51,11 @@ var (
 	verbose      = flag.Bool("verbose", false, "Verbose output")
 	benchmark    = flag.Bool("benchmark", false, "Run in benchmark mode (print detailed stats)")
 	binaryTrie   = flag.Bool("binary-trie", false, "Generate state for binary trie mode (EIP-7864)")
+
+	// Deep-branch accounts
+	deepBranchAccounts   = flag.Int("deep-branch-accounts", 0, "Number of additional contracts with deep storage tries (0 = disabled)")
+	deepBranchDepth      = flag.Int("deep-branch-depth", 64, "Branch depth per deep slot in nibbles (1-64)")
+	deepBranchKnownSlots = flag.Int("deep-branch-known-slots", 1, "Legitimate storage slots with known preimages per deep-branch account")
 
 	// Target size
 	targetSize = flag.String("target-size", "", "Target total DB size on disk (e.g. '5GB', '500MB'). Stop condition only — set --accounts/--contracts/--min-slots/--max-slots explicitly. Honored by geth and besu; ignored by nethermind; rejected by reth.")
@@ -101,39 +107,14 @@ func main() {
 	// Validate --client value and its compatibility with other flags. Doing
 	// this at CLI parse time (before any generation work) means misconfigured
 	// runs fail fast instead of burning minutes producing a wrong output.
-	switch *client {
-	case "geth", "nethermind", "besu", "reth":
-		// supported
-	case "erigon":
-		log.Fatalf("--client=%s is not yet implemented (planned in a follow-up PR); use --client=geth, --client=nethermind, --client=besu, or --client=reth", *client)
-	default:
-		log.Fatalf("--client=%s is not recognized; valid values: geth, nethermind, besu, reth", *client)
-	}
-	if *client == "nethermind" {
-		// Nethermind doesn't implement EIP-7864 (binary trie) and the
-		// commit-interval / group-depth flags are geth/Pebble-specific.
-		// Reject up front.
-		if *binaryTrie {
-			log.Fatalf("--binary-trie is not supported with --client=nethermind (Nethermind does not implement EIP-7864)")
-		}
-	}
-	if *client == "besu" {
-		// Besu doesn't implement EIP-7864 (binary trie). Reject up front.
-		// --chain-id is warn-and-ignored inside client/besu/run_cgo.go
-		// (Besu reads chainId from --genesis-file at boot, not from the DB).
-		if *binaryTrie {
-			log.Fatalf("--binary-trie is not supported with --client=besu (Besu does not implement EIP-7864)")
-		}
-	}
-	if *client == "reth" {
-		// Reth doesn't implement EIP-7864; surface the mismatch here rather
-		// than letting reth init-state fail opaquely later.
-		if *binaryTrie {
-			log.Fatalf("--binary-trie is not supported with --client=reth (Reth does not implement EIP-7864)")
-		}
-		if *targetSize != "" {
-			log.Fatalf("--target-size is not yet supported with --client=reth; set --accounts / --contracts explicitly")
-		}
+	// Rules live in internal/clientpolicy/ as one source-of-truth table.
+	if err := clientpolicy.ValidateForClient(*client, clientpolicy.FlagValues{
+		BinaryTrie:         *binaryTrie,
+		DeepBranchAccounts: *deepBranchAccounts,
+		TargetSize:         *targetSize,
+		Fork:               *fork,
+	}); err != nil {
+		log.Fatalf("%v", err)
 	}
 
 	trieMode := generator.TrieModeMPT
@@ -188,6 +169,16 @@ func main() {
 	// raw-byte cap; nethermind currently no-ops; reth rejects the flag at
 	// parse time.
 
+	// Validate deep-branch flags
+	if *deepBranchAccounts > 0 {
+		if *deepBranchDepth < 1 || *deepBranchDepth > 64 {
+			log.Fatalf("--deep-branch-depth must be 1-64, got %d", *deepBranchDepth)
+		}
+		if *deepBranchKnownSlots < 1 {
+			log.Fatalf("--deep-branch-known-slots must be >= 1, got %d", *deepBranchKnownSlots)
+		}
+	}
+
 	config := generator.Config{
 		DBPath:          *dbPath,
 		NumAccounts:     *accounts,
@@ -205,8 +196,13 @@ func main() {
 		WriteTrieNodes:  true, // Always write trie nodes — DB is unusable without them
 		InjectAddresses: injectAddrs,
 		TargetSize:      parsedTargetSize,
-		LiveStats:       liveStats,
-		GroupDepth:      *groupDepth,
+		DeepBranch: generator.DeepBranchConfig{
+			NumAccounts: *deepBranchAccounts,
+			Depth:       *deepBranchDepth,
+			KnownSlots:  *deepBranchKnownSlots,
+		},
+		LiveStats:  liveStats,
+		GroupDepth: *groupDepth,
 	}
 
 	// Synthesize the genesis chainspec from CLI flags. state-actor no
@@ -222,14 +218,11 @@ func main() {
 		}
 		extraDataBytes = decoded
 	}
+	// Empty --fork resolves to the per-client ceiling (auto). Explicit values
+	// past the ceiling were rejected by ValidateForClient above.
 	chosenFork := *fork
 	if chosenFork == "" {
 		chosenFork = genesis.MaxForkForClient(*client)
-	} else if !genesis.ForkAtLeast(genesis.MaxForkForClient(*client), chosenFork) {
-		log.Fatalf("--fork=%s is past --client=%s's writer ceiling (%s); "+
-			"pass --fork=%s or earlier, or use a different --client",
-			chosenFork, *client, genesis.MaxForkForClient(*client),
-			genesis.MaxForkForClient(*client))
 	}
 	genesisConfig, err := genesis.BuildSynthetic(chosenFork, big.NewInt(*chainID), *gasLimit, *timestamp, extraDataBytes)
 	if err != nil {
@@ -259,6 +252,10 @@ func main() {
 		}
 		if config.TargetSize > 0 {
 			log.Printf("  Target Size:  %s", formatBytes(config.TargetSize))
+		}
+		if config.DeepBranch.Enabled() {
+			log.Printf("  Deep Branch:  %d accounts, depth=%d, known_slots=%d",
+				config.DeepBranch.NumAccounts, config.DeepBranch.Depth, config.DeepBranch.KnownSlots)
 		}
 		log.Printf("  Fork:         %s", chosenFork)
 		log.Printf("  Chain ID:     %d", *chainID)
@@ -313,13 +310,20 @@ func main() {
 				liveStats.SetStateRoot(stats.StateRoot.Hex())
 			}
 
-<<<<<<< feat/cli-chainid-embedding
+		// Write genesis block (geth-specific). Always runs now that the
+		// synthesized config.Genesis is always present.
+		if *verbose {
+			log.Printf("Writing genesis block with state root: %s", stats.StateRoot.Hex())
+		}
+		ancientDir := filepath.Join(config.DBPath, "ancient")
+		block, err := geth.WriteGenesisBlock(gen.DB(), genesisConfig, stats.StateRoot, config.TrieMode == generator.TrieModeBinary, ancientDir)
+		if err != nil {
+			log.Fatalf("Failed to write genesis block: %v", err)
+		}
+		if *verbose {
+			log.Printf("Genesis block hash: %s", block.Hash().Hex())
+			log.Printf("Genesis block number: %d", block.NumberU64())
 			// Always write genesis block — synthesized config is always present.
-=======
-			// Write genesis block (binary-trie path). genesisConfig is
-			// always non-nil now that main.go synthesizes it via
-			// genesis.BuildSynthetic.
->>>>>>> main
 			if *verbose {
 				log.Printf("Writing genesis block with state root: %s", stats.StateRoot.Hex())
 			}
