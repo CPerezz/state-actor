@@ -71,14 +71,6 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 	if gasLimit == 0 {
 		gasLimit = 30_000_000
 	}
-
-	// Pull genesis fields from cfg.Genesis. Production callers (main.go)
-	// always set this; tests can leave it nil and get the default chainspec.
-	g := genesis.OrDefault(cfg.Genesis)
-	gasLimit := uint64(g.GasLimit)
-	if gasLimit == 0 {
-		gasLimit = 30_000_000
-	}
 	extraData := []byte(g.ExtraData)
 	timestamp := uint64(g.Timestamp)
 	// chainID embedding is a B7 follow-up: nethermind reads chainID from
