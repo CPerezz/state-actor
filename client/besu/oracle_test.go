@@ -16,6 +16,7 @@ import (
 
 	"github.com/nerolation/state-actor/genesis"
 	"github.com/nerolation/state-actor/internal/besu/keys"
+	"github.com/nerolation/state-actor/internal/testhex"
 )
 
 // TestDifferentialOracle replays Besu-source-derived genesis fixtures
@@ -187,7 +188,7 @@ func loadFixtureGenesis(t *testing.T, path string) (*besuGenesis, map[common.Add
 
 	g := &besuGenesis{}
 	g.coinbase = common.HexToAddress(h.Coinbase)
-	g.difficulty = parseHexBig(t, "difficulty", h.Difficulty)
+	g.difficulty = testhex.Big(t, "difficulty", h.Difficulty)
 	if h.ExtraData != "" && h.ExtraData != "0x" {
 		ed, err := hexutil.Decode(h.ExtraData)
 		if err != nil {
@@ -195,60 +196,13 @@ func loadFixtureGenesis(t *testing.T, path string) (*besuGenesis, map[common.Add
 		}
 		g.extraData = ed
 	}
-	g.gasLimit = parseHexU64(t, "gasLimit", h.GasLimit)
+	g.gasLimit = testhex.Uint64(t, "gasLimit", h.GasLimit)
 	g.mixHash = common.HexToHash(h.MixHash)
-	g.nonce = parseHexU64(t, "nonce", h.Nonce)
-	g.timestamp = parseHexU64(t, "timestamp", h.Timestamp)
+	g.nonce = testhex.Uint64(t, "nonce", h.Nonce)
+	g.timestamp = testhex.Uint64(t, "timestamp", h.Timestamp)
 	g.parentHash = common.Hash{}
 
 	return g, allocs
-}
-
-// parseHexU64 parses a 0x-prefixed hex string into a uint64. Unlike
-// hexutil.DecodeUint64, it tolerates leading zeros (e.g. "0x0102030405060708"
-// from Besu fixtures) — go-ethereum's strict parser rejects those, which
-// silently zeroed Nonce/Difficulty in earlier versions of this loader and
-// produced the wrong block hash. Errors bubble through *testing.T per the
-// pattern locked in by commit 1362de0.
-func parseHexU64(t *testing.T, field, s string) uint64 {
-	t.Helper()
-	if s == "" {
-		return 0
-	}
-	if len(s) >= 2 && s[:2] == "0x" {
-		s = s[2:]
-	}
-	if s == "" {
-		return 0
-	}
-	v, ok := new(big.Int).SetString(s, 16)
-	if !ok {
-		t.Fatalf("parseHexU64(%s): invalid hex %q", field, s)
-	}
-	if !v.IsUint64() {
-		t.Fatalf("parseHexU64(%s): value %s overflows uint64", field, v)
-	}
-	return v.Uint64()
-}
-
-// parseHexBig parses a 0x-prefixed hex string into a *big.Int. Tolerates
-// leading zeros (see parseHexU64).
-func parseHexBig(t *testing.T, field, s string) *big.Int {
-	t.Helper()
-	if s == "" {
-		return big.NewInt(0)
-	}
-	if len(s) >= 2 && s[:2] == "0x" {
-		s = s[2:]
-	}
-	if s == "" {
-		return big.NewInt(0)
-	}
-	v, ok := new(big.Int).SetString(s, 16)
-	if !ok {
-		t.Fatalf("parseHexBig(%s): invalid hex %q", field, s)
-	}
-	return v
 }
 
 // verifyWorldRootOnDisk reopens the DB read-only and checks that
