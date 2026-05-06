@@ -323,19 +323,6 @@ func main() {
 		if *verbose {
 			log.Printf("Genesis block hash: %s", block.Hash().Hex())
 			log.Printf("Genesis block number: %d", block.NumberU64())
-			// Always write genesis block — synthesized config is always present.
-			if *verbose {
-				log.Printf("Writing genesis block with state root: %s", stats.StateRoot.Hex())
-			}
-			ancientDir := filepath.Join(config.DBPath, "ancient")
-			block, err := geth.WriteGenesisBlock(gen.DB(), genesisConfig, stats.StateRoot, true, ancientDir)
-			if err != nil {
-				log.Fatalf("Failed to write genesis block: %v", err)
-			}
-			if *verbose {
-				log.Printf("Genesis block hash: %s", block.Hash().Hex())
-				log.Printf("Genesis block number: %d", block.NumberU64())
-			}
 		}
 
 	case "nethermind":
