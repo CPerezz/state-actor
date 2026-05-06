@@ -53,11 +53,6 @@ var (
 	binaryTrie     = flag.Bool("binary-trie", false, "Generate state for binary trie mode (EIP-7864)")
 	commitInterval = flag.Int("commit-interval", 500000, "Binary trie: commit to disk every N trie insertions (default 500K, 0 = all in-memory)")
 
-	// Deep-branch accounts
-	deepBranchAccounts   = flag.Int("deep-branch-accounts", 0, "Number of additional contracts with deep storage tries (0 = disabled)")
-	deepBranchDepth      = flag.Int("deep-branch-depth", 64, "Branch depth per deep slot in nibbles (1-64)")
-	deepBranchKnownSlots = flag.Int("deep-branch-known-slots", 1, "Legitimate storage slots with known preimages per deep-branch account")
-
 	// Target size
 	targetSize = flag.String("target-size", "", "Target total DB size on disk (e.g. '5GB', '500MB'). Stops generating when estimated size is reached.")
 
@@ -108,25 +103,18 @@ func main() {
 	}
 	if *client == "nethermind" {
 		// Nethermind doesn't implement EIP-7864 (binary trie) and the
-		// deep-branch / commit-interval / group-depth / pebble-block-size
-		// flags are all geth/Pebble-specific. Reject up front.
+		// commit-interval / group-depth / pebble-block-size flags are all
+		// geth/Pebble-specific. Reject up front.
 		if *binaryTrie {
 			log.Fatalf("--binary-trie is not supported with --client=nethermind (Nethermind does not implement EIP-7864)")
 		}
-		if *deepBranchAccounts > 0 {
-			log.Fatalf("--deep-branch-accounts is geth-specific and not supported with --client=nethermind")
-		}
 	}
 	if *client == "besu" {
-		// Besu doesn't implement EIP-7864 (binary trie) and the deep-branch
-		// flag is geth/Pebble-specific. Reject up front. --chain-id is
-		// warn-and-ignored inside client/besu/run_cgo.go (Besu reads chainId
-		// from --genesis-file at boot, not from the DB).
+		// Besu doesn't implement EIP-7864 (binary trie). Reject up front.
+		// --chain-id is warn-and-ignored inside client/besu/run_cgo.go
+		// (Besu reads chainId from --genesis-file at boot, not from the DB).
 		if *binaryTrie {
 			log.Fatalf("--binary-trie is not supported with --client=besu (Besu does not implement EIP-7864)")
-		}
-		if *deepBranchAccounts > 0 {
-			log.Fatalf("--deep-branch-accounts is geth-specific and not supported with --client=besu")
 		}
 	}
 	if *client == "reth" {
@@ -137,9 +125,6 @@ func main() {
 		}
 		if *targetSize != "" {
 			log.Fatalf("--target-size is not yet supported with --client=reth; set --accounts / --contracts explicitly")
-		}
-		if *deepBranchAccounts > 0 {
-			log.Fatalf("--deep-branch-accounts is not yet supported with --client=reth")
 		}
 	}
 
@@ -180,9 +165,6 @@ func main() {
 		statsServer = generator.NewStatsServer(*statsPort)
 		liveStats = statsServer.Stats()
 		liveStats.SetConfig(*accounts, *contracts, *distribution, *seed)
-		if *deepBranchAccounts > 0 {
-			liveStats.SetDeepBranch(*deepBranchAccounts, *deepBranchDepth, *deepBranchKnownSlots)
-		}
 		if err := statsServer.Start(); err != nil {
 			log.Fatalf("Failed to start stats server: %v", err)
 		}
@@ -301,16 +283,6 @@ func main() {
 		*contracts = userContracts * 5
 	}
 
-	// Validate deep-branch flags
-	if *deepBranchAccounts > 0 {
-		if *deepBranchDepth < 1 || *deepBranchDepth > 64 {
-			log.Fatalf("--deep-branch-depth must be 1-64, got %d", *deepBranchDepth)
-		}
-		if *deepBranchKnownSlots < 1 {
-			log.Fatalf("--deep-branch-known-slots must be >= 1, got %d", *deepBranchKnownSlots)
-		}
-	}
-
 	config := generator.Config{
 		DBPath:          *dbPath,
 		NumAccounts:     *accounts,
@@ -328,11 +300,6 @@ func main() {
 		WriteTrieNodes:  true, // Always write trie nodes — DB is unusable without them
 		InjectAddresses: injectAddrs,
 		TargetSize:      parsedTargetSize,
-		DeepBranch: generator.DeepBranchConfig{
-			NumAccounts: *deepBranchAccounts,
-			Depth:       *deepBranchDepth,
-			KnownSlots:  *deepBranchKnownSlots,
-		},
 		LiveStats:       liveStats,
 		GroupDepth:      *groupDepth,
 		PebbleBlockSize: *pebbleBlockSize,
@@ -398,10 +365,6 @@ func main() {
 		if config.TargetSize > 0 {
 			log.Printf("  Target Size:  %s", formatBytes(config.TargetSize))
 		}
-		if config.DeepBranch.Enabled() {
-			log.Printf("  Deep Branch:  %d accounts, depth=%d, known_slots=%d",
-				config.DeepBranch.NumAccounts, config.DeepBranch.Depth, config.DeepBranch.KnownSlots)
-		}
 		if *genesisPath != "" {
 			log.Printf("  Genesis:      %s", *genesisPath)
 		}
@@ -416,38 +379,58 @@ func main() {
 	var stats *generator.Stats
 	switch *client {
 	case "geth":
-		gen, err := generator.New(config)
-		if err != nil {
-			log.Fatalf("Failed to create generator: %v", err)
-		}
-		defer gen.Close()
-
-		stats, err = gen.Generate()
-		if err != nil {
-			log.Fatalf("Failed to generate state: %v", err)
-		}
-
-		// Update live stats with final state
-		if liveStats != nil {
-			liveStats.AddBytes(int64(stats.AccountBytes), int64(stats.StorageBytes), int64(stats.CodeBytes))
-			liveStats.SetStateRoot(stats.StateRoot.Hex())
-		}
-
-		// Write genesis block if genesis was provided (geth-specific).
-		if genesisConfig != nil {
-			if *verbose {
-				log.Printf("Writing genesis block with state root: %s", stats.StateRoot.Hex())
-			}
-
-			ancientDir := filepath.Join(config.DBPath, "ancient")
-			block, err := geth.WriteGenesisBlock(gen.DB(), genesisConfig, stats.StateRoot, config.TrieMode == generator.TrieModeBinary, ancientDir)
+		// MPT mode goes through the new direct-Pebble pipeline in
+		// client/geth/ (entitygen → temp Pebble → keccak-sorted writes
+		// to production). Binary-trie mode still routes through the
+		// legacy generator.New().Generate() path because
+		// generator/binary_stack_trie.go is intentionally untouched per
+		// the design doc.
+		if config.TrieMode == generator.TrieModeMPT {
+			geth.GenesisFilePath = *genesisPath
+			geth.ChainIDOverride = *chainID
+			var err error
+			stats, err = geth.Populate(context.Background(), config, geth.Options{})
 			if err != nil {
-				log.Fatalf("Failed to write genesis block: %v", err)
+				log.Fatalf("Failed to populate Geth DB: %v", err)
+			}
+			if liveStats != nil && stats != nil {
+				liveStats.AddBytes(int64(stats.AccountBytes), int64(stats.StorageBytes), int64(stats.CodeBytes))
+				liveStats.SetStateRoot(stats.StateRoot.Hex())
+			}
+		} else {
+			gen, err := generator.New(config)
+			if err != nil {
+				log.Fatalf("Failed to create generator: %v", err)
+			}
+			defer gen.Close()
+
+			stats, err = gen.Generate()
+			if err != nil {
+				log.Fatalf("Failed to generate state: %v", err)
 			}
 
-			if *verbose {
-				log.Printf("Genesis block hash: %s", block.Hash().Hex())
-				log.Printf("Genesis block number: %d", block.NumberU64())
+			// Update live stats with final state
+			if liveStats != nil {
+				liveStats.AddBytes(int64(stats.AccountBytes), int64(stats.StorageBytes), int64(stats.CodeBytes))
+				liveStats.SetStateRoot(stats.StateRoot.Hex())
+			}
+
+			// Write genesis block if genesis was provided (binary-trie path).
+			if genesisConfig != nil {
+				if *verbose {
+					log.Printf("Writing genesis block with state root: %s", stats.StateRoot.Hex())
+				}
+
+				ancientDir := filepath.Join(config.DBPath, "ancient")
+				block, err := geth.WriteGenesisBlock(gen.DB(), genesisConfig, stats.StateRoot, true, ancientDir)
+				if err != nil {
+					log.Fatalf("Failed to write genesis block: %v", err)
+				}
+
+				if *verbose {
+					log.Printf("Genesis block hash: %s", block.Hash().Hex())
+					log.Printf("Genesis block number: %d", block.NumberU64())
+				}
 			}
 		}
 
@@ -530,10 +513,6 @@ func main() {
 	}
 	if stats.StorageSlotsCreated > 0 {
 		fmt.Printf("Throughput:        %.2f slots/sec\n", float64(stats.StorageSlotsCreated)/elapsed.Seconds())
-	}
-	if stats.DeepBranchAccounts > 0 {
-		fmt.Printf("Deep Branch:       %d accounts, depth %d nibbles, %d known slots each\n",
-			stats.DeepBranchAccounts, stats.DeepBranchDepth, *deepBranchKnownSlots)
 	}
 	fmt.Printf("State Root:        %s\n", stats.StateRoot.Hex())
 
