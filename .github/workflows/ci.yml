@@ -1,0 +1,134 @@
+# CI — Tier 1: per-PR regression gate.
+#
+# Five jobs run in parallel on every PR + push to main:
+#
+#   default       — go vet/build/test under the default tag set. Catches the
+#                   compile + non-cgo regression class (the kind that broke
+#                   main in nerolation/state-actor#39).
+#   reth-cgo      — make test-reth-cgo. cgo_reth-tagged unit tests including
+#                   client/reth/golden_test.go (canonical state-root pin).
+#   besu-oracle   — make test-besu-oracle. Differential oracle pinned to
+#                   Besu's GenesisStateTest.java fixture hashes — byte-level
+#                   encoding gate.
+#   neth-oracle   — make test-nethermind-oracle. Differential oracle pinned
+#                   to Nethermind's GenesisBuilderTests.cs Parity chainspec
+#                   hashes.
+#   reth-oracle   — make test-reth-oracle. reth db stats against state-actor
+#                   MDBX layout — schema-drift gate. Mounts the host docker
+#                   socket (DinD via socket mount) so the test can spawn the
+#                   pinned upstream reth container.
+#
+# Real-node boot tests (test-geth-boot, smoke-geth, test-reth-boot) live
+# behind a Tier 2 follow-up workflow, gated to schedule + opt-in PR label —
+# their cold-cache runtime is too long to justify on every PR. Tier 1 alone
+# closes the regression window for every bug class fixed in PRs #39, #40,
+# #41, #44.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# One run per branch — supersede stale runs when a PR gets new pushes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  default:
+    name: vet · build · test (default tags)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go vet ./...
+      - run: go build ./...
+      - run: go test -count=1 -timeout=10m ./...
+
+  reth-cgo:
+    name: reth · cgo writer + golden hash
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      # Build (and cache) state-actor-reth's builder stage. RocksDB 10.10.1
+      # source-build dominates runtime — ~12-15 min cold, <30s warm. The
+      # GHA cache scope is shared with reth-oracle below so they don't fight
+      # for the same layer.
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.reth
+          target: builder
+          tags: state-actor-reth:latest
+          load: true
+          cache-from: type=gha,scope=reth-builder
+          cache-to: type=gha,scope=reth-builder,mode=max
+      # `make test-reth-cgo`'s image-reth prereq finds the just-loaded image
+      # and skips the rebuild. The test itself runs in <10s post-build.
+      - run: make test-reth-cgo
+
+  besu-oracle:
+    name: besu · differential oracle
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.besu
+          target: builder
+          tags: state-actor-besu-builder:latest
+          load: true
+          cache-from: type=gha,scope=besu-builder
+          cache-to: type=gha,scope=besu-builder,mode=max
+      - run: make test-besu-oracle
+
+  neth-oracle:
+    name: nethermind · differential oracle
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.nethermind
+          target: builder
+          tags: state-actor-nethermind-builder:latest
+          load: true
+          cache-from: type=gha,scope=neth-builder
+          cache-to: type=gha,scope=neth-builder,mode=max
+      - run: make test-nethermind-oracle
+
+  reth-oracle:
+    name: reth · db stats oracle (DinD)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      # Same builder-stage build + cache as reth-cgo (shared scope). The
+      # test then mounts /var/run/docker.sock and spawns the pinned upstream
+      # reth container (ghcr.io/cperezz/reth — amd64-only; OK on
+      # ubuntu-latest, blocked on arm64 per nerolation/state-actor#45).
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.reth
+          target: builder
+          tags: state-actor-reth:latest
+          load: true
+          cache-from: type=gha,scope=reth-builder
+          cache-to: type=gha,scope=reth-builder,mode=max
+      - run: make test-reth-oracle
