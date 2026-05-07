@@ -84,24 +84,22 @@ func safePrefix(b []byte, n int) []byte {
 	return b[:n]
 }
 
-// TestGethNodeBoot generates a small state-actor datadir (10 EOAs +
-// 3 contracts) via geth.Populate, boots upstream ethereum/client-go
-// against it, and probes via JSON-RPC to confirm:
+// TestE2ESuite — see client/besu/e2e_test.go for the full phase
+// description. geth-specific bits:
+//   - --fork=shanghai (geth's writer ceiling supports up through prague,
+//     but shanghai is enough for boot + read-only oracle).
+//   - No DinD; geth runs with -p host-port mapping.
+//   - Phase 5-7 (spamoor + post-spamoor re-query) is SKIPPED for geth
+//     because state-actor's chain is post-merge → block production
+//     requires a CL (engine API) or pre-merge PoW with non-trivial
+//     ethash setup. The cross-client aggregator still includes geth's
+//     genesis stateRoot from Phase 3. Adding a beacon-mock for geth
+//     spamoor is tracked as a follow-up.
 //
-//   - eth_getBalance matches every EOA's generated balance.
-//   - eth_getCode matches every contract's bytecode.
-//   - eth_getStorageAt matches every contract's storage slots.
-//
-// The test reproduces the RNG sequence used inside Populate (same seed,
-// same order: EOAs first, then contracts) so it knows the expected
-// values without exposing them through the Populate API.
-//
-// Wall-time budget: up to 60 s for geth's RPC to come up. Build-tagged
-// `oracle` so plain `go test ./client/geth/...` does not include it.
-// Run via `make test-geth-boot`.
-func TestGethNodeBoot(t *testing.T) {
+// Build-tagged `oracle`. Run via `make test-geth-suite`.
+func TestE2ESuite(t *testing.T) {
 	if testing.Short() {
-		t.Skip("oracle boot test skipped in short mode")
+		t.Skip("e2e suite skipped in short mode")
 	}
 
 	const (
@@ -220,9 +218,26 @@ func TestGethNodeBoot(t *testing.T) {
 		t.Fatalf("RPC never came up (logs captured in t.Cleanup):\nerr: %v", err)
 	}
 
-	// ---- EOA assertions ----
+	// ---- Phase 3: capture genesis state-root → $RESULT_PATH ----
+	genesisRoot, err := rpcprobe.GenesisStateRoot(rpcURL)
+	if err != nil {
+		t.Fatalf("GenesisStateRoot: %v", err)
+	}
+	t.Logf("genesis stateRoot: %s", genesisRoot.Hex())
+	result := oracle.SuiteResult{
+		ClientName:       "geth",
+		GenesisStateRoot: genesisRoot,
+		// PostSpamoor* fields left zero — see TestE2ESuite docstring.
+	}
+	if err := oracle.WriteResult(result); err != nil {
+		t.Fatalf("WriteResult: %v", err)
+	}
+
+	// ---- Phase 4: oracle re-query at "0x0" ----
+	// (Phases 5-7 — spamoor + post-spamoor re-query — skipped for geth;
+	// see TestE2ESuite docstring.)
 	for _, eoa := range eoas {
-		got, err := rpcprobe.EthGetBalance(rpcURL, eoa.Address, "latest")
+		got, err := rpcprobe.EthGetBalance(rpcURL, eoa.Address, "0x0")
 		if err != nil {
 			t.Errorf("eth_getBalance %s: %v", eoa.Address.Hex(), err)
 			continue
@@ -233,10 +248,8 @@ func TestGethNodeBoot(t *testing.T) {
 				eoa.Address.Hex(), got.String(), want.String())
 		}
 	}
-
-	// ---- contract assertions ----
 	for _, c := range contracts {
-		gotCode, err := rpcprobe.EthGetCode(rpcURL, c.Address, "latest")
+		gotCode, err := rpcprobe.EthGetCode(rpcURL, c.Address, "0x0")
 		if err != nil {
 			t.Errorf("eth_getCode %s: %v", c.Address.Hex(), err)
 		} else if !bytes.Equal(gotCode, c.Code) {
@@ -244,9 +257,8 @@ func TestGethNodeBoot(t *testing.T) {
 				c.Address.Hex(), len(gotCode), len(c.Code),
 				safePrefix(gotCode, 32), safePrefix(c.Code, 32))
 		}
-
 		for _, slot := range c.Storage {
-			got, err := rpcprobe.EthGetStorageAt(rpcURL, c.Address, slot.Key, "latest")
+			got, err := rpcprobe.EthGetStorageAt(rpcURL, c.Address, slot.Key, "0x0")
 			if err != nil {
 				t.Errorf("eth_getStorageAt %s slot %s: %v",
 					c.Address.Hex(), slot.Key.Hex(), err)

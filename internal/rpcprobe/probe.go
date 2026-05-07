@@ -193,6 +193,29 @@ func EthBlockNumber(url string) (uint64, error) {
 	return n.Uint64(), nil
 }
 
+// EthGetTransactionCount calls eth_getTransactionCount(addr, block) and
+// returns the nonce as uint64. Used by e2e suite tests to verify
+// spamoor's sender wallet actually sent txs (nonce > 0 → real activity).
+func EthGetTransactionCount(url string, addr common.Address, block string) (uint64, error) {
+	raw, err := Call(url, "eth_getTransactionCount", []any{addr.Hex(), block})
+	if err != nil {
+		return 0, err
+	}
+	var hexStr string
+	if err := json.Unmarshal(raw, &hexStr); err != nil {
+		return 0, fmt.Errorf("unmarshal txCount: %w (raw: %s)", err, raw)
+	}
+	hexStr = strings.TrimPrefix(hexStr, "0x")
+	if hexStr == "" {
+		return 0, nil
+	}
+	n := new(big.Int)
+	if _, ok := n.SetString(hexStr, 16); !ok {
+		return 0, fmt.Errorf("parse hex txCount %q", hexStr)
+	}
+	return n.Uint64(), nil
+}
+
 // Block is the subset of eth_getBlockByNumber's reply we read for oracle
 // purposes. JSON-RPC returns many more fields; we deliberately only
 // surface what callers need so adding a new field is an explicit decision.

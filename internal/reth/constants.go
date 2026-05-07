@@ -18,19 +18,25 @@ const (
 	PinnedAlloyTrieVer = "0.9.5"
 
 	// PinnedRethRelease is the Docker image tag the differential oracle
-	// boots against in CI. Bump when validating against a new release.
+	// + e2e suite boot against in CI.
 	//
-	// SHA-pinned to the CPerezz/reth fork branch `skip-genesis-validation`
-	// while paradigmxyz/reth#23919 is in review. The fork's GHA workflow
-	// (.github/workflows/build-and-push-on-push.yml) auto-publishes
-	// per-commit Docker images on every push to that branch. Once the
-	// upstream PR merges and a release is cut, flip this back to `vX.Y.Z`
-	// and `PinnedRethImage` back to ghcr.io/paradigmxyz/reth.
-	PinnedRethRelease = "fea06894fc251861b4a0d13523612f8385c00955"
+	// "nightly" tracks paradigmxyz/reth main, which contains the
+	// `--debug.skip-genesis-validation` flag (paradigmxyz/reth#23919,
+	// merged 2026-05-06). State-actor's writer-direct datadir requires
+	// that flag — without it reth recomputes the genesis hash from the
+	// chainspec's alloc and rejects the DB.
+	//
+	// Bump to a specific `vX.Y.Z` release tag once one is cut after
+	// 2026-05-06 — the oldest release containing #23919 will be the
+	// stable pin. Until then nightly is the only paradigm channel
+	// with the flag.
+	PinnedRethRelease = "nightly"
 
 	// PinnedRethImage is the fully-qualified image reference (registry + name)
-	// without the tag. Reth is published to GHCR.
-	PinnedRethImage = "ghcr.io/cperezz/reth"
+	// without the tag. Reth is published to GHCR. Migrated from CPerezz/reth
+	// (fork-only `skip-genesis-validation` branch) once the upstream PR
+	// landed in main.
+	PinnedRethImage = "ghcr.io/paradigmxyz/reth"
 
 	// PinnedMdbxGoVer is the github.com/erigontech/mdbx-go module version
 	// that the cgo writer links against. Pinned because libmdbx C ABI is
