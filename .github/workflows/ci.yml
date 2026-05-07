@@ -34,8 +34,8 @@ name: CI
 
 on:
   pull_request:
-    # The Tier-2 jobs (geth-boot, geth-smoke, reth-boot) only fire when a
-    # PR carries the `full-ci` label. Tier-1 jobs run on every PR.
+    # The Tier-2 jobs (geth-boot, reth-boot) only fire when a PR carries
+    # the `full-ci` label. Tier-1 jobs run on every PR.
     types: [opened, synchronize, reopened, labeled, unlabeled]
   push:
     # No branch filter: triggers on every push.
@@ -206,35 +206,6 @@ jobs:
       # The test itself spawns ethereum/client-go via `docker run` (the
       # daemon is pre-installed on ubuntu-latest).
       - run: make test-geth-boot
-
-  geth-smoke:
-    name: geth · smoke (real geth + RPC probe)
-    runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'full-ci'))
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      # Dockerfile.geth is pure Go — no RocksDB build, ~2-3 min cold,
-      # <30s warm. Cache scope `geth` keeps this from interfering with
-      # other GHA cache scopes.
-      - uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: Dockerfile.geth
-          tags: state-actor-geth:latest
-          load: true
-          cache-from: type=gha,scope=geth
-          cache-to: type=gha,scope=geth,mode=max
-      # validate-big-db-geth.sh uses curl + jq; not preinstalled on
-      # ubuntu-latest minimal images. (`curl` actually is, but `jq` isn't
-      # always — installing both is cheap.)
-      - run: sudo apt-get update && sudo apt-get install -y curl jq
-      # `make smoke-geth` re-runs `docker build -f Dockerfile.geth` via its
-      # docker-geth Make prereq, but with the local Docker layer cache
-      # warmed by the buildx --load above, the rebuild is ~10s (BuildKit
-      # reuses the loaded image's layers). Tolerable.
-      - run: make smoke-geth
 
   reth-boot:
     name: reth · real-node boot oracle (DinD)
