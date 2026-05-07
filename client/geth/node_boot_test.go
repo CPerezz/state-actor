@@ -171,9 +171,17 @@ func TestGethNodeBoot(t *testing.T) {
 	containerName := "state-actor-geth-boot-" + randSuffix(8)
 	hostPort := freeTCPPort(t)
 
+	// Run geth as the test process's UID/GID so any files it writes to
+	// the bind-mounted /data stay owned by the test user. Without this,
+	// on native Linux (e.g. GHA runners), geth's default-root container
+	// would write root-owned files into datadir, and t.TempDir's cleanup
+	// (running as the test user) would fail with "permission denied".
+	// Docker Desktop for Mac masks this via filesystem-layer UID mapping;
+	// the test still passed locally pre-fix.
 	runArgs := append([]string{"run", "-d"}, dockerPlatformArgs()...)
 	runArgs = append(runArgs,
 		"--name", containerName,
+		"--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
 		"-v", datadir+":/data",
 		"-p", fmt.Sprintf("127.0.0.1:%d:8545", hostPort),
 		gethImageRef(),
