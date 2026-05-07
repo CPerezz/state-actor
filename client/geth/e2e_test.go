@@ -16,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
+
 	"github.com/nerolation/state-actor/generator"
 	"github.com/nerolation/state-actor/internal/oracle"
 	"github.com/nerolation/state-actor/internal/rpcprobe"
@@ -124,18 +126,25 @@ func TestE2ESuite(t *testing.T) {
 	// itself takes --datadir=<datadir> and looks for geth/chaindata under
 	// it. We mount the parent into the container at /data.
 	datadir := t.TempDir()
+	// InjectAddresses is set even though geth skips Phase 5-7 (spamoor)
+	// — it has to match the alloc shape the other 3 clients write so the
+	// cross-client genesis state-root invariant holds. Pre-funding 1
+	// extra account adds 1 entry to the writer's account stream;
+	// without this geth's stateRoot diverges from besu/neth/reth's by
+	// exactly that one entry.
 	cfg := generator.Config{
-		DBPath:       filepath.Join(datadir, "geth", "chaindata"),
-		NumAccounts:  numAccounts,
-		NumContracts: numContracts,
-		CodeSize:     codeSize,
-		MinSlots:     minSlots,
-		MaxSlots:     maxSlots,
-		Seed:         seed,
-		BatchSize:    1000,
-		Workers:      1,
-		TrieMode:     generator.TrieModeMPT,
-		Genesis:      g,
+		DBPath:          filepath.Join(datadir, "geth", "chaindata"),
+		NumAccounts:     numAccounts,
+		NumContracts:    numContracts,
+		CodeSize:        codeSize,
+		MinSlots:        minSlots,
+		MaxSlots:        maxSlots,
+		Seed:            seed,
+		BatchSize:       1000,
+		Workers:         1,
+		TrieMode:        generator.TrieModeMPT,
+		Genesis:         g,
+		InjectAddresses: []common.Address{common.HexToAddress("0x7e5f4552091a69125d5dfcb7b8c2659029395bdf")},
 	}
 	if _, err := Populate(context.Background(), cfg, Options{}); err != nil {
 		t.Fatalf("Populate: %v", err)
