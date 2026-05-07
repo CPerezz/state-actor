@@ -34,18 +34,25 @@ name: CI
 
 on:
   pull_request:
+    # The Tier-2 jobs (geth-boot, geth-smoke, reth-boot) only fire when a
+    # PR carries the `full-ci` label. Tier-1 jobs run on every PR.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   push:
     # No branch filter: triggers on every push.
     #
     # Default protection (`branches: [main]`) created a bootstrap problem
-    # for THIS PR — a fork-to-upstream PR uses the upstream's main copy of
-    # the workflow, but main hasn't seen the workflow yet (this is the PR
-    # that adds it), so nothing fires. Widening the trigger lets feature
-    # branches validate themselves on the contributor's fork before merge.
+    # for the original CI PR — a fork-to-upstream PR uses the upstream's
+    # main copy of the workflow, but main hadn't seen the workflow yet
+    # (it was the PR adding it). Widening the trigger let the feature
+    # branch validate itself on the contributor's fork before merge.
     #
     # Post-merge, the side effect is that maintainer pushes to any branch
     # of the upstream repo also trigger CI — desirable, since maintainers
     # mostly push via PRs and direct pushes are usually intentional.
+  schedule:
+    # Nightly run @ 06:00 UTC for the Tier-2 boot tests so regressions in
+    # "datadir is bootable + serves correct state" surface within a day.
+    - cron: '0 6 * * *'
 
 # One run per branch — supersede stale runs when a PR gets new pushes.
 concurrency:
@@ -168,3 +175,97 @@ jobs:
             -e RETH_ORACLE_VOL="$ORACLE_VOL" \
             state-actor-reth go test -tags 'cgo_reth oracle' ./client/reth/ -run TestRethDbStats -v -timeout 15m
           docker volume rm -f "$ORACLE_VOL" >/dev/null 2>&1 || true
+
+  # ---------------------------------------------------------------------------
+  # Tier 2 — Real-node boot tests.
+  #
+  # Boot a real client binary against a state-actor-produced datadir and
+  # probe via JSON-RPC. This is the regression class that nerolation/
+  # state-actor#42 was — Tier-1 oracle tests caught snapshot-side
+  # encoding bugs but missed "datadir compiles, state RPCs return
+  # historical state … is not available".
+  #
+  # Gated to `schedule:` (nightly) + opt-in `full-ci` PR label only.
+  # Per-job cold runtime is in the 10-30 min range, too long to justify
+  # on every PR; the label gives risky-looking PRs an opt-in run.
+  # ---------------------------------------------------------------------------
+
+  geth-boot:
+    name: geth · real-node boot oracle
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'full-ci'))
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # `make test-geth-boot` is just a `go test -tags oracle` invocation —
+      # no Make-side docker build prereq, no RocksDB, pure-Go state-actor.
+      # The test itself spawns ethereum/client-go via `docker run` (the
+      # daemon is pre-installed on ubuntu-latest).
+      - run: make test-geth-boot
+
+  geth-smoke:
+    name: geth · smoke (real geth + RPC probe)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'full-ci'))
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      # Dockerfile.geth is pure Go — no RocksDB build, ~2-3 min cold,
+      # <30s warm. Cache scope `geth` keeps this from interfering with
+      # other GHA cache scopes.
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.geth
+          tags: state-actor-geth:latest
+          load: true
+          cache-from: type=gha,scope=geth
+          cache-to: type=gha,scope=geth,mode=max
+      # validate-big-db-geth.sh uses curl + jq; not preinstalled on
+      # ubuntu-latest minimal images. (`curl` actually is, but `jq` isn't
+      # always — installing both is cheap.)
+      - run: sudo apt-get update && sudo apt-get install -y curl jq
+      # `make smoke-geth` re-runs `docker build -f Dockerfile.geth` via its
+      # docker-geth Make prereq, but with the local Docker layer cache
+      # warmed by the buildx --load above, the rebuild is ~10s (BuildKit
+      # reuses the loaded image's layers). Tolerable.
+      - run: make smoke-geth
+
+  reth-boot:
+    name: reth · real-node boot oracle (DinD)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'full-ci'))
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      # Same builder-stage build + cache as Tier-1's reth-cgo and
+      # reth-oracle (shared scope).
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.reth
+          target: builder
+          tags: state-actor-reth:latest
+          load: true
+          cache-from: type=gha,scope=reth-builder
+          cache-to: type=gha,scope=reth-builder,mode=max
+      # Inlined from `make test-reth-boot` minus the image-reth Make
+      # prereq (would re-build RocksDB; see file-level note above the
+      # Tier-1 reth-cgo job).
+      - run: |
+          BOOT_VOL=reth-boot-datadir
+          docker volume rm -f "$BOOT_VOL" >/dev/null 2>&1 || true
+          docker volume create "$BOOT_VOL"
+          docker run --rm \
+            -v "$BOOT_VOL":/oracle-data \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -e RETH_ORACLE_DATADIR=/oracle-data \
+            -e RETH_ORACLE_VOL="$BOOT_VOL" \
+            state-actor-reth go test -tags 'cgo_reth oracle' ./client/reth/ -run TestRethNodeBoot -v -timeout 30m
+          docker volume rm -f "$BOOT_VOL" >/dev/null 2>&1 || true
