@@ -202,10 +202,9 @@ func TestE2ESuite(t *testing.T) {
 		maxSlots     = 2
 	)
 
-	// Pin --fork=merge. Nethermind's writer ceiling today is "merge"
-	// (genesis.MaxForkForClient("nethermind") == "merge"); going past
-	// that is rejected at parse time in main.go.
-	g, err := stategenesis.BuildSynthetic("merge", big.NewInt(1337), 30_000_000, 0, nil)
+	// Pin --fork=merge (nethermind's MaxForkForClient ceiling — writer
+	// builds a pre-Shanghai header today). 60M gas matches mainnet-current.
+	g, err := stategenesis.BuildSynthetic("merge", big.NewInt(1337), 60_000_000, 0, nil)
 	if err != nil {
 		t.Fatalf("BuildSynthetic: %v", err)
 	}
@@ -364,6 +363,9 @@ func TestE2ESuite(t *testing.T) {
 		spamoorBin = "spamoor"
 	}
 	if _, err := exec.LookPath(spamoorBin); err != nil {
+		if os.Getenv("REQUIRE_SPAMOOR") == "1" {
+			t.Fatalf("REQUIRE_SPAMOOR=1 but spamoor binary not found: %v", err)
+		}
 		t.Skipf("spamoor binary not found (set $SPAMOOR or `make spamoor-install`): %v", err)
 	}
 	postBlock, err := oracle.SpamoorRun(oracle.SpamoorRunCfg{

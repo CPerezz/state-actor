@@ -177,11 +177,10 @@ func TestE2ESuite(t *testing.T) {
 		maxSlots     = 2
 	)
 
-	// Pin --fork=shanghai. state-actor's BuildSynthetic does not emit a
-	// BlobSchedule, which Besu requires once Cancun or Prague are active
-	// at the genesis chain config. Shanghai is besu's writer ceiling
-	// today (genesis.MaxForkForClient("besu") == "shanghai").
-	g, err := stategenesis.BuildSynthetic("shanghai", big.NewInt(1337), 30_000_000, 0, nil)
+	// Pin --fork=shanghai (besu's MaxForkForClient ceiling — writer
+	// doesn't yet handle Cancun+ header fields). 60M gas matches
+	// mainnet-current.
+	g, err := stategenesis.BuildSynthetic("shanghai", big.NewInt(1337), 60_000_000, 0, nil)
 	if err != nil {
 		t.Fatalf("BuildSynthetic: %v", err)
 	}
@@ -361,6 +360,9 @@ func TestE2ESuite(t *testing.T) {
 		spamoorBin = "spamoor"
 	}
 	if _, err := exec.LookPath(spamoorBin); err != nil {
+		if os.Getenv("REQUIRE_SPAMOOR") == "1" {
+			t.Fatalf("REQUIRE_SPAMOOR=1 but spamoor binary not found: %v", err)
+		}
 		t.Skipf("spamoor binary not found (set $SPAMOOR or `make spamoor-install`): %v", err)
 	}
 	postBlock, err := oracle.SpamoorRun(oracle.SpamoorRunCfg{
