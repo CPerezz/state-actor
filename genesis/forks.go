@@ -125,18 +125,28 @@ func SortedForks() []string {
 // boot with a "wrong genesis hash" mismatch.
 //
 // Today's ceilings:
-//   - geth, reth: prague (writers populate RequestsHash + blob fields)
+//   - geth, reth: osaka — Osaka adds zero new genesis-block fields per
+//     go-ethereum v1.17.2 (Header struct unchanged from Prague's
+//     RequestsHash through Osaka activation; OsakaTime gates only
+//     consensus rules like EIP-7691 BPO + EIP-7825 per-tx gas cap, not
+//     header initialization). geth uses go-ethereum's native genesis
+//     builder; reth uses internal/genesisheader.Build which already
+//     handles up through Prague.
 //   - besu: shanghai (genesis_cgo.supportedFork rejects Cancun+; writer
-//     lacks ParentBeaconRoot/ExcessBlobGas/BlobGasUsed/RequestsHash)
+//     lacks ParentBeaconRoot/ExcessBlobGas/BlobGasUsed/RequestsHash).
+//     Bumping further requires adding Cancun, Prague, and Osaka header
+//     fields to client/besu/genesis_cgo.buildGenesisHeader — tracked
+//     separately.
 //   - nethermind: merge (writer hardcodes a pre-Shanghai header — no
-//     WithdrawalsHash, no Cancun+ fields)
+//     WithdrawalsHash, no Cancun+ fields). Bumping requires adding
+//     Shanghai, Cancun, Prague, Osaka support to
+//     client/nethermind/genesis_cgo.go — tracked separately.
 //
-// Bump after the corresponding writer adds the missing header fields
-// (B7 / Stage C in the unify-client-features plan).
+// Bump after the corresponding writer adds the missing header fields.
 func MaxForkForClient(client string) string {
 	switch client {
 	case "geth", "reth":
-		return DefaultFork
+		return "osaka"
 	case "besu":
 		return "shanghai"
 	case "nethermind":
