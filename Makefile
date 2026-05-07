@@ -94,17 +94,25 @@ SMOKE_INJECT_ADDRS ?= 0x7e5f4552091a69125d5dfcb7b8c2659029395bdf,0x2b5ad5c4795c0
 # to build the upstream binary into /usr/local/bin (CI uses the latter).
 SPAMOOR ?= spamoor
 
-# Spamoor pinned commit. CI's actions/cache key derives from this — bump
-# when picking up upstream improvements.
-SPAMOOR_COMMIT ?= main
+# Spamoor pinned commit (full SHA preferred; branch names also work).
+# CI's actions/cache key derives from this — bump when picking up
+# upstream improvements. Note: ethpandaops/spamoor's default branch is
+# `master`, not `main` — bare `main` would fail to clone.
+SPAMOOR_COMMIT ?= master
 
-## spamoor-install: clone github.com/ethpandaops/spamoor and install to /usr/local/bin
-##   Used by CI; local devs can keep using their existing checkout.
+## spamoor-install: fetch + build spamoor from github.com/ethpandaops/spamoor.
+##   Accepts either a branch name (e.g. master) or a full commit SHA in
+##   $(SPAMOOR_COMMIT). Used by CI; local devs typically have their own
+##   checkout and can skip this target.
 spamoor-install:
 	@if command -v $(SPAMOOR) >/dev/null 2>&1; then \
-		echo "spamoor already on PATH at $$($(GOCMD) env GOPATH)/bin or /usr/local/bin"; exit 0; \
+		echo "spamoor already on PATH"; exit 0; \
 	fi
-	rm -rf /tmp/spamoor && git clone --depth=1 --branch $(SPAMOOR_COMMIT) https://github.com/ethpandaops/spamoor /tmp/spamoor
+	# git clone --branch <sha> doesn't work; init + fetch by SHA does
+	# (GitHub allows fetching reachable commits by full SHA).
+	rm -rf /tmp/spamoor && mkdir -p /tmp/spamoor
+	cd /tmp/spamoor && git init -q && git remote add origin https://github.com/ethpandaops/spamoor
+	cd /tmp/spamoor && git fetch --depth=1 origin $(SPAMOOR_COMMIT) && git checkout -q FETCH_HEAD
 	cd /tmp/spamoor && $(GOBUILD) -o /usr/local/bin/spamoor ./cmd/spamoor
 
 # ---------------------------------------------------------------------------

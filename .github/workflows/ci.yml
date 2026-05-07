@@ -52,11 +52,13 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Pinned spamoor commit. Bump when picking up upstream improvements.
-  # The `actions/cache@v4` key derives from this; a bump invalidates
-  # cache and rebuilds (~2 min). Each suite job installs spamoor via
-  # the same key, so warm cache shares across jobs.
-  SPAMOOR_REF: main
+  # Pinned spamoor commit (NOT a branch — ethpandaops/spamoor's default
+  # branch is `master`, not `main`, so bare branch names are fragile).
+  # Bump when picking up upstream improvements. The `actions/cache@v4`
+  # key derives from this; a bump invalidates cache and rebuilds
+  # (~2 min). Each suite job installs spamoor via the same key, so
+  # warm cache shares across jobs.
+  SPAMOOR_REF: dc60b6025f6dcea738d9095c11f8ca87c325f93b
 
 jobs:
   default:
@@ -315,11 +317,26 @@ jobs:
           set -euo pipefail
           cd _artifacts
           ls -l
+          # All 4 clients must have uploaded a result. Otherwise the
+          # invariant check is meaningless — e.g. if 3 of 4 suites fail
+          # before Phase 3, only 1 result lands here and the "all unique
+          # roots == 1" check would trivially pass with 1 entry.
+          want=(besu geth nethermind reth)
+          missing=()
+          for c in "${want[@]}"; do
+            if [ ! -f "$c-result.json" ]; then
+              missing+=("$c")
+            fi
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "FAIL: missing result.json from clients: ${missing[*]}"
+            echo "  (each *-suite job must reach Phase 3 to upload its result)"
+            exit 1
+          fi
           # Extract every {client, genesis_state_root}.
-          for f in *-result.json; do
-            client=$(jq -r .client "$f")
-            root=$(jq -r .genesis_state_root "$f")
-            echo "  $client → $root"
+          for c in "${want[@]}"; do
+            root=$(jq -r .genesis_state_root "$c-result.json")
+            echo "  $c → $root"
           done
           uniq_roots=$(jq -s '[.[].genesis_state_root] | unique' *-result.json)
           n=$(echo "$uniq_roots" | jq 'length')
@@ -328,4 +345,4 @@ jobs:
             echo "$uniq_roots" | jq .
             exit 1
           fi
-          echo "PASS: all clients agree on genesis state-root: $(echo "$uniq_roots" | jq -r '.[0]')"
+          echo "PASS: all 4 clients agree on genesis state-root: $(echo "$uniq_roots" | jq -r '.[0]')"
