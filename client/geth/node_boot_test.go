@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/nerolation/state-actor/generator"
-	"github.com/nerolation/state-actor/internal/entitygen"
+	"github.com/nerolation/state-actor/internal/oracle"
 	"github.com/nerolation/state-actor/internal/rpcprobe"
 
 	stategenesis "github.com/nerolation/state-actor/genesis"
@@ -143,25 +143,23 @@ func TestGethNodeBoot(t *testing.T) {
 		t.Fatalf("Populate: %v", err)
 	}
 
-	// Reproduce the RNG sequence state-actor's geth Phase 1 used so we
-	// know the expected balances/code/storage without exposing them
-	// through the Populate API. Mirrors client/geth/state_writer.go's
-	// Phase 1 draw order, which now goes through entitygen.GenerateContractRoll
-	// (the canonical "slot-count then contract" draw — single source of
-	// truth across all four client writers).
+	// Reproduce the RNG sequence state-actor's geth Phase 1 used.
+	// internal/oracle.Reproduce is the single source of truth across
+	// all 4 per-client boot tests + e2e suites.
 	//
 	// We don't need state-actor's genesisAddrs collision-retry loop here:
 	// this test passes no genesis alloc and no --inject-accounts, so the
-	// map is empty and no re-rolls happen.
-	rng := mrand.New(mrand.NewSource(seed))
-	eoas := make([]*entitygen.Account, numAccounts)
-	for i := 0; i < numAccounts; i++ {
-		eoas[i] = entitygen.GenerateEOA(rng)
-	}
-	contracts := make([]*entitygen.Account, numContracts)
-	for i := 0; i < numContracts; i++ {
-		contracts[i] = entitygen.GenerateContractRoll(rng, generator.PowerLaw, codeSize, minSlots, maxSlots)
-	}
+	// map is empty and no re-rolls happen — matching Reproduce's
+	// no-inject assumption.
+	eoas, contracts := oracle.Reproduce(oracle.ReproduceCfg{
+		Seed:         seed,
+		NumAccounts:  numAccounts,
+		NumContracts: numContracts,
+		CodeSize:     codeSize,
+		MinSlots:     minSlots,
+		MaxSlots:     maxSlots,
+		Distribution: generator.PowerLaw,
+	})
 
 	// Boot upstream geth in passive read-only mode. --syncmode=full +
 	// --nodiscover + --maxpeers=0 keep the node from peering or syncing;

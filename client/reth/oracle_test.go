@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/nerolation/state-actor/generator"
-	"github.com/nerolation/state-actor/internal/entitygen"
+	"github.com/nerolation/state-actor/internal/oracle"
 	iReth "github.com/nerolation/state-actor/internal/reth"
 	"github.com/nerolation/state-actor/internal/rpcprobe"
 )
@@ -372,15 +372,17 @@ func TestRethNodeBoot(t *testing.T) {
 	// contract address it derived was wrong, and every contract probe
 	// would silently return zero. The geth boot test surfaced this by
 	// asserting eth_getCode and eth_getStorageAt; nerolation/state-actor#42.
-	rng := mrand.New(mrand.NewSource(seed))
-	eoas := make([]*entitygen.Account, numAccounts)
-	for i := 0; i < numAccounts; i++ {
-		eoas[i] = entitygen.GenerateEOA(rng)
-	}
-	contracts := make([]*entitygen.Account, numContracts)
-	for i := 0; i < numContracts; i++ {
-		contracts[i] = entitygen.GenerateContractRoll(rng, cfg.Distribution, codeSize, minSlots, maxSlots)
-	}
+	// Single source of truth in internal/oracle.Reproduce — same draw
+	// order across all 4 per-client boot tests + e2e suites.
+	eoas, contracts := oracle.Reproduce(oracle.ReproduceCfg{
+		Seed:         seed,
+		NumAccounts:  numAccounts,
+		NumContracts: numContracts,
+		CodeSize:     codeSize,
+		MinSlots:     minSlots,
+		MaxSlots:     maxSlots,
+		Distribution: cfg.Distribution,
+	})
 
 	// Boot reth node --dev.
 	imageRef := rethImageRef()

@@ -16,7 +16,7 @@ import (
 
 	stategenesis "github.com/nerolation/state-actor/genesis"
 	"github.com/nerolation/state-actor/generator"
-	"github.com/nerolation/state-actor/internal/entitygen"
+	"github.com/nerolation/state-actor/internal/oracle"
 	"github.com/nerolation/state-actor/internal/rpcprobe"
 )
 
@@ -187,18 +187,18 @@ func TestBesuNodeBoot(t *testing.T) {
 	}
 
 	// Reproduce the RNG sequence state-actor's besu Phase 1 used so we
-	// know the expected balances/code/storage. Goes through
-	// entitygen.GenerateContractRoll — same canonical draw order
-	// (slot-count then contract) the writer uses.
-	rng := mrand.New(mrand.NewSource(seed))
-	eoas := make([]*entitygen.Account, numAccounts)
-	for i := 0; i < numAccounts; i++ {
-		eoas[i] = entitygen.GenerateEOA(rng)
-	}
-	contracts := make([]*entitygen.Account, numContracts)
-	for i := 0; i < numContracts; i++ {
-		contracts[i] = entitygen.GenerateContractRoll(rng, cfg.Distribution, codeSize, minSlots, maxSlots)
-	}
+	// know the expected balances/code/storage. Single source of truth
+	// in internal/oracle.Reproduce — same draw order across all 4
+	// per-client boot tests + the e2e suites.
+	eoas, contracts := oracle.Reproduce(oracle.ReproduceCfg{
+		Seed:         seed,
+		NumAccounts:  numAccounts,
+		NumContracts: numContracts,
+		CodeSize:     codeSize,
+		MinSlots:     minSlots,
+		MaxSlots:     maxSlots,
+		Distribution: cfg.Distribution,
+	})
 
 	// Boot upstream Besu. --genesis-state-hash-cache-enabled tells Besu to
 	// trust the stored stateRoot rather than recompute it from the small

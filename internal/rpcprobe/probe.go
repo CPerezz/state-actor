@@ -5,11 +5,14 @@
 // The exported helpers cover the read-side surface every "the node booted
 // and serves the state we wrote" oracle test needs:
 //
-//   - Call           — generic JSON-RPC call returning the raw result blob.
-//   - WaitForRPC     — polls eth_blockNumber until the endpoint responds.
-//   - EthGetBalance  — typed eth_getBalance, parsed to *big.Int.
-//   - EthGetCode     — typed eth_getCode, returned as raw []byte.
-//   - EthGetStorageAt — typed eth_getStorageAt, returned as common.Hash.
+//   - Call             — generic JSON-RPC call returning the raw result blob.
+//   - WaitForRPC       — polls eth_blockNumber until the endpoint responds.
+//   - EthGetBalance    — typed eth_getBalance, parsed to *big.Int.
+//   - EthGetCode       — typed eth_getCode, returned as raw []byte.
+//   - EthGetStorageAt  — typed eth_getStorageAt, returned as common.Hash.
+//   - EthBlockNumber   — typed eth_blockNumber, parsed to uint64.
+//   - BlockByNumber    — eth_getBlockByNumber returning Block (stateRoot, etc).
+//   - GenesisStateRoot — convenience: BlockByNumber("0x0").StateRoot.
 //
 // Caller passes a fully-qualified URL ("http://host:port") and a block tag
 // per the JSON-RPC spec ("0x0", "latest", "earliest", or a hex height).
@@ -167,4 +170,67 @@ func EthGetStorageAt(url string, addr common.Address, slot common.Hash, block st
 		return common.Hash{}, fmt.Errorf("unmarshal storage: %w (raw: %s)", err, raw)
 	}
 	return common.HexToHash(hexStr), nil
+}
+
+// EthBlockNumber calls eth_blockNumber and parses the result into uint64.
+func EthBlockNumber(url string) (uint64, error) {
+	raw, err := Call(url, "eth_blockNumber", nil)
+	if err != nil {
+		return 0, err
+	}
+	var hexStr string
+	if err := json.Unmarshal(raw, &hexStr); err != nil {
+		return 0, fmt.Errorf("unmarshal blockNumber: %w (raw: %s)", err, raw)
+	}
+	hexStr = strings.TrimPrefix(hexStr, "0x")
+	if hexStr == "" {
+		return 0, nil
+	}
+	n := new(big.Int)
+	if _, ok := n.SetString(hexStr, 16); !ok {
+		return 0, fmt.Errorf("parse hex blockNumber %q", hexStr)
+	}
+	return n.Uint64(), nil
+}
+
+// Block is the subset of eth_getBlockByNumber's reply we read for oracle
+// purposes. JSON-RPC returns many more fields; we deliberately only
+// surface what callers need so adding a new field is an explicit decision.
+type Block struct {
+	Number     string      `json:"number"`     // hex height ("0x0", "0x65")
+	Hash       common.Hash `json:"hash"`
+	StateRoot  common.Hash `json:"stateRoot"`
+	ParentHash common.Hash `json:"parentHash"`
+	Timestamp  string      `json:"timestamp"` // hex unix seconds
+}
+
+// BlockByNumber calls eth_getBlockByNumber(blockTag, false) and returns the
+// header view. blockTag is a JSON-RPC tag: "0x0", "latest", "earliest", or
+// a hex height. The fullTxObjects param is hardcoded to false — oracle
+// callers don't read tx bodies through this helper.
+func BlockByNumber(url, blockTag string) (*Block, error) {
+	raw, err := Call(url, "eth_getBlockByNumber", []any{blockTag, false})
+	if err != nil {
+		return nil, err
+	}
+	if len(bytes.TrimSpace(raw)) == 0 || string(raw) == "null" {
+		return nil, fmt.Errorf("eth_getBlockByNumber(%s): block not found", blockTag)
+	}
+	var b Block
+	if err := json.Unmarshal(raw, &b); err != nil {
+		return nil, fmt.Errorf("unmarshal block: %w (raw: %s)", err, raw)
+	}
+	return &b, nil
+}
+
+// GenesisStateRoot is a convenience wrapper around BlockByNumber("0x0").
+// The state-root for block 0 is what the cross-client invariant compares
+// across all 4 client adapters: same entitygen seed → same canonical-MPT
+// root, regardless of on-disk node layout.
+func GenesisStateRoot(url string) (common.Hash, error) {
+	b, err := BlockByNumber(url, "0x0")
+	if err != nil {
+		return common.Hash{}, err
+	}
+	return b.StateRoot, nil
 }

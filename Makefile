@@ -1,10 +1,10 @@
-.PHONY: all build test clean docker install lint fmt help \
-	image-reth test-reth-cgo test-reth-oracle test-reth-boot \
-	docker-nethermind docker-nethermind-test test-nethermind-oracle test-nethermind-boot \
-	smoke-nethermind smoke-nethermind-spamoor \
-	docker-besu docker-besu-test test-besu-oracle test-besu-boot \
-	smoke-besu smoke-besu-spamoor \
-	docker-geth smoke-geth test-geth-boot
+.PHONY: all build test clean install lint fmt help \
+	image-reth image-besu image-nethermind \
+	docker-nethermind smoke-nethermind smoke-nethermind-spamoor \
+	docker-besu smoke-besu smoke-besu-spamoor \
+	docker-geth smoke-geth \
+	test-besu-suite test-geth-suite test-nethermind-suite test-reth-suite \
+	spamoor-install
 
 # Binary name
 BINARY=state-actor
@@ -16,7 +16,6 @@ GOCMD=go
 GOBUILD=$(GOCMD) build
 GOTEST=$(GOCMD) test
 GOCLEAN=$(GOCMD) clean
-GOGET=$(GOCMD) get
 GOMOD=$(GOCMD) mod
 GOFMT=$(GOCMD) fmt
 
@@ -67,59 +66,63 @@ clean:
 	$(GOCLEAN)
 	rm -f $(BINARY)
 	rm -f coverage.out coverage.html
-	rm -rf dist/
+	rm -rf dist/ _artifacts/
 
-## docker: Build Docker image
-docker:
-	docker build -t state-actor:latest .
-	docker build -t state-actor:$(VERSION) .
+## tidy: Tidy go modules
+tidy:
+	$(GOMOD) tidy
 
-## docker-nethermind: Build the Nethermind-capable image (cgo+grocksdb+rocksdb-from-source)
-docker-nethermind:
-	docker build -f Dockerfile.nethermind -t state-actor-nethermind:latest -t state-actor-nethermind:$(VERSION) .
+## deps: Download dependencies
+deps:
+	$(GOMOD) download
 
-## docker-nethermind-test: Build the builder stage so we can run cgo_neth go tests inside it
-docker-nethermind-test:
-	docker build -f Dockerfile.nethermind --target builder -t state-actor-nethermind-builder:latest .
+# ---------------------------------------------------------------------------
+# Default knobs shared across smoke + suite targets.
+# ---------------------------------------------------------------------------
 
-## test-nethermind-oracle: Run the Tier 2 differential oracle (3 CCD-cited golden hashes)
-test-nethermind-oracle: docker-nethermind-test
-	docker run --rm --entrypoint bash state-actor-nethermind-builder:latest \
-	  -c 'cd /app && go test -tags cgo_neth -run TestDifferentialOracle -v ./client/nethermind/...'
-
-## test-nethermind-boot: Boot upstream Nethermind against a state-actor datadir and verify via JSON-RPC.
-##   Mirrors test-reth-boot: builds the cgo_neth builder image (which has
-##   librocksdb + the Go toolchain), runs the `cgo_neth oracle`-tagged
-##   boot test inside it via DinD, which then spawns
-##   nethermind/nethermind:1.37.0 against state-actor's RocksDB datadir
-##   and probes EOA balances / contract code / storage slots via
-##   internal/rpcprobe.
-NETH_BOOT_VOL ?= neth-boot-datadir
-test-nethermind-boot: docker-nethermind-test
-	docker volume rm -f $(NETH_BOOT_VOL) >/dev/null 2>&1 || true
-	docker volume create $(NETH_BOOT_VOL)
-	docker run --rm \
-	  -v $(NETH_BOOT_VOL):/oracle-data \
-	  -v /var/run/docker.sock:/var/run/docker.sock \
-	  -e NETH_ORACLE_DATADIR=/oracle-data \
-	  -e NETH_ORACLE_VOL=$(NETH_BOOT_VOL) \
-	  -e NETH_DOCKER_PLATFORM \
-	  --entrypoint bash state-actor-nethermind-builder:latest \
-	  -c 'cd /app && go test -tags '\''cgo_neth oracle'\'' ./client/nethermind/ -run TestNethermindNodeBoot -v -timeout 1800s'
-	docker volume rm -f $(NETH_BOOT_VOL) >/dev/null 2>&1 || true
-
-## smoke-nethermind: End-to-end smoke — generate a small DB, boot Nethermind 1.37.0, send 100 dev-mode txs
-##   Usage: make smoke-nethermind ACCOUNTS=1000 CONTRACTS=100
 ACCOUNTS ?= 1000
 CONTRACTS ?= 100
 SEED ?= 42
-SA_DB ?= /tmp/sa-neth-smoke
 
 # Pre-funded smoke addresses. Mirrors the three accounts that used to come
 # from testdata/genesis-funded.json (deterministic dev keys 1, 2, 3 from
-# eth_sign / spamoor); state-actor now injects them via --inject-accounts
-# instead of consuming an external --genesis JSON.
+# eth_sign / spamoor); state-actor injects them via --inject-accounts.
 SMOKE_INJECT_ADDRS ?= 0x7e5f4552091a69125d5dfcb7b8c2659029395bdf,0x2b5ad5c4795c026514f8317c7a215e218dccd6cf,0x6813eb9362372eef6200f3b1dbc3f819671cba69
+
+# Spamoor binary, resolved via $PATH. Override to a local checkout via
+# `SPAMOOR=/abs/path/spamoor make smoke-besu-spamoor` or `make spamoor-install`
+# to build the upstream binary into /usr/local/bin (CI uses the latter).
+SPAMOOR ?= spamoor
+
+# Spamoor pinned commit. CI's actions/cache key derives from this — bump
+# when picking up upstream improvements.
+SPAMOOR_COMMIT ?= main
+
+## spamoor-install: clone github.com/ethpandaops/spamoor and install to /usr/local/bin
+##   Used by CI; local devs can keep using their existing checkout.
+spamoor-install:
+	@if command -v $(SPAMOOR) >/dev/null 2>&1; then \
+		echo "spamoor already on PATH at $$($(GOCMD) env GOPATH)/bin or /usr/local/bin"; exit 0; \
+	fi
+	rm -rf /tmp/spamoor && git clone --depth=1 --branch $(SPAMOOR_COMMIT) https://github.com/ethpandaops/spamoor /tmp/spamoor
+	cd /tmp/spamoor && $(GOBUILD) -o /usr/local/bin/spamoor ./cmd/spamoor
+
+# ---------------------------------------------------------------------------
+# Nethermind targets — see Dockerfile.nethermind for RocksDB / grocksdb pairing.
+# ---------------------------------------------------------------------------
+
+## docker-nethermind: Build the runtime image (state-actor + nethermind smoke)
+docker-nethermind:
+	docker build -f Dockerfile.nethermind -t state-actor-nethermind:latest -t state-actor-nethermind:$(VERSION) .
+
+## image-nethermind: Build the builder stage so we can run cgo_neth go tests inside it.
+##   Used by test-nethermind-suite. Also reused by CI's per-job docker build.
+image-nethermind:
+	docker build -f Dockerfile.nethermind --target builder -t state-actor-nethermind-builder:latest .
+
+## smoke-nethermind: End-to-end smoke — generate a small DB, boot Nethermind, send 100 dev-mode txs
+##   Usage: make smoke-nethermind ACCOUNTS=1000 CONTRACTS=100
+SA_DB ?= /tmp/sa-neth-smoke
 smoke-nethermind: docker-nethermind
 	rm -rf $(SA_DB) && mkdir -p $(SA_DB)
 	docker run --rm \
@@ -131,12 +134,9 @@ smoke-nethermind: docker-nethermind
 	  --chain-id=1337 --inject-accounts=$(SMOKE_INJECT_ADDRS) --verbose
 	bash $(PWD)/client/nethermind/testdata/validate-big-db.sh $(SA_DB)
 
-## smoke-nethermind-spamoor: Generate a DB, boot Nethermind 1.37.0, then run
-##                           spamoor erc20_bloater for 100 blocks of real workload.
-##   Usage: make smoke-nethermind-spamoor ACCOUNTS=1000 CONTRACTS=100 [SPAMOOR=/abs/path/spamoor]
-##   Pre-req: spamoor binary on PATH (or pass SPAMOOR=/path/to/spamoor).
-##            Build: https://github.com/ethpandaops/spamoor → make
-SPAMOOR ?= spamoor
+## smoke-nethermind-spamoor: Generate a DB, boot Nethermind, then run spamoor erc20_bloater
+##   Usage: make smoke-nethermind-spamoor ACCOUNTS=1000 CONTRACTS=100
+##   Pre-req: spamoor on $PATH (override via SPAMOOR=/abs/path).
 smoke-nethermind-spamoor: docker-nethermind
 	rm -rf $(SA_DB) && mkdir -p $(SA_DB)
 	docker run --rm \
@@ -162,44 +162,19 @@ smoke-nethermind-spamoor: docker-nethermind
 	  rc=$$? ; docker stop neth-smoke-spamoor >/dev/null ; exit $$rc
 
 # ---------------------------------------------------------------------------
-# Besu targets — see Dockerfile.besu for the RocksDB / grocksdb version pairing.
+# Besu targets — see Dockerfile.besu for the RocksDB / grocksdb pairing.
 # ---------------------------------------------------------------------------
 
-## docker-besu: Build the Besu-capable image (cgo+grocksdb+rocksdb-from-source)
+## docker-besu: Build the runtime image (state-actor + besu smoke)
 docker-besu:
 	docker build -f Dockerfile.besu -t state-actor-besu:latest -t state-actor-besu:$(VERSION) .
 
-## docker-besu-test: Build the builder stage so we can run cgo_besu go tests inside it
-docker-besu-test:
+## image-besu: Build the builder stage so we can run cgo_besu go tests inside it.
+##   Used by test-besu-suite. Also reused by CI's per-job docker build.
+image-besu:
 	docker build -f Dockerfile.besu --target builder -t state-actor-besu-builder:latest .
 
-## test-besu-oracle: Run the differential oracle (Besu genesis1 + genesisNonce golden hashes)
-test-besu-oracle: docker-besu-test
-	docker run --rm --entrypoint bash state-actor-besu-builder:latest \
-	  -c 'cd /app && go test -tags cgo_besu -run TestDifferentialOracle -v ./client/besu/...'
-
-## test-besu-boot: Boot upstream Besu against a state-actor datadir and verify via JSON-RPC.
-##   Mirrors test-reth-boot: builds the cgo_besu builder image (which has
-##   librocksdb + the Go toolchain), runs the `cgo_besu oracle`-tagged
-##   boot test inside it via DinD, which then spawns
-##   hyperledger/besu:25.11.0 against state-actor's BONSAI datadir and
-##   probes EOA balances / contract code / storage slots via
-##   internal/rpcprobe.
-BESU_BOOT_VOL ?= besu-boot-datadir
-test-besu-boot: docker-besu-test
-	docker volume rm -f $(BESU_BOOT_VOL) >/dev/null 2>&1 || true
-	docker volume create $(BESU_BOOT_VOL)
-	docker run --rm \
-	  -v $(BESU_BOOT_VOL):/oracle-data \
-	  -v /var/run/docker.sock:/var/run/docker.sock \
-	  -e BESU_ORACLE_DATADIR=/oracle-data \
-	  -e BESU_ORACLE_VOL=$(BESU_BOOT_VOL) \
-	  -e BESU_DOCKER_PLATFORM \
-	  --entrypoint bash state-actor-besu-builder:latest \
-	  -c 'cd /app && go test -tags '\''cgo_besu oracle'\'' ./client/besu/ -run TestBesuNodeBoot -v -timeout 1800s'
-	docker volume rm -f $(BESU_BOOT_VOL) >/dev/null 2>&1 || true
-
-## smoke-besu: End-to-end smoke — generate a small DB, boot hyperledger/besu:25.11.0, send 100 dev-mode txs
+## smoke-besu: End-to-end smoke — generate a small DB, boot hyperledger/besu, send 100 dev-mode txs
 ##   Usage: make smoke-besu ACCOUNTS=1000 CONTRACTS=100
 SA_BESU_DB ?= /tmp/sa-besu-smoke
 smoke-besu: docker-besu
@@ -213,11 +188,10 @@ smoke-besu: docker-besu
 	  --chain-id=1337 --inject-accounts=$(SMOKE_INJECT_ADDRS) --verbose
 	bash $(PWD)/client/besu/testdata/validate-big-db-besu.sh $(SA_BESU_DB)
 
-## smoke-besu-spamoor: Generate a DB, boot hyperledger/besu:25.11.0, then run
-##                     spamoor erc20_bloater until BLOCKS blocks have been mined.
+## smoke-besu-spamoor: Generate a DB, boot hyperledger/besu, then run spamoor erc20_bloater
+##                     until BLOCKS blocks have been mined.
 ##   Usage: make smoke-besu-spamoor ACCOUNTS=1000 CONTRACTS=100 BLOCKS=200
-##   Pre-req: SPAMOOR=/path/to/spamoor (default /Users/random_anon/dev/spamoor/bin/spamoor)
-SPAMOOR ?= /Users/random_anon/dev/spamoor/bin/spamoor
+##   Pre-req: spamoor on $PATH (override via SPAMOOR=/abs/path).
 BLOCKS ?= 200
 smoke-besu-spamoor: docker-besu
 	rm -rf $(SA_BESU_DB) && mkdir -p $(SA_BESU_DB)
@@ -253,17 +227,8 @@ smoke-besu-spamoor: docker-besu
 	BLOCKS=$(BLOCKS) SPAMOOR=$(SPAMOOR) bash $(PWD)/client/besu/testdata/spamoor-blocks-besu.sh ; \
 	  rc=$$? ; docker stop besu-smoke-spamoor >/dev/null ; exit $$rc
 
-## tidy: Tidy go modules
-tidy:
-	$(GOMOD) tidy
-
-## deps: Download dependencies
-deps:
-	$(GOMOD) download
-
 # ---------------------------------------------------------------------------
-# Geth targets — pure-Go state-actor build + upstream ethereum/client-go
-# image for the bootcheck. Mirrors the docker-{nethermind,besu} pattern.
+# Geth targets — pure-Go state-actor build + upstream ethereum/client-go.
 # ---------------------------------------------------------------------------
 
 ## docker-geth: Build the Geth-capable image (state-actor only; no cgo)
@@ -271,9 +236,9 @@ docker-geth:
 	docker build -f Dockerfile.geth -t state-actor-geth:latest -t state-actor-geth:$(VERSION) .
 
 ## smoke-geth: End-to-end smoke for the geth direct-Pebble MPT path.
-##   Builds the state-actor-geth image, generates a small DB at
-##   $(SA_DB_GETH), then boots upstream ethereum/client-go against the
-##   same datadir and runs RPC-based boot-readability checks.
+##   Builds the state-actor-geth image, generates a small DB at $(SA_DB_GETH),
+##   then boots upstream ethereum/client-go against the same datadir and runs
+##   RPC-based boot-readability checks.
 ##   Usage: make smoke-geth ACCOUNTS=1000 CONTRACTS=100 SEED=42
 SA_DB_GETH ?= /tmp/sa-geth-smoke
 GETH_SMOKE_ACCOUNTS ?= 1000
@@ -281,12 +246,6 @@ GETH_SMOKE_CONTRACTS ?= 100
 GETH_SMOKE_SEED ?= 42
 smoke-geth: docker-geth
 	rm -rf $(SA_DB_GETH) && mkdir -p $(SA_DB_GETH)/geth/chaindata
-	# --fork=shanghai because state-actor's BuildSynthetic doesn't yet
-	# emit a BlobSchedule, which modern geth requires once Cancun or
-	# Prague are active in the chain config. Stop short at shanghai
-	# until the blobSchedule wiring lands; the smoke's purpose is
-	# boot-readability of the geth-MPT writer's on-disk format, not
-	# post-Cancun protocol coverage.
 	docker run --rm \
 	  -v $(SA_DB_GETH):/datadir \
 	  state-actor-geth:latest \
@@ -299,30 +258,94 @@ smoke-geth: docker-geth
 	@expected_root=$$(grep -E '^State Root:' $(SA_DB_GETH)/smoke.log | awk '{print $$NF}'); \
 	bash $(PWD)/client/geth/testdata/validate-big-db-geth.sh $(SA_DB_GETH) "$$expected_root"
 
-## test-geth-boot: Boot upstream geth against a state-actor datadir and verify via JSON-RPC.
-##   Mirrors test-reth-boot. Requires the Docker daemon on the host (no DinD)
-##   and pulls $(GETH_IMAGE) (default ethereum/client-go:v1.17.2). The test
-##   itself launches the geth container with -p <freeport>:8545 and probes
-##   eth_getBalance / eth_getCode / eth_getStorageAt via internal/rpcprobe.
-##   Override the image via GETH_IMAGE=ethereum/client-go:vX.Y.Z.
-test-geth-boot:
-	$(GOTEST) -tags oracle -run TestGethNodeBoot -v -timeout 300s ./client/geth/...
+# ---------------------------------------------------------------------------
+# Reth / cgo image — builder-stage only (no separate runtime image today).
+# ---------------------------------------------------------------------------
 
-## example: Run example generation
-example:
-	./$(BINARY) \
-		--db /tmp/example-chaindata \
-		--chain-id 1337 \
-		--inject-accounts $(SMOKE_INJECT_ADDRS) \
-		--accounts 1000 \
-		--contracts 500 \
-		--max-slots 100 \
-		--seed 42 \
-		--verbose \
-		--benchmark
-	@echo ""
-	@echo "Example database created at /tmp/example-chaindata"
-	@du -sh /tmp/example-chaindata
+## image-reth: Build the cgo+libmdbx Docker image for direct-write reth
+##   Used by test-reth-suite. Also reused by CI's per-job docker build.
+image-reth:
+	docker build -f Dockerfile.reth --target builder -t state-actor-reth .
+
+# ---------------------------------------------------------------------------
+# Per-client end-to-end suite tests.
+#
+# Each `test-{client}-suite` runs the full pipeline for one client back to
+# back inside its builder image: db-gen → writer-check → boot → genesis
+# state-root capture → oracle re-query → spamoor (~100 blocks at low gas) →
+# post-spamoor RPC re-query. Fail-fast within the suite.
+#
+# CI uses these as the per-PR gate (one job per client + one cross-client
+# aggregator that compares genesis state-roots).
+#
+# RESULT_DIR controls where each suite's JSON output lands (genesis state-
+# root + post-spamoor block + sanity flags); CI uploads the artifact for
+# the cross-client aggregator to download.
+# ---------------------------------------------------------------------------
+
+RESULT_DIR ?= $(PWD)/_artifacts
+
+## test-besu-suite: Run the besu end-to-end suite (db-gen → boot → spamoor → re-query)
+BESU_SUITE_VOL ?= besu-suite-datadir
+test-besu-suite: image-besu
+	mkdir -p $(RESULT_DIR)
+	docker volume rm -f $(BESU_SUITE_VOL) >/dev/null 2>&1 || true
+	docker volume create $(BESU_SUITE_VOL)
+	docker run --rm \
+	  -v $(BESU_SUITE_VOL):/oracle-data \
+	  -v $(RESULT_DIR):/result \
+	  -v /var/run/docker.sock:/var/run/docker.sock \
+	  -e BESU_ORACLE_DATADIR=/oracle-data \
+	  -e BESU_ORACLE_VOL=$(BESU_SUITE_VOL) \
+	  -e BESU_DOCKER_PLATFORM \
+	  -e RESULT_PATH=/result/besu-result.json \
+	  -e SPAMOOR=$(SPAMOOR) \
+	  --entrypoint bash state-actor-besu-builder:latest \
+	  -c 'cd /app && go test -tags '\''cgo_besu oracle spamoor'\'' ./client/besu/ -run TestE2ESuite -v -timeout 1800s'
+	docker volume rm -f $(BESU_SUITE_VOL) >/dev/null 2>&1 || true
+
+## test-nethermind-suite: Run the nethermind end-to-end suite
+NETH_SUITE_VOL ?= neth-suite-datadir
+test-nethermind-suite: image-nethermind
+	mkdir -p $(RESULT_DIR)
+	docker volume rm -f $(NETH_SUITE_VOL) >/dev/null 2>&1 || true
+	docker volume create $(NETH_SUITE_VOL)
+	docker run --rm \
+	  -v $(NETH_SUITE_VOL):/oracle-data \
+	  -v $(RESULT_DIR):/result \
+	  -v /var/run/docker.sock:/var/run/docker.sock \
+	  -e NETH_ORACLE_DATADIR=/oracle-data \
+	  -e NETH_ORACLE_VOL=$(NETH_SUITE_VOL) \
+	  -e NETH_DOCKER_PLATFORM \
+	  -e RESULT_PATH=/result/nethermind-result.json \
+	  -e SPAMOOR=$(SPAMOOR) \
+	  --entrypoint bash state-actor-nethermind-builder:latest \
+	  -c 'cd /app && go test -tags '\''cgo_neth oracle spamoor'\'' ./client/nethermind/ -run TestE2ESuite -v -timeout 1800s'
+	docker volume rm -f $(NETH_SUITE_VOL) >/dev/null 2>&1 || true
+
+## test-reth-suite: Run the reth end-to-end suite
+RETH_SUITE_VOL ?= reth-suite-datadir
+test-reth-suite: image-reth
+	mkdir -p $(RESULT_DIR)
+	docker volume rm -f $(RETH_SUITE_VOL) >/dev/null 2>&1 || true
+	docker volume create $(RETH_SUITE_VOL)
+	docker run --rm \
+	  -v $(RETH_SUITE_VOL):/oracle-data \
+	  -v $(RESULT_DIR):/result \
+	  -v /var/run/docker.sock:/var/run/docker.sock \
+	  -e RETH_ORACLE_DATADIR=/oracle-data \
+	  -e RETH_ORACLE_VOL=$(RETH_SUITE_VOL) \
+	  -e RETH_DOCKER_PLATFORM \
+	  -e RESULT_PATH=/result/reth-result.json \
+	  -e SPAMOOR=$(SPAMOOR) \
+	  state-actor-reth go test -tags 'cgo_reth oracle spamoor' ./client/reth/ -run TestE2ESuite -v -timeout 1800s
+	docker volume rm -f $(RETH_SUITE_VOL) >/dev/null 2>&1 || true
+
+## test-geth-suite: Run the geth end-to-end suite (pure Go, no Docker build)
+test-geth-suite:
+	mkdir -p $(RESULT_DIR)
+	RESULT_PATH=$(RESULT_DIR)/geth-result.json SPAMOOR=$(SPAMOOR) \
+	  $(GOTEST) -tags 'oracle spamoor' -run TestE2ESuite -v -timeout 1800s ./client/geth/...
 
 ## help: Show this help
 help:
@@ -332,51 +355,3 @@ help:
 	@echo ""
 	@echo "Targets:"
 	@grep -E '^## ' $(MAKEFILE_LIST) | sed 's/## /  /'
-
-# ---------------------------------------------------------------------------
-# Reth / cgo targets
-# ---------------------------------------------------------------------------
-
-## image-reth: Build the cgo+libmdbx Docker image for direct-write reth
-image-reth:
-	docker build -f Dockerfile.reth --target builder -t state-actor-reth .
-
-## test-reth-cgo: Run cgo_reth-tagged unit tests inside the Docker image
-# Use this when local dev does not have libmdbx + librocksdb headers installed.
-test-reth-cgo: image-reth
-	docker run --rm state-actor-reth go test -tags cgo_reth ./client/reth/...
-
-## test-reth-oracle: Run the differential oracle test (boots paradigmxyz/reth db stats)
-# Requires Docker daemon. Gated by build tags `cgo_reth oracle`.
-# Uses a named Docker volume so both containers (state-actor-reth and
-# paradigmxyz/reth) share the same filesystem namespace via the Docker daemon.
-ORACLE_VOL ?= reth-oracle-datadir
-test-reth-oracle: image-reth
-	docker volume rm -f $(ORACLE_VOL) >/dev/null 2>&1 || true
-	docker volume create $(ORACLE_VOL)
-	docker run --rm \
-	  -v $(ORACLE_VOL):/oracle-data \
-	  -v /var/run/docker.sock:/var/run/docker.sock \
-	  -e RETH_ORACLE_DATADIR=/oracle-data \
-	  -e RETH_ORACLE_VOL=$(ORACLE_VOL) \
-	  -e RETH_DOCKER_PLATFORM \
-	  state-actor-reth go test -tags 'cgo_reth oracle' ./client/reth/ -run TestRethDbStats -v -timeout 900s
-	docker volume rm -f $(ORACLE_VOL) >/dev/null 2>&1 || true
-
-## test-reth-boot: Boot reth node --dev against a state-actor datadir and verify via JSON-RPC
-# Slice E deliverable: proves the full direct-write pipeline produces a reth-compatible datadir.
-# Requires Docker daemon. Gated by build tags `cgo_reth oracle`.
-# Uses a named Docker volume so the test container and the reth container share the same
-# filesystem namespace via the Docker daemon socket.
-BOOT_VOL ?= reth-boot-datadir
-test-reth-boot: image-reth
-	docker volume rm -f $(BOOT_VOL) >/dev/null 2>&1 || true
-	docker volume create $(BOOT_VOL)
-	docker run --rm \
-	  -v $(BOOT_VOL):/oracle-data \
-	  -v /var/run/docker.sock:/var/run/docker.sock \
-	  -e RETH_ORACLE_DATADIR=/oracle-data \
-	  -e RETH_ORACLE_VOL=$(BOOT_VOL) \
-	  -e RETH_DOCKER_PLATFORM \
-	  state-actor-reth go test -tags 'cgo_reth oracle' ./client/reth/ -run TestRethNodeBoot -v -timeout 1800s
-	docker volume rm -f $(BOOT_VOL) >/dev/null 2>&1 || true
