@@ -15,9 +15,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
+
 	stategenesis "github.com/nerolation/state-actor/genesis"
 	"github.com/nerolation/state-actor/generator"
-	"github.com/nerolation/state-actor/internal/entitygen"
+	"github.com/nerolation/state-actor/internal/oracle"
 	"github.com/nerolation/state-actor/internal/rpcprobe"
 )
 
@@ -125,20 +127,26 @@ func acquireOracleDatadir(t *testing.T) (oracleDatadir, func()) {
 	}, func() {}
 }
 
-// nethermindBootConfigTemplate is the minimal Nethermind config for booting
-// in passive read-only mode against a state-actor datadir. Mirrors
-// client/nethermind/testdata/configs/sa-dev-v2.json but inlined here so the
-// test is self-contained — written into the datadir at runtime with the
-// chainspec / DB paths plugged in, so DinD mode (where the test container
-// places state-actor data at /data/<testName>/) and direct mode (/data)
-// both resolve correctly.
+// nethermindE2EConfigTemplate is the Nethermind config for the e2e suite
+// (boot + spamoor mining). Mirrors client/nethermind/testdata/configs/
+// sa-dev-v2.json but inlined here so the test is self-contained — written
+// into the datadir at runtime with the chainspec / DB paths plugged in,
+// so DinD mode (where the test container places state-actor data at
+// /data/<testName>/) and direct mode (/data) both resolve correctly.
+//
+// Two differences from the smoke template:
+//   - Mining.Enabled = true and EnableUnsecuredDevWallet = true so
+//     spamoor's --privkey deployer can submit txs and advance the chain.
+//   - JsonRpc.EnabledModules includes Eth/Net/Web3 only — the e2e oracle
+//     queries are read-only.
 //
 // Two %s placeholders, in order:
 //   1. ChainSpecPath  — full path to state-actor's parity-chainspec.json
 //   2. BaseDbPath     — full path to the per-test datadir
-const nethermindBootConfigTemplate = `{
+const nethermindE2EConfigTemplate = `{
   "Init": {
-    "EnableUnsecuredDevWallet": false,
+    "EnableUnsecuredDevWallet": true,
+    "KeepDevWalletInMemory": true,
     "DiscoveryEnabled": false,
     "PeerManagerEnabled": false,
     "ChainSpecPath": "%s",
@@ -148,6 +156,10 @@ const nethermindBootConfigTemplate = `{
   "Sync": {
     "NetworkingEnabled": false,
     "SynchronizationEnabled": false
+  },
+  "TxPool": {
+    "Size": 128,
+    "BlobsSupport": "Disabled"
   },
   "Network": {
     "ActivePeersMaxCount": 0
@@ -161,18 +173,24 @@ const nethermindBootConfigTemplate = `{
   },
   "Metrics": {"Enabled": false},
   "Merge": {"Enabled": false},
-  "Mining": {"Enabled": false}
+  "Mining": {"Enabled": true}
 }`
 
-// TestNethermindNodeBoot generates a small state-actor datadir (10 EOAs +
-// 3 contracts) via Run, boots upstream nethermind/nethermind against it,
-// and probes via JSON-RPC to confirm balances / code / storage.
-//
-// Build-tagged `cgo_neth && oracle`. Run via `make test-nethermind-boot`;
-// not included in plain `go test`.
-func TestNethermindNodeBoot(t *testing.T) {
+// spamoorSenderAddr / spamoorSenderPrivKey are the conventional dev key 1
+// (privkey = 0x000…001 → addr = 0x7e5f4552…). state-actor pre-funds it
+// via cfg.InjectAddresses; spamoor uses the privkey as deployer.
+var (
+	spamoorSenderAddr    = common.HexToAddress("0x7e5f4552091a69125d5dfcb7b8c2659029395bdf")
+	spamoorSenderPrivKey = "0x0000000000000000000000000000000000000000000000000000000000000001"
+)
+
+// TestE2ESuite — see client/besu/e2e_test.go for the full phase
+// description. nethermind-specific bits: --fork=merge ceiling, embedded
+// boot.cfg template (Mining.Enabled=true so spamoor can advance the
+// chain). Build-tagged `cgo_neth && oracle`. Run via `make test-nethermind-suite`.
+func TestE2ESuite(t *testing.T) {
 	if testing.Short() {
-		t.Skip("oracle boot test skipped in short mode")
+		t.Skip("e2e suite skipped in short mode")
 	}
 
 	const (
@@ -196,24 +214,25 @@ func TestNethermindNodeBoot(t *testing.T) {
 	defer cleanup()
 
 	cfg := generator.Config{
-		DBPath:       dd.hostPath,
-		NumAccounts:  numAccounts,
-		NumContracts: numContracts,
-		CodeSize:     codeSize,
-		MinSlots:     minSlots,
-		MaxSlots:     maxSlots,
-		Seed:         seed,
-		BatchSize:    1000,
-		Workers:      1,
-		TrieMode:     generator.TrieModeMPT,
-		Genesis:      g,
+		DBPath:          dd.hostPath,
+		NumAccounts:     numAccounts,
+		NumContracts:    numContracts,
+		CodeSize:        codeSize,
+		MinSlots:        minSlots,
+		MaxSlots:        maxSlots,
+		Seed:            seed,
+		BatchSize:       1000,
+		Workers:         1,
+		TrieMode:        generator.TrieModeMPT,
+		Genesis:         g,
+		InjectAddresses: []common.Address{spamoorSenderAddr},
 	}
 
 	if _, err := Run(context.Background(), cfg, Options{}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
-	// Write the minimal nethermind config into the datadir, with paths
+	// Write the e2e nethermind config into the datadir, with paths
 	// resolved against the *container-side* layout (dd.containerDatadir),
 	// not the host-side path. In DinD mode they differ — the test
 	// container's filesystem and the spawned nethermind container's
@@ -222,21 +241,22 @@ func TestNethermindNodeBoot(t *testing.T) {
 	cfgPath := filepath.Join(dd.hostPath, "boot.cfg")
 	chainSpecPath := dd.containerDatadir + "/" + ChainSpecFileName
 	baseDbPath := dd.containerDatadir
-	cfgContent := fmt.Sprintf(nethermindBootConfigTemplate, chainSpecPath, baseDbPath)
+	cfgContent := fmt.Sprintf(nethermindE2EConfigTemplate, chainSpecPath, baseDbPath)
 	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0o644); err != nil {
 		t.Fatalf("write boot.cfg: %v", err)
 	}
 
 	// Reproduce the RNG sequence state-actor's neth Phase 1 used.
-	rng := mrand.New(mrand.NewSource(seed))
-	eoas := make([]*entitygen.Account, numAccounts)
-	for i := 0; i < numAccounts; i++ {
-		eoas[i] = entitygen.GenerateEOA(rng)
-	}
-	contracts := make([]*entitygen.Account, numContracts)
-	for i := 0; i < numContracts; i++ {
-		contracts[i] = entitygen.GenerateContractRoll(rng, cfg.Distribution, codeSize, minSlots, maxSlots)
-	}
+	// Single source of truth in internal/oracle.Reproduce.
+	eoas, contracts := oracle.Reproduce(oracle.ReproduceCfg{
+		Seed:         seed,
+		NumAccounts:  numAccounts,
+		NumContracts: numContracts,
+		CodeSize:     codeSize,
+		MinSlots:     minSlots,
+		MaxSlots:     maxSlots,
+		Distribution: cfg.Distribution,
+	})
 
 	imageRef := nethImageRef()
 	containerName := "state-actor-neth-boot-" + randSuffix(8)
@@ -275,42 +295,112 @@ func TestNethermindNodeBoot(t *testing.T) {
 		t.Fatalf("RPC never came up (logs captured in t.Cleanup):\nerr: %v", err)
 	}
 
-	// ---- EOA assertions ----
-	for _, eoa := range eoas {
-		got, err := rpcprobe.EthGetBalance(rpcURL, eoa.Address, "latest")
-		if err != nil {
-			t.Errorf("eth_getBalance %s: %v", eoa.Address.Hex(), err)
-			continue
+	// ---- Phase 3: capture genesis state-root → $RESULT_PATH ----
+	genesisRoot, err := rpcprobe.GenesisStateRoot(rpcURL)
+	if err != nil {
+		t.Fatalf("GenesisStateRoot: %v", err)
+	}
+	t.Logf("genesis stateRoot: %s", genesisRoot.Hex())
+	result := oracle.SuiteResult{
+		ClientName:       "nethermind",
+		GenesisStateRoot: genesisRoot,
+	}
+	if err := oracle.WriteResult(result); err != nil {
+		t.Fatalf("WriteResult (pre-spamoor): %v", err)
+	}
+
+	// ---- Phase 4: oracle re-query at "0x0" ----
+	checkEntities := func(blockTag string) (passed bool) {
+		passed = true
+		for _, eoa := range eoas {
+			got, err := rpcprobe.EthGetBalance(rpcURL, eoa.Address, blockTag)
+			if err != nil {
+				t.Errorf("[%s] eth_getBalance %s: %v", blockTag, eoa.Address.Hex(), err)
+				passed = false
+				continue
+			}
+			want := eoa.StateAccount.Balance.ToBig()
+			if got.Cmp(want) != 0 {
+				t.Errorf("[%s] eth_getBalance %s: got %s want %s",
+					blockTag, eoa.Address.Hex(), got.String(), want.String())
+				passed = false
+			}
 		}
-		want := eoa.StateAccount.Balance.ToBig()
-		if got.Cmp(want) != 0 {
-			t.Errorf("eth_getBalance %s: got %s want %s",
-				eoa.Address.Hex(), got.String(), want.String())
+		for _, c := range contracts {
+			gotCode, err := rpcprobe.EthGetCode(rpcURL, c.Address, blockTag)
+			if err != nil {
+				t.Errorf("[%s] eth_getCode %s: %v", blockTag, c.Address.Hex(), err)
+				passed = false
+			} else if !bytes.Equal(gotCode, c.Code) {
+				t.Errorf("[%s] eth_getCode %s: len got=%d want=%d (first 32 bytes: got=%x want=%x)",
+					blockTag, c.Address.Hex(), len(gotCode), len(c.Code),
+					safePrefix(gotCode, 32), safePrefix(c.Code, 32))
+				passed = false
+			}
+			for _, slot := range c.Storage {
+				got, err := rpcprobe.EthGetStorageAt(rpcURL, c.Address, slot.Key, blockTag)
+				if err != nil {
+					t.Errorf("[%s] eth_getStorageAt %s slot %s: %v",
+						blockTag, c.Address.Hex(), slot.Key.Hex(), err)
+					passed = false
+					continue
+				}
+				if got != slot.Value {
+					t.Errorf("[%s] eth_getStorageAt %s slot %s: got %s want %s",
+						blockTag, c.Address.Hex(), slot.Key.Hex(), got.Hex(), slot.Value.Hex())
+					passed = false
+				}
+			}
+		}
+		return passed
+	}
+	if !checkEntities("0x0") {
+		t.Fatalf("genesis-state oracle re-query failed; aborting before spamoor phase")
+	}
+
+	// ---- Phase 5: spamoor for ~100 blocks ----
+	spamoorBin := os.Getenv("SPAMOOR")
+	if spamoorBin == "" {
+		spamoorBin = "spamoor"
+	}
+	if _, err := exec.LookPath(spamoorBin); err != nil {
+		t.Skipf("spamoor binary not found (set $SPAMOOR or `make spamoor-install`): %v", err)
+	}
+	postBlock, err := oracle.SpamoorRun(oracle.SpamoorRunCfg{
+		Binary:           spamoorBin,
+		RPCURL:           rpcURL,
+		PrivKey:          spamoorSenderPrivKey,
+		Seed:             12345,
+		TargetBlockDelta: 100,
+		SlotDuration:     250 * time.Millisecond, // matches smoke-nethermind-spamoor pacing
+		WalletCount:      5,
+		TargetGasRatio:   0.1,
+		Timeout:          5 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("SpamoorRun: %v", err)
+	}
+	t.Logf("post-spamoor tip: block %d", postBlock)
+	result.PostSpamoorBlock = postBlock
+
+	// ---- Phase 6: post-spamoor RPC re-query at "latest" ----
+	if checkEntities("latest") {
+		result.PostSpamoorEntityCheck = "ok"
+	} else {
+		result.PostSpamoorEntityCheck = "entitygen entities drifted post-spamoor"
+	}
+	deployerNonce, err := rpcprobe.EthGetTransactionCount(rpcURL, spamoorSenderAddr, "latest")
+	if err != nil {
+		t.Errorf("eth_getTransactionCount %s: %v", spamoorSenderAddr.Hex(), err)
+	} else {
+		result.PostSpamoorDeployerNonce = deployerNonce
+		if deployerNonce == 0 {
+			t.Errorf("post-spamoor deployer nonce is 0 — spamoor didn't send any txs?")
 		}
 	}
 
-	// ---- contract assertions ----
-	for _, c := range contracts {
-		gotCode, err := rpcprobe.EthGetCode(rpcURL, c.Address, "latest")
-		if err != nil {
-			t.Errorf("eth_getCode %s: %v", c.Address.Hex(), err)
-		} else if !bytes.Equal(gotCode, c.Code) {
-			t.Errorf("eth_getCode %s: len got=%d want=%d (first 32 bytes: got=%x want=%x)",
-				c.Address.Hex(), len(gotCode), len(c.Code),
-				safePrefix(gotCode, 32), safePrefix(c.Code, 32))
-		}
-
-		for _, slot := range c.Storage {
-			got, err := rpcprobe.EthGetStorageAt(rpcURL, c.Address, slot.Key, "latest")
-			if err != nil {
-				t.Errorf("eth_getStorageAt %s slot %s: %v",
-					c.Address.Hex(), slot.Key.Hex(), err)
-				continue
-			}
-			if got != slot.Value {
-				t.Errorf("eth_getStorageAt %s slot %s: got %s want %s",
-					c.Address.Hex(), slot.Key.Hex(), got.Hex(), slot.Value.Hex())
-			}
-		}
+	// ---- Phase 7: write final result JSON ----
+	if err := oracle.WriteResult(result); err != nil {
+		t.Fatalf("WriteResult (post-spamoor): %v", err)
 	}
 }

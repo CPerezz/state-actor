@@ -153,3 +153,76 @@ func TestEthGetStorageAt(t *testing.T) {
 		t.Errorf("got %s, want %s", got.Hex(), want.Hex())
 	}
 }
+
+func TestEthBlockNumber(t *testing.T) {
+	srv := fakeRPCServer(t, map[string]any{"eth_blockNumber": "0x65"}) // 101
+	defer srv.Close()
+	got, err := EthBlockNumber(srv.URL)
+	if err != nil {
+		t.Fatalf("EthBlockNumber: %v", err)
+	}
+	if got != 101 {
+		t.Errorf("got %d, want 101", got)
+	}
+}
+
+func TestBlockByNumber(t *testing.T) {
+	root := "0xddbfa7c1941ff70fe5a692f7552149adc1ae29ebb2b5dc8bb3544c1368bcb0c3"
+	srv := fakeRPCServer(t, map[string]any{
+		"eth_getBlockByNumber": map[string]any{
+			"number":     "0x0",
+			"hash":       "0x1111111111111111111111111111111111111111111111111111111111111111",
+			"stateRoot":  root,
+			"parentHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+			"timestamp":  "0x0",
+		},
+	})
+	defer srv.Close()
+	b, err := BlockByNumber(srv.URL, "0x0")
+	if err != nil {
+		t.Fatalf("BlockByNumber: %v", err)
+	}
+	if b.StateRoot.Hex() != root {
+		t.Errorf("StateRoot got %s, want %s", b.StateRoot.Hex(), root)
+	}
+	if b.Number != "0x0" {
+		t.Errorf("Number got %s, want 0x0", b.Number)
+	}
+}
+
+func TestBlockByNumber_NotFound(t *testing.T) {
+	// Server returns null result (block beyond tip).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(Response{
+			JSONRPC: "2.0",
+			ID:      1,
+			Result:  json.RawMessage("null"),
+		})
+	}))
+	defer srv.Close()
+	_, err := BlockByNumber(srv.URL, "0x999")
+	if err == nil {
+		t.Fatal("expected not-found error")
+	}
+	if !strings.Contains(err.Error(), "block not found") {
+		t.Errorf("expected 'block not found', got %v", err)
+	}
+}
+
+func TestGenesisStateRoot(t *testing.T) {
+	root := "0xddbfa7c1941ff70fe5a692f7552149adc1ae29ebb2b5dc8bb3544c1368bcb0c3"
+	srv := fakeRPCServer(t, map[string]any{
+		"eth_getBlockByNumber": map[string]any{
+			"number":    "0x0",
+			"stateRoot": root,
+		},
+	})
+	defer srv.Close()
+	got, err := GenesisStateRoot(srv.URL)
+	if err != nil {
+		t.Fatalf("GenesisStateRoot: %v", err)
+	}
+	if got.Hex() != root {
+		t.Errorf("got %s, want %s", got.Hex(), root)
+	}
+}

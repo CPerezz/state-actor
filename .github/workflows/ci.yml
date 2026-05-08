@@ -1,63 +1,64 @@
-# CI — Tier 1: per-PR regression gate.
+# CI — per-client end-to-end suites + cross-client genesis-root aggregator.
 #
-# Five jobs run in parallel on every PR + push:
+# Five client-jobs in parallel + one tiny aggregator that downloads each
+# job's result JSON and asserts the canonical-MPT cross-client invariant:
 #
-#   default       — go vet/build/test under the default tag set. Catches the
-#                   compile + non-cgo regression class (the kind that broke
-#                   main in nerolation/state-actor#39).
-#   reth-cgo      — cgo_reth-tagged unit tests including the canonical
-#                   state-root pin in client/reth/golden_test.go.
-#   besu-oracle   — Differential oracle pinned to Besu's GenesisStateTest.java
-#                   fixture hashes — byte-level encoding gate.
-#   neth-oracle   — Differential oracle pinned to Nethermind's
-#                   GenesisBuilderTests.cs Parity chainspec hashes.
-#   reth-oracle   — `reth db stats` against state-actor's MDBX layout —
-#                   schema-drift gate. Mounts the host docker socket (DinD)
-#                   so the test can spawn the pinned upstream reth container.
+#   default                       — go vet/build/test under the default
+#                                   tag set. Catches compile + non-cgo
+#                                   regressions early.
+#   besu-suite, nethermind-suite,
+#   reth-suite                    — per-client end-to-end suite. Each
+#                                   runs db-gen → boot → genesis-root
+#                                   capture → oracle re-query → spamoor
+#                                   (~100 blocks) → post-spamoor RPC
+#                                   re-query, with GHA-natural fail-fast
+#                                   between phases. Uploads
+#                                   {client}-result.json artifact.
+#   geth-suite                    — same shape, but Phase 5-7 (spamoor +
+#                                   post-spamoor) is skipped: state-actor
+#                                   produces a post-merge geth chain,
+#                                   block production needs a CL or
+#                                   pre-merge PoW. Tracked as follow-up.
+#   cross-client-genesis-root     — needs all 4 *-suite jobs. Downloads
+#                                   the artifact from each, asserts every
+#                                   genesis_state_root is identical.
+#                                   30-second job; ~free.
 #
-# Real-node boot tests (test-geth-boot, smoke-geth, test-reth-boot) live
-# behind a Tier 2 follow-up workflow, gated to schedule + opt-in PR label.
+# This replaces the previous 9-job layout (default + reth-cgo + 3 oracles
+# + 4-client boot matrix). Each per-client suite now runs back-to-back in
+# one cgo image build instead of forking the same build across 2-3 jobs.
 #
-# ---
-#
-# Why we don't `make test-<X>-oracle` directly: each oracle Makefile target
-# depends on a `docker-<X>-test` prereq that unconditionally re-runs
-# `docker build`. The docker/build-push-action above already populates the
-# GHA buildx cache and loads the image into the local daemon, but Make's
-# `docker build` doesn't know about the GHA cache backend — so it would
-# re-build RocksDB from scratch (~15 min, almost the entire 30-min job
+# Why we don't `make test-<X>-suite` directly inside the cgo jobs: each
+# Make target depends on `image-<X>` which unconditionally re-runs
+# `docker build`. The docker/build-push-action above already populates
+# the GHA buildx cache and loads the image into the local daemon, but
+# Make's `docker build` doesn't know about the GHA cache backend — so it
+# would re-build RocksDB from scratch (~15 min, almost the entire job
 # timeout). Inlining the `docker run` step skips Make's prereq and uses
-# the just-loaded image directly. Local dev still uses `make` normally;
-# the workflow is the only place this duplication matters.
+# the just-loaded image directly. Local dev still uses `make` normally.
 
 name: CI
 
 on:
   pull_request:
-    # The Tier-2 boot matrix (besu, geth, nethermind, reth) only fires
-    # when a PR carries the `full-ci` label. Tier-1 jobs run on every PR.
-    types: [opened, synchronize, reopened, labeled, unlabeled]
   push:
-    # No branch filter: triggers on every push.
-    #
-    # Default protection (`branches: [main]`) created a bootstrap problem
-    # for the original CI PR — a fork-to-upstream PR uses the upstream's
-    # main copy of the workflow, but main hadn't seen the workflow yet
-    # (it was the PR adding it). Widening the trigger let the feature
-    # branch validate itself on the contributor's fork before merge.
-    #
-    # Post-merge, the side effect is that maintainer pushes to any branch
-    # of the upstream repo also trigger CI — desirable, since maintainers
-    # mostly push via PRs and direct pushes are usually intentional.
-  schedule:
-    # Nightly run @ 06:00 UTC for the Tier-2 boot tests so regressions in
-    # "datadir is bootable + serves correct state" surface within a day.
-    - cron: '0 6 * * *'
+    # No branch filter — triggers on every push. Default `branches: [main]`
+    # creates a bootstrap problem for the CI workflow itself; widening
+    # this is intentional. Maintainer pushes mostly go through PRs.
 
 # One run per branch — supersede stale runs when a PR gets new pushes.
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
+
+env:
+  # Pinned spamoor commit (NOT a branch — ethpandaops/spamoor's default
+  # branch is `master`, not `main`, so bare branch names are fragile).
+  # Bump when picking up upstream improvements. The `actions/cache@v4`
+  # key derives from this; a bump invalidates cache and rebuilds
+  # (~2 min). Each suite job installs spamoor via the same key, so
+  # warm cache shares across jobs.
+  SPAMOOR_REF: dc60b6025f6dcea738d9095c11f8ca87c325f93b
 
 jobs:
   default:
@@ -74,156 +75,46 @@ jobs:
       - run: go build ./...
       - run: go test -count=1 -timeout=10m ./...
 
-  reth-cgo:
-    name: reth · cgo writer + golden hash
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      # Build (and cache) state-actor-reth's builder stage. RocksDB 10.10.1
-      # source-build dominates runtime — ~15 min cold, <30s warm. Cache
-      # scope is shared with reth-oracle below so they don't fight for the
-      # same layer.
-      - uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: Dockerfile.reth
-          target: builder
-          tags: state-actor-reth:latest
-          load: true
-          cache-from: type=gha,scope=reth-builder
-          cache-to: type=gha,scope=reth-builder,mode=max
-      # Inlined from `make test-reth-cgo` minus its image-reth Make prereq
-      # (which would re-build RocksDB; see file-level note above).
-      - run: docker run --rm state-actor-reth go test -tags cgo_reth -timeout 10m ./client/reth/...
-
-  besu-oracle:
-    name: besu · differential oracle
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: Dockerfile.besu
-          target: builder
-          tags: state-actor-besu-builder:latest
-          load: true
-          cache-from: type=gha,scope=besu-builder
-          cache-to: type=gha,scope=besu-builder,mode=max
-      # Inlined from `make test-besu-oracle` minus its docker-besu-test
-      # Make prereq.
-      - run: |
-          docker run --rm --entrypoint bash state-actor-besu-builder:latest \
-            -c 'cd /app && go test -tags cgo_besu -run TestDifferentialOracle -v -timeout 10m ./client/besu/...'
-
-  neth-oracle:
-    name: nethermind · differential oracle
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: Dockerfile.nethermind
-          target: builder
-          tags: state-actor-nethermind-builder:latest
-          load: true
-          cache-from: type=gha,scope=neth-builder
-          cache-to: type=gha,scope=neth-builder,mode=max
-      # Inlined from `make test-nethermind-oracle` minus its
-      # docker-nethermind-test Make prereq.
-      - run: |
-          docker run --rm --entrypoint bash state-actor-nethermind-builder:latest \
-            -c 'cd /app && go test -tags cgo_neth -run TestDifferentialOracle -v -timeout 10m ./client/nethermind/...'
-
-  reth-oracle:
-    name: reth · db stats oracle (DinD)
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      # Same builder-stage build + cache as reth-cgo (shared scope). Test
-      # then mounts /var/run/docker.sock and spawns the pinned upstream
-      # reth container (ghcr.io/cperezz/reth — amd64-only; OK on
-      # ubuntu-latest, blocked on arm64 per nerolation/state-actor#45).
-      - uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: Dockerfile.reth
-          target: builder
-          tags: state-actor-reth:latest
-          load: true
-          cache-from: type=gha,scope=reth-builder
-          cache-to: type=gha,scope=reth-builder,mode=max
-      # Inlined from `make test-reth-oracle` minus its image-reth Make
-      # prereq. Volume cleanup before + after; --rm on the test container.
-      - run: |
-          ORACLE_VOL=reth-oracle-datadir
-          docker volume rm -f "$ORACLE_VOL" >/dev/null 2>&1 || true
-          docker volume create "$ORACLE_VOL"
-          docker run --rm \
-            -v "$ORACLE_VOL":/oracle-data \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            -e RETH_ORACLE_DATADIR=/oracle-data \
-            -e RETH_ORACLE_VOL="$ORACLE_VOL" \
-            state-actor-reth go test -tags 'cgo_reth oracle' ./client/reth/ -run TestRethDbStats -v -timeout 15m
-          docker volume rm -f "$ORACLE_VOL" >/dev/null 2>&1 || true
-
   # ---------------------------------------------------------------------------
-  # Tier 2 — Real-node boot tests.
+  # Per-client end-to-end suites.
   #
-  # Boot a real client binary against a state-actor-produced datadir and
-  # probe via JSON-RPC. This is the regression class that nerolation/
-  # state-actor#42 was — Tier-1 oracle tests caught snapshot-side
-  # encoding bugs but missed "datadir compiles, state RPCs return
-  # historical state … is not available".
-  #
-  # Gated to `schedule:` (nightly) + opt-in `full-ci` PR label only.
-  # Per-job cold runtime is in the 10-30 min range, too long to justify
-  # on every PR; the label gives risky-looking PRs an opt-in run.
+  # Each job:
+  #  1. Builds the client's builder-stage Docker image (where applicable —
+  #     geth is pure Go) with a per-client GHA cache scope.
+  #  2. Installs spamoor via cache+build (cache-key includes SPAMOOR_REF).
+  #  3. Runs the e2e Go test inside the builder image (or natively for
+  #     geth) with $RESULT_PATH pointing at /result/{client}-result.json
+  #     so the test writes its SuiteResult artifact.
+  #  4. Uploads {client}-result.json for the cross-client-genesis-root
+  #     aggregator to download.
   # ---------------------------------------------------------------------------
 
-  # Matrix: one job per client, all 4 boot tests run in parallel. Failures
-  # are independent (`fail-fast: false`) so e.g. a flaky reth doesn't mask
-  # a real besu regression. Each job builds its client's cgo builder image
-  # (where applicable — geth is pure Go) with a per-client GHA cache scope.
-  boot:
-    name: ${{ matrix.client }} · real-node boot oracle
+  besu-suite:
+    name: besu · e2e suite (boot + spamoor + re-query)
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'full-ci'))
     timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        client: [besu, geth, nethermind, reth]
     steps:
       - uses: actions/checkout@v4
-
-      # geth path is pure Go — uses `actions/setup-go` and runs the test
-      # directly on the runner. The test itself spawns
-      # ethereum/client-go:v1.17.2 via `docker run`.
-      - if: matrix.client == 'geth'
-        uses: actions/setup-go@v5
+      - uses: docker/setup-buildx-action@v3
+      - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
 
-      # Non-geth paths need cgo (librocksdb / libmdbx). We build the
-      # client's `builder`-stage Docker image (which has the toolchain +
-      # cgo deps + state-actor source compiled with the right tag), then
-      # run the boot test inside that image via DinD.
-      - if: matrix.client != 'geth'
-        uses: docker/setup-buildx-action@v3
+      # Spamoor binary — cached across runs by upstream commit ref. The
+      # binary lives in /usr/local/bin so the e2e test inside the builder
+      # image can find it on PATH (the bind mount below shares it in).
+      - name: Cache spamoor binary
+        id: spamoor-cache
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/bin/spamoor
+          key: spamoor-${{ env.SPAMOOR_REF }}-${{ runner.os }}
+      - name: Build spamoor (cache miss)
+        if: steps.spamoor-cache.outputs.cache-hit != 'true'
+        run: make spamoor-install SPAMOOR_COMMIT=${{ env.SPAMOOR_REF }}
 
-      - if: matrix.client == 'besu'
-        uses: docker/build-push-action@v5
+      - uses: docker/build-push-action@v5
         with:
           context: .
           file: Dockerfile.besu
@@ -233,8 +124,55 @@ jobs:
           cache-from: type=gha,scope=besu-builder
           cache-to: type=gha,scope=besu-builder,mode=max
 
-      - if: matrix.client == 'nethermind'
-        uses: docker/build-push-action@v5
+      - name: Run e2e suite
+        run: |
+          mkdir -p _artifacts
+          SUITE_VOL=besu-suite-datadir
+          docker volume rm -f "$SUITE_VOL" >/dev/null 2>&1 || true
+          docker volume create "$SUITE_VOL"
+          docker run --rm \
+            -v "$SUITE_VOL":/oracle-data \
+            -v "$PWD/_artifacts":/result \
+            -v /usr/local/bin/spamoor:/usr/local/bin/spamoor:ro \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -e BESU_ORACLE_DATADIR=/oracle-data \
+            -e BESU_ORACLE_VOL="$SUITE_VOL" \
+            -e RESULT_PATH=/result/besu-result.json \
+            -e SPAMOOR=/usr/local/bin/spamoor \
+            --entrypoint bash state-actor-besu-builder:latest \
+            -c 'cd /app && go test -tags '"'"'cgo_besu oracle'"'"' ./client/besu/ -run TestE2ESuite -v -timeout 30m'
+          docker volume rm -f "$SUITE_VOL" >/dev/null 2>&1 || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: besu-result
+          path: _artifacts/besu-result.json
+          if-no-files-found: warn
+
+  nethermind-suite:
+    name: nethermind · e2e suite (boot + spamoor + re-query)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Cache spamoor binary
+        id: spamoor-cache
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/bin/spamoor
+          key: spamoor-${{ env.SPAMOOR_REF }}-${{ runner.os }}
+      - name: Build spamoor (cache miss)
+        if: steps.spamoor-cache.outputs.cache-hit != 'true'
+        run: make spamoor-install SPAMOOR_COMMIT=${{ env.SPAMOOR_REF }}
+
+      - uses: docker/build-push-action@v5
         with:
           context: .
           file: Dockerfile.nethermind
@@ -244,8 +182,55 @@ jobs:
           cache-from: type=gha,scope=neth-builder
           cache-to: type=gha,scope=neth-builder,mode=max
 
-      - if: matrix.client == 'reth'
-        uses: docker/build-push-action@v5
+      - name: Run e2e suite
+        run: |
+          mkdir -p _artifacts
+          SUITE_VOL=neth-suite-datadir
+          docker volume rm -f "$SUITE_VOL" >/dev/null 2>&1 || true
+          docker volume create "$SUITE_VOL"
+          docker run --rm \
+            -v "$SUITE_VOL":/oracle-data \
+            -v "$PWD/_artifacts":/result \
+            -v /usr/local/bin/spamoor:/usr/local/bin/spamoor:ro \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -e NETH_ORACLE_DATADIR=/oracle-data \
+            -e NETH_ORACLE_VOL="$SUITE_VOL" \
+            -e RESULT_PATH=/result/nethermind-result.json \
+            -e SPAMOOR=/usr/local/bin/spamoor \
+            --entrypoint bash state-actor-nethermind-builder:latest \
+            -c 'cd /app && go test -tags '"'"'cgo_neth oracle'"'"' ./client/nethermind/ -run TestE2ESuite -v -timeout 30m'
+          docker volume rm -f "$SUITE_VOL" >/dev/null 2>&1 || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nethermind-result
+          path: _artifacts/nethermind-result.json
+          if-no-files-found: warn
+
+  reth-suite:
+    name: reth · e2e suite (boot + spamoor + re-query)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Cache spamoor binary
+        id: spamoor-cache
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/bin/spamoor
+          key: spamoor-${{ env.SPAMOOR_REF }}-${{ runner.os }}
+      - name: Build spamoor (cache miss)
+        if: steps.spamoor-cache.outputs.cache-hit != 'true'
+        run: make spamoor-install SPAMOOR_COMMIT=${{ env.SPAMOOR_REF }}
+
+      - uses: docker/build-push-action@v5
         with:
           context: .
           file: Dockerfile.reth
@@ -255,49 +240,109 @@ jobs:
           cache-from: type=gha,scope=reth-builder
           cache-to: type=gha,scope=reth-builder,mode=max
 
-      # Per-client test invocation. Inlined from each Make target's body
-      # (minus the docker-build prereq that would force a redundant
-      # RocksDB rebuild on cgo paths — same fix as Tier-1's job inlining).
-      - if: matrix.client == 'geth'
-        run: make test-geth-boot
-
-      - if: matrix.client == 'besu'
+      - name: Run e2e suite
         run: |
-          BOOT_VOL=besu-boot-datadir
-          docker volume rm -f "$BOOT_VOL" >/dev/null 2>&1 || true
-          docker volume create "$BOOT_VOL"
+          mkdir -p _artifacts
+          SUITE_VOL=reth-suite-datadir
+          docker volume rm -f "$SUITE_VOL" >/dev/null 2>&1 || true
+          docker volume create "$SUITE_VOL"
           docker run --rm \
-            -v "$BOOT_VOL":/oracle-data \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            -e BESU_ORACLE_DATADIR=/oracle-data \
-            -e BESU_ORACLE_VOL="$BOOT_VOL" \
-            --entrypoint bash state-actor-besu-builder:latest \
-            -c 'cd /app && go test -tags '"'"'cgo_besu oracle'"'"' ./client/besu/ -run TestBesuNodeBoot -v -timeout 30m'
-          docker volume rm -f "$BOOT_VOL" >/dev/null 2>&1 || true
-
-      - if: matrix.client == 'nethermind'
-        run: |
-          BOOT_VOL=neth-boot-datadir
-          docker volume rm -f "$BOOT_VOL" >/dev/null 2>&1 || true
-          docker volume create "$BOOT_VOL"
-          docker run --rm \
-            -v "$BOOT_VOL":/oracle-data \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            -e NETH_ORACLE_DATADIR=/oracle-data \
-            -e NETH_ORACLE_VOL="$BOOT_VOL" \
-            --entrypoint bash state-actor-nethermind-builder:latest \
-            -c 'cd /app && go test -tags '"'"'cgo_neth oracle'"'"' ./client/nethermind/ -run TestNethermindNodeBoot -v -timeout 30m'
-          docker volume rm -f "$BOOT_VOL" >/dev/null 2>&1 || true
-
-      - if: matrix.client == 'reth'
-        run: |
-          BOOT_VOL=reth-boot-datadir
-          docker volume rm -f "$BOOT_VOL" >/dev/null 2>&1 || true
-          docker volume create "$BOOT_VOL"
-          docker run --rm \
-            -v "$BOOT_VOL":/oracle-data \
+            -v "$SUITE_VOL":/oracle-data \
+            -v "$PWD/_artifacts":/result \
+            -v /usr/local/bin/spamoor:/usr/local/bin/spamoor:ro \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -e RETH_ORACLE_DATADIR=/oracle-data \
-            -e RETH_ORACLE_VOL="$BOOT_VOL" \
-            state-actor-reth go test -tags 'cgo_reth oracle' ./client/reth/ -run TestRethNodeBoot -v -timeout 30m
-          docker volume rm -f "$BOOT_VOL" >/dev/null 2>&1 || true
+            -e RETH_ORACLE_VOL="$SUITE_VOL" \
+            -e RESULT_PATH=/result/reth-result.json \
+            -e SPAMOOR=/usr/local/bin/spamoor \
+            state-actor-reth go test -tags 'cgo_reth oracle' ./client/reth/ -run TestE2ESuite -v -timeout 30m
+          docker volume rm -f "$SUITE_VOL" >/dev/null 2>&1 || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reth-result
+          path: _artifacts/reth-result.json
+          if-no-files-found: warn
+
+  geth-suite:
+    name: geth · e2e suite (boot + re-query, no spamoor)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # geth doesn't run spamoor (Phase 5-7 skipped — see TestE2ESuite
+      # docstring), so we don't install/cache it here.
+
+      - name: Run e2e suite
+        run: |
+          mkdir -p _artifacts
+          RESULT_PATH=$PWD/_artifacts/geth-result.json \
+            go test -tags oracle -run TestE2ESuite -v -timeout 20m ./client/geth/...
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: geth-result
+          path: _artifacts/geth-result.json
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # Cross-client genesis state-root invariant.
+  #
+  # Same `--seed` → identical state across MPT clients. entitygen owns the
+  # canonical RNG sequence; per-client writers consume it in the same draw
+  # order; same accounts → same MPT root. This job downloads each suite's
+  # SuiteResult JSON, extracts genesis_state_root, asserts all are equal.
+  # 30-second job, no Docker work.
+  # ---------------------------------------------------------------------------
+  cross-client-genesis-root:
+    name: cross-client · genesis state-root invariant
+    runs-on: ubuntu-latest
+    needs: [besu-suite, geth-suite, nethermind-suite, reth-suite]
+    if: always() && !cancelled()
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: _artifacts
+          merge-multiple: true
+      - name: Compare genesis state-roots across all 4 clients
+        run: |
+          set -euo pipefail
+          cd _artifacts
+          ls -l
+          # All 4 clients must have uploaded a result. Otherwise the
+          # invariant check is meaningless — e.g. if 3 of 4 suites fail
+          # before Phase 3, only 1 result lands here and the "all unique
+          # roots == 1" check would trivially pass with 1 entry.
+          want=(besu geth nethermind reth)
+          missing=()
+          for c in "${want[@]}"; do
+            if [ ! -f "$c-result.json" ]; then
+              missing+=("$c")
+            fi
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "FAIL: missing result.json from clients: ${missing[*]}"
+            echo "  (each *-suite job must reach Phase 3 to upload its result)"
+            exit 1
+          fi
+          # Extract every {client, genesis_state_root}.
+          for c in "${want[@]}"; do
+            root=$(jq -r .genesis_state_root "$c-result.json")
+            echo "  $c → $root"
+          done
+          uniq_roots=$(jq -s '[.[].genesis_state_root] | unique' *-result.json)
+          n=$(echo "$uniq_roots" | jq 'length')
+          if [ "$n" -ne 1 ]; then
+            echo "FAIL: clients reported $n distinct genesis state-roots:"
+            echo "$uniq_roots" | jq .
+            exit 1
+          fi
+          echo "PASS: all 4 clients agree on genesis state-root: $(echo "$uniq_roots" | jq -r '.[0]')"

@@ -14,8 +14,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
+
 	"github.com/nerolation/state-actor/generator"
-	"github.com/nerolation/state-actor/internal/entitygen"
+	"github.com/nerolation/state-actor/internal/oracle"
 	iReth "github.com/nerolation/state-actor/internal/reth"
 	"github.com/nerolation/state-actor/internal/rpcprobe"
 )
@@ -313,52 +315,56 @@ func TestRethNodeBootEmptyAlloc(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// TestRethNodeBoot — Slice E deliverable
+// TestE2ESuite — per-PR end-to-end gate
 // ---------------------------------------------------------------------------
 
-// TestRethNodeBoot generates a small state-actor datadir (10 EOAs + 3 contracts),
-// boots a stock paradigmxyz/reth node --dev container against it, then probes
-// via JSON-RPC to confirm:
-//   - eth_getBalance matches every EOA's generated balance
-//   - eth_getCode matches every contract's bytecode
-//   - eth_getStorageAt matches every contract's storage slots
+// spamoorSenderAddr / spamoorSenderPrivKey — conventional dev key 1
+// (privkey = 0x000…001 → addr = 0x7e5f4552…). state-actor pre-funds via
+// cfg.InjectAddresses; spamoor uses the privkey as deployer.
+var (
+	spamoorSenderAddr    = common.HexToAddress("0x7e5f4552091a69125d5dfcb7b8c2659029395bdf")
+	spamoorSenderPrivKey = "0x0000000000000000000000000000000000000000000000000000000000000001"
+)
+
+// TestE2ESuite — see client/besu/e2e_test.go for the full phase
+// description. reth-specific bits:
+//   - DinD via the `oracle` build tag.
+//   - Pinned image: paradigmxyz/reth:nightly (post-#23919, supports
+//     --debug.skip-genesis-validation; was the CPerezz/reth fork before
+//     that PR landed upstream).
+//   - --dev mode auto-mines on tx, so spamoor can advance the chain
+//     without an external CL.
 //
-// The test reproduces the exact RNG sequence used inside RunCgo (same seed,
-// same generation order) so it knows the expected values without any API
-// change to RunCgo.
-//
-// Wall-time budget: up to 120 s for reth to start (--dev mode is fast).
-// Gated by both `cgo_reth` AND `oracle` build tags. Run via
-// `make test-reth-boot` — not included in plain `go test`.
-func TestRethNodeBoot(t *testing.T) {
+// Wall-time budget: up to 120s for reth to start; spamoor adds ~1-2 min.
+// Build-tagged `cgo_reth && oracle`. Run via `make test-reth-suite`.
+func TestE2ESuite(t *testing.T) {
 	if testing.Short() {
-		t.Skip("oracle boot test skipped in short mode")
+		t.Skip("e2e suite skipped in short mode")
 	}
 
 	const (
-		seed        = int64(42)
-		numAccounts = 10
+		seed         = int64(42)
+		numAccounts  = 10
 		numContracts = 3
-		codeSize    = 256
-		minSlots    = 2
-		maxSlots    = 2
+		codeSize     = 256
+		minSlots     = 2
+		maxSlots     = 2
 	)
 
-	// Acquire oracle datadir (honours RETH_ORACLE_DATADIR / RETH_ORACLE_VOL).
 	dd, cleanup := acquireOracleDatadir(t)
 	defer cleanup()
 
 	cfg := generator.Config{
-		DBPath:       dd.hostPath,
-		NumAccounts:  numAccounts,
-		NumContracts: numContracts,
-		CodeSize:     codeSize,
-		MinSlots:     minSlots,
-		MaxSlots:     maxSlots,
-		Seed:         seed,
+		DBPath:          dd.hostPath,
+		NumAccounts:     numAccounts,
+		NumContracts:    numContracts,
+		CodeSize:        codeSize,
+		MinSlots:        minSlots,
+		MaxSlots:        maxSlots,
+		Seed:            seed,
+		InjectAddresses: []common.Address{spamoorSenderAddr},
 	}
 
-	// Populate the datadir.
 	if _, err := RunCgo(context.Background(), cfg, Options{}); err != nil {
 		t.Fatalf("RunCgo: %v", err)
 	}
@@ -372,15 +378,17 @@ func TestRethNodeBoot(t *testing.T) {
 	// contract address it derived was wrong, and every contract probe
 	// would silently return zero. The geth boot test surfaced this by
 	// asserting eth_getCode and eth_getStorageAt; nerolation/state-actor#42.
-	rng := mrand.New(mrand.NewSource(seed))
-	eoas := make([]*entitygen.Account, numAccounts)
-	for i := 0; i < numAccounts; i++ {
-		eoas[i] = entitygen.GenerateEOA(rng)
-	}
-	contracts := make([]*entitygen.Account, numContracts)
-	for i := 0; i < numContracts; i++ {
-		contracts[i] = entitygen.GenerateContractRoll(rng, cfg.Distribution, codeSize, minSlots, maxSlots)
-	}
+	// Single source of truth in internal/oracle.Reproduce — same draw
+	// order across all 4 per-client boot tests + e2e suites.
+	eoas, contracts := oracle.Reproduce(oracle.ReproduceCfg{
+		Seed:         seed,
+		NumAccounts:  numAccounts,
+		NumContracts: numContracts,
+		CodeSize:     codeSize,
+		MinSlots:     minSlots,
+		MaxSlots:     maxSlots,
+		Distribution: cfg.Distribution,
+	})
 
 	// Boot reth node --dev.
 	imageRef := rethImageRef()
@@ -447,46 +455,113 @@ func TestRethNodeBoot(t *testing.T) {
 		t.Fatalf("RPC never came up (logs captured in t.Cleanup):\nerr: %v", err)
 	}
 
-	// ---- EOA assertions ----
-	for _, eoa := range eoas {
-		gotBal, err := rpcprobe.EthGetBalance(rpcURL, eoa.Address, "0x0")
-		if err != nil {
-			t.Errorf("eth_getBalance %s: %v", eoa.Address.Hex(), err)
-			continue
+	// ---- Phase 3: capture genesis state-root → $RESULT_PATH ----
+	genesisRoot, err := rpcprobe.GenesisStateRoot(rpcURL)
+	if err != nil {
+		t.Fatalf("GenesisStateRoot: %v", err)
+	}
+	t.Logf("genesis stateRoot: %s", genesisRoot.Hex())
+	result := oracle.SuiteResult{
+		ClientName:       "reth",
+		GenesisStateRoot: genesisRoot,
+	}
+	if err := oracle.WriteResult(result); err != nil {
+		t.Fatalf("WriteResult (pre-spamoor): %v", err)
+	}
+
+	// ---- Phase 4: oracle re-query at "0x0" ----
+	checkEntities := func(blockTag string) (passed bool) {
+		passed = true
+		for _, eoa := range eoas {
+			got, err := rpcprobe.EthGetBalance(rpcURL, eoa.Address, blockTag)
+			if err != nil {
+				t.Errorf("[%s] eth_getBalance %s: %v", blockTag, eoa.Address.Hex(), err)
+				passed = false
+				continue
+			}
+			want := eoa.StateAccount.Balance.ToBig()
+			if got.Cmp(want) != 0 {
+				t.Errorf("[%s] eth_getBalance %s: got %s want %s",
+					blockTag, eoa.Address.Hex(), got.String(), want.String())
+				passed = false
+			}
 		}
-		wantBal := eoa.StateAccount.Balance.ToBig()
-		if gotBal.Cmp(wantBal) != 0 {
-			t.Errorf("eth_getBalance %s: got %s want %s",
-				eoa.Address.Hex(), gotBal.String(), wantBal.String())
+		for _, c := range contracts {
+			gotCode, err := rpcprobe.EthGetCode(rpcURL, c.Address, blockTag)
+			if err != nil {
+				t.Errorf("[%s] eth_getCode %s: %v", blockTag, c.Address.Hex(), err)
+				passed = false
+			} else if !bytes.Equal(gotCode, c.Code) {
+				t.Errorf("[%s] eth_getCode %s: len got=%d want=%d (first 32 bytes: got=%x want=%x)",
+					blockTag, c.Address.Hex(), len(gotCode), len(c.Code),
+					safePrefix(gotCode, 32), safePrefix(c.Code, 32))
+				passed = false
+			}
+			for _, slot := range c.Storage {
+				got, err := rpcprobe.EthGetStorageAt(rpcURL, c.Address, slot.Key, blockTag)
+				if err != nil {
+					t.Errorf("[%s] eth_getStorageAt %s slot %s: %v",
+						blockTag, c.Address.Hex(), slot.Key.Hex(), err)
+					passed = false
+					continue
+				}
+				if got != slot.Value {
+					t.Errorf("[%s] eth_getStorageAt %s slot %s: got %s want %s",
+						blockTag, c.Address.Hex(), slot.Key.Hex(), got.Hex(), slot.Value.Hex())
+					passed = false
+				}
+			}
+		}
+		return passed
+	}
+	if !checkEntities("0x0") {
+		t.Fatalf("genesis-state oracle re-query failed; aborting before spamoor phase")
+	}
+
+	// ---- Phase 5: spamoor for ~100 blocks ----
+	spamoorBin := os.Getenv("SPAMOOR")
+	if spamoorBin == "" {
+		spamoorBin = "spamoor"
+	}
+	if _, err := exec.LookPath(spamoorBin); err != nil {
+		t.Skipf("spamoor binary not found (set $SPAMOOR or `make spamoor-install`): %v", err)
+	}
+	postBlock, err := oracle.SpamoorRun(oracle.SpamoorRunCfg{
+		Binary:           spamoorBin,
+		RPCURL:           rpcURL,
+		PrivKey:          spamoorSenderPrivKey,
+		Seed:             12345,
+		TargetBlockDelta: 100,
+		SlotDuration:     time.Second,
+		WalletCount:      5,
+		TargetGasRatio:   0.1,
+		Timeout:          5 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("SpamoorRun: %v", err)
+	}
+	t.Logf("post-spamoor tip: block %d", postBlock)
+	result.PostSpamoorBlock = postBlock
+
+	// ---- Phase 6: post-spamoor RPC re-query at "latest" ----
+	if checkEntities("latest") {
+		result.PostSpamoorEntityCheck = "ok"
+	} else {
+		result.PostSpamoorEntityCheck = "entitygen entities drifted post-spamoor"
+	}
+	deployerNonce, err := rpcprobe.EthGetTransactionCount(rpcURL, spamoorSenderAddr, "latest")
+	if err != nil {
+		t.Errorf("eth_getTransactionCount %s: %v", spamoorSenderAddr.Hex(), err)
+	} else {
+		result.PostSpamoorDeployerNonce = deployerNonce
+		if deployerNonce == 0 {
+			t.Errorf("post-spamoor deployer nonce is 0 — spamoor didn't send any txs?")
 		}
 	}
 
-	// ---- contract assertions ----
-	for _, c := range contracts {
-		// eth_getCode — reth returns the ORIGINAL bytecode (not the analyzed
-		// form), so compare against c.Code directly.
-		gotCode, err := rpcprobe.EthGetCode(rpcURL, c.Address, "0x0")
-		if err != nil {
-			t.Errorf("eth_getCode %s: %v", c.Address.Hex(), err)
-		} else if !bytes.Equal(gotCode, c.Code) {
-			t.Errorf("eth_getCode %s: len got=%d want=%d (first 32 bytes: got=%x want=%x)",
-				c.Address.Hex(), len(gotCode), len(c.Code),
-				safePrefix(gotCode, 32), safePrefix(c.Code, 32))
-		}
-
-		// eth_getStorageAt — one call per slot.
-		for _, slot := range c.Storage {
-			gotVal, err := rpcprobe.EthGetStorageAt(rpcURL, c.Address, slot.Key, "0x0")
-			if err != nil {
-				t.Errorf("eth_getStorageAt %s slot %s: %v",
-					c.Address.Hex(), slot.Key.Hex(), err)
-				continue
-			}
-			if gotVal != slot.Value {
-				t.Errorf("eth_getStorageAt %s slot %s: got %s want %s",
-					c.Address.Hex(), slot.Key.Hex(), gotVal.Hex(), slot.Value.Hex())
-			}
-		}
+	// ---- Phase 7: write final result JSON ----
+	if err := oracle.WriteResult(result); err != nil {
+		t.Fatalf("WriteResult (post-spamoor): %v", err)
 	}
 }
 
