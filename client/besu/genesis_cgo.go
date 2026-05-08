@@ -76,21 +76,14 @@ func (b *besuDB) writeGenesisBlock(header *types.Header, totalDifficulty *big.In
 	return nil
 }
 
-// supportedForkChainConfig returns nil if the chain config targets a fork
-// through Shanghai. Cancun+ configs (cancunTime / pragueTime > 0) are
-// rejected with a clear error so users don't get a silent "wrong genesis
-// hash" boot failure. Cancun+ support is a possible future addition that
-// requires plumbing ParentBeaconRoot/ExcessBlobGas/BlobGasUsed/RequestsHash
-// through buildGenesisHeader.
+// supportedForkChainConfig was previously a Shanghai-ceiling gate; post-
+// Pre-C-v2 the besu writer goes through internal/genesisheader.Build
+// which handles every fork up through Osaka. Function kept as a nil-
+// input sanity check so callers still get a clear error if they pass
+// an empty Genesis (would otherwise nil-deref later).
 func supportedForkChainConfig(g *genesis.Genesis) error {
 	if g == nil || g.Config == nil {
-		return nil
-	}
-	if g.Config.CancunTime != nil {
-		return fmt.Errorf("besu v1 supports through Shanghai; Cancun config (cancunTime=%d) requires v2 follow-up", *g.Config.CancunTime)
-	}
-	if g.Config.PragueTime != nil {
-		return fmt.Errorf("besu v1 supports through Shanghai; Prague config (pragueTime=%d) requires v2 follow-up", *g.Config.PragueTime)
+		return fmt.Errorf("besu: genesis chain config required")
 	}
 	return nil
 }

@@ -179,27 +179,6 @@ func writeGenesisBlockToDBs(dbs *nethDBs, header *types.Header) (common.Hash, er
 	return headerHash, nil
 }
 
-// buildEmptyAllocGenesisHeader constructs a minimal Nethermind-compatible
-// genesis header for the empty-alloc case. ChainID and gasLimit come
-// from the caller (state-actor's genesis JSON or hardcoded defaults);
-// the empty trie/receipts/uncle hashes use go-ethereum's standard
-// constants — Nethermind reads identical RLP for the same inputs.
-func buildEmptyAllocGenesisHeader(chainID int64, gasLimit uint64, extraData []byte, timestamp uint64) *types.Header {
-	_ = chainID // header doesn't carry chainID directly; surfaces via the chainspec on boot
-	return &types.Header{
-		ParentHash:  common.Hash{},
-		UncleHash:   types.EmptyUncleHash,
-		Coinbase:    common.Address{},
-		Root:        common.Hash(neth.EmptyTreeHash), // empty state trie
-		TxHash:      types.EmptyTxsHash,
-		ReceiptHash: types.EmptyReceiptsHash,
-		Difficulty:  big.NewInt(0), // post-merge / dev mode
-		Number:      big.NewInt(0),
-		GasLimit:    gasLimit,
-		GasUsed:     0,
-		Time:        timestamp,
-		Extra:       extraData,
-		MixDigest:   common.Hash{},
-		Nonce:       types.BlockNonce{},
-	}
-}
+// Header construction now flows through internal/genesisheader.Build —
+// same path as besu/reth/(geth via go-ethereum's native genesis builder).
+// The previous hand-rolled buildEmptyAllocGenesisHeader is gone.

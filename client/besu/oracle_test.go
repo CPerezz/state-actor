@@ -16,6 +16,7 @@ import (
 
 	"github.com/nerolation/state-actor/genesis"
 	"github.com/nerolation/state-actor/internal/besu/keys"
+	"github.com/nerolation/state-actor/internal/genesisheader"
 	"github.com/nerolation/state-actor/internal/testhex"
 )
 
@@ -93,7 +94,7 @@ func testDifferentialOracleGenesisNonce(t *testing.T) {
 		t.Fatalf("writeGenesisAllocAccounts: %v", err)
 	}
 
-	header := buildGenesisHeader(g, rootHash)
+	header := genesisheader.Build(g, 0, common.Hash{}, rootHash)
 	if got := header.Hash().Hex(); got != wantBlockHash {
 		t.Fatalf("genesisNonce blockHash mismatch:\n  got:  %s\n  want: %s\n  (computed stateRoot: %s)",
 			got, wantBlockHash, rootHash.Hex())
@@ -157,9 +158,18 @@ func loadFixtureAllocs(t *testing.T, path string) map[common.Address]genesis.Gen
 	return out
 }
 
-// loadFixtureGenesis loads both the alloc and a minimal besuGenesis from a
-// Besu fixture JSON (for header construction in genesisNonce test).
-func loadFixtureGenesis(t *testing.T, path string) (*besuGenesis, map[common.Address]genesis.GenesisAccount) {
+// loadFixtureGenesis loads both the alloc and a minimal *genesis.Genesis
+// from a Besu fixture JSON (for header construction in genesisNonce
+// test). Post-Pre-C-v2, header construction goes through
+// internal/genesisheader.Build which takes *genesis.Genesis directly.
+//
+// Fixtures are pre-Shanghai (London-era), so the chain config we
+// synthesize stays minimal: g.Config is left nil, which means
+// genesisheader.Build skips every IsX check and produces a London-shape
+// header with whatever BaseFee the fixture had (if any). That matches
+// what besu's GenesisState.buildHeader would produce for the same
+// fixture — load-bearing for the differential oracle's pinned hashes.
+func loadFixtureGenesis(t *testing.T, path string) (*genesis.Genesis, map[common.Address]genesis.GenesisAccount) {
 	t.Helper()
 	allocs := loadFixtureAllocs(t, path)
 
@@ -186,21 +196,20 @@ func loadFixtureGenesis(t *testing.T, path string) (*besuGenesis, map[common.Add
 		t.Fatalf("unmarshal header: %v", err)
 	}
 
-	g := &besuGenesis{}
-	g.coinbase = common.HexToAddress(h.Coinbase)
-	g.difficulty = testhex.Big(t, "difficulty", h.Difficulty)
+	g := &genesis.Genesis{}
+	g.Coinbase = common.HexToAddress(h.Coinbase)
+	g.Difficulty = (*hexutil.Big)(testhex.Big(t, "difficulty", h.Difficulty))
 	if h.ExtraData != "" && h.ExtraData != "0x" {
 		ed, err := hexutil.Decode(h.ExtraData)
 		if err != nil {
 			t.Fatalf("parse extraData: %v", err)
 		}
-		g.extraData = ed
+		g.ExtraData = hexutil.Bytes(ed)
 	}
-	g.gasLimit = testhex.Uint64(t, "gasLimit", h.GasLimit)
-	g.mixHash = common.HexToHash(h.MixHash)
-	g.nonce = testhex.Uint64(t, "nonce", h.Nonce)
-	g.timestamp = testhex.Uint64(t, "timestamp", h.Timestamp)
-	g.parentHash = common.Hash{}
+	g.GasLimit = hexutil.Uint64(testhex.Uint64(t, "gasLimit", h.GasLimit))
+	g.Mixhash = common.HexToHash(h.MixHash)
+	g.Nonce = hexutil.Uint64(testhex.Uint64(t, "nonce", h.Nonce))
+	g.Timestamp = hexutil.Uint64(testhex.Uint64(t, "timestamp", h.Timestamp))
 
 	return g, allocs
 }

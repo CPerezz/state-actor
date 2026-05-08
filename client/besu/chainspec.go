@@ -16,26 +16,27 @@ import (
 const ChainSpecFileName = "besu-chainspec.json"
 
 // writeChainSpec renders a Besu-bootable chainspec JSON to <dbPath>/<file>
-// from the in-memory cfg.Genesis. Embeds chainID end-to-end so --chain-id
-// is no longer warn-and-ignored at boot (closes the B7 loop).
+// from the in-memory cfg.Genesis.
 //
-// Field shape mirrors the working testdata/genesis-funded.json template:
-//   - config: chainId + londonBlock=0 + contractSizeLimit + ethash.fixeddifficulty
-//     (the ethash.fixeddifficulty stanza enables dev-mode mining with
-//      Besu's `--miner-enabled` flag without an external CL).
-//   - header: gasLimit / timestamp / extraData / difficulty / coinbase /
-//     mixHash / nonce / baseFeePerGas (when London active).
-//   - alloc: always {} — state-actor writes the state directly to RocksDB
-//     and the smoke scripts pass `--genesis-state-hash-cache-enabled` so
-//     Besu trusts the DB-resident state instead of recomputing from alloc.
-//
-// CRITICAL: every field written here must match what
-// genesis_cgo.buildGenesisHeader encodes into the DB. Besu's cached path
+// Fork-activation fields (`shanghaiTime`/`cancunTime`/`pragueTime`/
+// `osakaTime`/`terminalTotalDifficulty`/`blobSchedule`) are emitted
+// conditionally based on g.Config — same activation set the writer
+// passes to internal/genesisheader.Build. Both sides MUST stay in
+// sync: besu's cached-genesis path
 // (BesuControllerBuilder.getGenesisState → GenesisState.fromStorage)
-// rebuilds the genesis header from chainspec + cached stateRoot, then
-// compares its hash against VARIABLES["chainHeadHash"]. Any field
-// divergence produces "Supplied genesis block does not match chain data
-// stored" at boot.
+// rebuilds the genesis header from chainspec + cached stateRoot,
+// then compares its hash against VARIABLES["chainHeadHash"]. Any
+// field divergence produces "Supplied genesis block does not match
+// chain data stored" at boot.
+//
+// alloc is always {} — state-actor writes state directly to RocksDB.
+// `--genesis-state-hash-cache-enabled` at boot tells besu to trust
+// the stored stateRoot rather than recompute from alloc.
+//
+// `ethash.fixeddifficulty` is emitted ONLY for pre-Merge chains (no
+// terminalTotalDifficulty). For post-Merge chains it's dropped, since
+// post-Merge consensus is engine-API-driven (or `--Xdev-mode-genesis-
+// state-hash-cache-enabled` style besu dev mode — see C-followup).
 func writeChainSpec(dbPath string, g *genesis.Genesis) (string, error) {
 	if g == nil {
 		return "", fmt.Errorf("besu writeChainSpec: nil genesis")
@@ -56,10 +57,8 @@ func writeChainSpec(dbPath string, g *genesis.Genesis) (string, error) {
 	if g.BaseFee != nil {
 		baseFeeHex = (*g.BaseFee).String()
 	}
-	// Difficulty MUST match what besuGenesisFromConfig flows into the
-	// stored header (run_cgo.go:111-114 → diff = g.Difficulty.ToInt()).
-	// BuildSynthetic emits Difficulty=0; older hand-written genesis JSONs
-	// used 0x10000. Either is OK as long as both sides agree.
+	// Difficulty must match the writer (genesisheader.Build pulls
+	// g.Difficulty directly). BuildSynthetic emits 0 for post-Merge.
 	diffHex := "0x0"
 	if g.Difficulty != nil {
 		diffHex = fmt.Sprintf("0x%x", g.Difficulty.ToInt())
@@ -69,10 +68,69 @@ func writeChainSpec(dbPath string, g *genesis.Genesis) (string, error) {
 		"chainId":           chainID,
 		"londonBlock":       0,
 		"contractSizeLimit": 2147483647,
-		"ethash": map[string]any{
-			"fixeddifficulty": 100,
-		},
 	}
+
+	postMerge := g.Config != nil && g.Config.TerminalTotalDifficulty != nil
+	if !postMerge {
+		// Pre-Merge: ethash.fixeddifficulty enables dev-mode mining
+		// with `--miner-enabled` + no external CL.
+		cfg["ethash"] = map[string]any{
+			"fixeddifficulty": 100,
+		}
+	} else {
+		// Post-Merge: tell besu the chain is post-Merge by emitting
+		// terminalTotalDifficulty. Block production switches to
+		// engine-API / dev mode (configured at boot, not chainspec).
+		cfg["terminalTotalDifficulty"] = "0x0"
+	}
+
+	if g.Config != nil {
+		if g.Config.ShanghaiTime != nil {
+			cfg["shanghaiTime"] = *g.Config.ShanghaiTime
+		}
+		if g.Config.CancunTime != nil {
+			cfg["cancunTime"] = *g.Config.CancunTime
+		}
+		if g.Config.PragueTime != nil {
+			cfg["pragueTime"] = *g.Config.PragueTime
+		}
+		if g.Config.OsakaTime != nil {
+			cfg["osakaTime"] = *g.Config.OsakaTime
+		}
+	}
+
+	// Cancun introduced blobs; besu requires a blobSchedule for any
+	// chain with cancunTime active. Conservative defaults — match
+	// mainnet activation params (target=3, max=6, baseFeeUpdateFraction=
+	// 3338477) for Cancun; Prague/Osaka tweak target/max via BPO EIPs
+	// (7691). State-actor's e2e suite doesn't actually use blob txs
+	// (spamoor's erc20_bloater is regular calldata), but besu refuses
+	// to boot a Cancun-active chainspec without a blobSchedule.
+	if g.Config != nil && g.Config.CancunTime != nil {
+		blobSchedule := map[string]any{
+			"cancun": map[string]any{
+				"target":                 3,
+				"max":                    6,
+				"baseFeeUpdateFraction":  3338477,
+			},
+		}
+		if g.Config.PragueTime != nil {
+			blobSchedule["prague"] = map[string]any{
+				"target":                 6,
+				"max":                    9,
+				"baseFeeUpdateFraction":  5007109,
+			}
+		}
+		if g.Config.OsakaTime != nil {
+			blobSchedule["osaka"] = map[string]any{
+				"target":                 9,
+				"max":                    12,
+				"baseFeeUpdateFraction":  5007109,
+			}
+		}
+		cfg["blobSchedule"] = blobSchedule
+	}
+
 	spec := map[string]any{
 		"config":     cfg,
 		"nonce":      fmt.Sprintf("0x%x", uint64(g.Nonce)),

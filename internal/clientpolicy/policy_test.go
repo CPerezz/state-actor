@@ -58,18 +58,18 @@ func TestValidateForClient_ForkCeiling(t *testing.T) {
 		wantPass bool
 	}{
 		{"geth", "prague", true},
-		{"geth", "osaka", true}, // bumped 2026-05 — Osaka adds no new genesis-header fields beyond Prague
+		{"geth", "osaka", true},
 		{"geth", "shanghai", true},
 		{"reth", "prague", true},
 		{"reth", "osaka", true},
 		{"besu", "shanghai", true},
-		{"besu", "prague", false},
-		{"besu", "cancun", false},
-		{"besu", "osaka", false},
+		{"besu", "cancun", true},  // Pre-C-v2: besu writer now uses internal/genesisheader.Build
+		{"besu", "prague", true},
+		{"besu", "osaka", true},
 		{"nethermind", "merge", true},
-		{"nethermind", "shanghai", false},
-		{"nethermind", "prague", false},
-		{"nethermind", "osaka", false},
+		{"nethermind", "shanghai", true},  // Pre-C-v2: neth writer now uses internal/genesisheader.Build
+		{"nethermind", "prague", true},
+		{"nethermind", "osaka", true},
 	}
 	for _, tc := range cases {
 		err := ValidateForClient(tc.client, FlagValues{Fork: tc.fork})

@@ -124,33 +124,26 @@ func SortedForks() []string {
 // ceiling should be rejected at parse time so the resulting DB doesn't
 // boot with a "wrong genesis hash" mismatch.
 //
-// Today's ceilings:
-//   - geth, reth: osaka — Osaka adds zero new genesis-block fields per
-//     go-ethereum v1.17.2 (Header struct unchanged from Prague's
-//     RequestsHash through Osaka activation; OsakaTime gates only
-//     consensus rules like EIP-7691 BPO + EIP-7825 per-tx gas cap, not
-//     header initialization). geth uses go-ethereum's native genesis
-//     builder; reth uses internal/genesisheader.Build which already
-//     handles up through Prague.
-//   - besu: shanghai (genesis_cgo.supportedFork rejects Cancun+; writer
-//     lacks ParentBeaconRoot/ExcessBlobGas/BlobGasUsed/RequestsHash).
-//     Bumping further requires adding Cancun, Prague, and Osaka header
-//     fields to client/besu/genesis_cgo.buildGenesisHeader — tracked
-//     separately.
-//   - nethermind: merge (writer hardcodes a pre-Shanghai header — no
-//     WithdrawalsHash, no Cancun+ fields). Bumping requires adding
-//     Shanghai, Cancun, Prague, Osaka support to
-//     client/nethermind/genesis_cgo.go — tracked separately.
+// Today's ceilings (all 4 clients on Osaka post-Pre-C-v2):
+//   - geth, reth, besu, nethermind: osaka. Header construction flows
+//     through internal/genesisheader.Build for besu/reth/nethermind
+//     (geth uses go-ethereum's native genesis builder, which handles
+//     every fork through Osaka identically). Per-client chainspec
+//     writers emit shanghaiTime/cancunTime/pragueTime/osakaTime/
+//     terminalTotalDifficulty/blobSchedule conditionally based on
+//     g.Config — same activation set the writer encodes.
 //
-// Bump after the corresponding writer adds the missing header fields.
+// Osaka adds zero new genesis-block fields per go-ethereum v1.17.2
+// (Header struct unchanged from Prague's RequestsHash; OsakaTime gates
+// only consensus rules like EIP-7691 BPO + EIP-7825 per-tx gas cap).
+// Verified by internal/genesisheader/osaka_smoke_test.go.
+//
+// Bump beyond Osaka (e.g. Amsterdam) once each writer adds the
+// corresponding header fields.
 func MaxForkForClient(client string) string {
 	switch client {
-	case "geth", "reth":
+	case "geth", "reth", "besu", "nethermind":
 		return "osaka"
-	case "besu":
-		return "shanghai"
-	case "nethermind":
-		return "merge"
 	default:
 		return DefaultFork
 	}
