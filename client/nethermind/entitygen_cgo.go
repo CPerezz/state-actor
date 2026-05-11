@@ -5,8 +5,10 @@ package nethermind
 import (
 	"bytes"
 	"fmt"
+	"log"
 	mrand "math/rand"
 	"os"
+	"path/filepath"
 	"sort"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -155,6 +157,37 @@ func writeSyntheticAccounts(
 	// which the differential oracle catches).
 	rng := mrand.New(mrand.NewSource(cfg.Seed))
 
+	// targetReached short-circuits both Phase 1 loops AND Phase 2 below
+	// when the production datadir reaches cfg.TargetSize. Nethermind's
+	// Phase 1 is hybrid: account stashing goes to the temp Pebble DB, but
+	// contract storage tries write to the production State DB via
+	// builder.AddStorageSlot (line 211 below). So the bulk of production-
+	// DB growth happens inside the contract loop here — sampling dirSize
+	// only in Phase 2 (like geth does) would miss it entirely. Pattern
+	// mirrors reth's streaming per-batch dirSize check.
+	//
+	// EOAs go straight to the temp Pebble (no production DB write), so
+	// the sample fires once per EOA loop completion rather than per
+	// entity — minimizes filesystem walks for the cheap case.
+	targetReached := false
+	checkProductionSize := func() (uint64, bool) {
+		if cfg.TargetSize == 0 {
+			return 0, false
+		}
+		if err := sink.flush(); err != nil {
+			// flush failures are caught + surfaced when sink.close() is
+			// called at the end of the function; silently skipping the
+			// sample here is acceptable because the next iteration will
+			// retry. Logging would spam.
+			return 0, false
+		}
+		size, err := dirSize(cfg.DBPath)
+		if err != nil {
+			return 0, false
+		}
+		return size, size >= cfg.TargetSize
+	}
+
 	for i := 0; i < cfg.NumAccounts; i++ {
 		acc := entitygen.GenerateEOA(rng)
 		data, err := gethrlp.EncodeToBytes(acc.StateAccount)
@@ -174,7 +207,15 @@ func writeSyntheticAccounts(
 		codeSize = 1024
 	}
 
-	for i := 0; i < cfg.NumContracts; i++ {
+	// contractSampleEvery picks the cadence of Phase 1 dirSize sampling.
+	// At cfg.TargetSize=200 MiB with the canonical e2e config (5-50 slots
+	// per contract, ~100B per slot of trie overhead), one batch of 100
+	// contracts adds roughly 1-5 MiB of State DB nodes — fine-grained
+	// enough to land within ±20% tolerance, coarse enough that filesystem
+	// walks don't dominate.
+	const contractSampleEvery = 100
+
+	for i := 0; i < cfg.NumContracts && !targetReached; i++ {
 		contract := entitygen.GenerateContractRoll(rng, cfg.Distribution, codeSize, cfg.MinSlots, cfg.MaxSlots)
 		numSlots := len(contract.Storage)
 
@@ -229,6 +270,20 @@ func writeSyntheticAccounts(
 		if err := flushBatchIfFull(); err != nil {
 			return common.Hash{}, err
 		}
+		// Every contractSampleEvery contracts, flush the production
+		// State DB sink and walk cfg.DBPath. Stop the loop once the
+		// directory reaches cfg.TargetSize — Phase 2 below adds only
+		// the account-trie nodes on top of what we've already written,
+		// so landing slightly under target here leaves headroom.
+		if (i+1)%contractSampleEvery == 0 {
+			if size, reached := checkProductionSize(); reached {
+				if cfg.Verbose {
+					log.Printf("nethermind Phase 1: dirSize %d MiB >= target %d MiB after %d contracts — stopping",
+						size>>20, cfg.TargetSize>>20, i+1)
+				}
+				targetReached = true
+			}
+		}
 	}
 
 	if err := batch.Write(); err != nil {
@@ -240,7 +295,12 @@ func writeSyntheticAccounts(
 		return common.Hash{}, fmt.Errorf("compact temp DB: %w", err)
 	}
 
-	// Phase 2: addrHash-sorted iteration → AddAccount.
+	// Phase 2: addrHash-sorted iteration → AddAccount. Account-trie nodes
+	// get added to the production State DB here; storage-trie + code
+	// already landed in Phase 1, so Phase 2 only contributes a smaller
+	// delta. cfg.TargetSize already triggered the stop in Phase 1 if we
+	// were over budget — Phase 2 just finalizes the trie from whatever
+	// was emitted before the stop.
 	iter := tempDB.NewIterator(nil, nil)
 	defer iter.Release()
 
@@ -297,4 +357,29 @@ func encodeStorageValueNeth(value common.Hash) ([]byte, error) {
 type hashedSlot struct {
 	keyHash common.Hash
 	value   common.Hash
+}
+
+// dirSize returns the total bytes used by all regular files under path,
+// recursively. Used by Phase 2's --target-size sampling: we walk the
+// nethermind chaindata directory (which contains all 7 RocksDB subdirs
+// plus the chainspec) after each sink flush and stop iteration once it
+// reaches the requested target. Returns 0 + nil if path doesn't exist
+// yet (rare at this point in the writer, but defensive). Mirrors the
+// helper in client/geth/state_writer.go (intentionally duplicated per-
+// client — matches the existing project convention).
+func dirSize(path string) (uint64, error) {
+	var total uint64
+	err := filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if !info.IsDir() {
+			total += uint64(info.Size())
+		}
+		return nil
+	})
+	return total, err
 }

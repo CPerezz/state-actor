@@ -53,7 +53,7 @@ var (
 	binaryTrie   = flag.Bool("binary-trie", false, "Generate state for binary trie mode (EIP-7864)")
 
 	// Target size
-	targetSize = flag.String("target-size", "", "Target total DB size on disk (e.g. '5GB', '500MB'). Stop condition only — set --accounts/--contracts/--min-slots/--max-slots explicitly. Honored by geth and besu; ignored by nethermind; rejected by reth.")
+	targetSize = flag.String("target-size", "", "Target total DB size on disk (e.g. '5GB', '500MB'). Stop condition only — set --accounts/--contracts/--min-slots/--max-slots explicitly. Honored by geth, besu, nethermind, and reth.")
 
 	// Synthetic genesis configuration. state-actor builds the genesis
 	// itself — no --genesis path. The four header knobs users actually
@@ -158,10 +158,10 @@ func main() {
 	// --target-size is a stop condition, not an auto-scaler. The previous
 	// auto-scaling block (which silently rewrote --accounts/--contracts/
 	// --min-slots/--max-slots and multiplied --contracts by 5) was removed;
-	// users now set per-entity flags explicitly. Geth honours the stop in
-	// generator.SizeTracker / dirSize; besu honours it in Phase 1's
-	// raw-byte cap; nethermind currently no-ops; reth rejects the flag at
-	// parse time.
+	// users now set per-entity flags explicitly. All four clients honour
+	// the stop: geth (two-phase 5× raw cap + dirSize sampling), besu
+	// (Phase 1 raw-byte cap), nethermind (Phase 1 5× raw cap + Phase 2
+	// dirSize sampling), reth (per-batch dirSize sampling).
 
 	config := generator.Config{
 		DBPath:          *dbPath,

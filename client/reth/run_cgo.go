@@ -5,6 +5,7 @@ package reth
 import (
 	"context"
 	"fmt"
+	"log"
 	mrand "math/rand"
 	"os"
 	"path/filepath"
@@ -161,12 +162,27 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 	if cfg.NumAccounts > 0 || cfg.NumContracts > 0 {
 		rng := mrand.New(mrand.NewSource(cfg.Seed))
 
+		// targetReached short-circuits both batch loops below when the
+		// production datadir reaches cfg.TargetSize. Reth's writer is
+		// streaming (no Phase 1 temp DB), so each batch flushes its bytes
+		// directly to MDBX / RocksDB — per-batch dirSize sampling is the
+		// natural shape. Genesis-alloc + inject loops above are NOT capped
+		// (they're bounded inputs that must satisfy cfg.Validate, mirroring
+		// the besu/geth/nethermind convention).
+		//
+		// Note: cfg.DBPath also contains the temp Pebble sorter
+		// (reth-sort-*/), which grows with entity count but is freed in
+		// Phase 4d before chainspec/static-files writes. Including it
+		// here over-estimates current production-DB size, which is
+		// strictly safer (stops earlier rather than overshooting).
+		targetReached := false
+
 		// Phase 4b: synthetic EOAs in batches of batchSize. The RNG is
 		// drawn from in the same order as the legacy single-shot loop, so
 		// state-root determinism is preserved (locked in by
 		// TestStreaming_GoldenEqualsLegacy).
 		remaining := cfg.NumAccounts
-		for remaining > 0 {
+		for remaining > 0 && !targetReached {
 			b := batchSize
 			if remaining < b {
 				b = remaining
@@ -185,6 +201,15 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 			}
 			accountsCreated += b
 			remaining -= b
+			if cfg.TargetSize > 0 {
+				if size, err := dirSize(cfg.DBPath); err == nil && size >= cfg.TargetSize {
+					if cfg.Verbose {
+						log.Printf("reth Phase 4b: dirSize %d MiB >= target %d MiB — stopping EOA loop",
+							size>>20, cfg.TargetSize>>20)
+					}
+					targetReached = true
+				}
+			}
 		}
 
 		// Phase 4c: synthetic contracts in batches of batchSize. Slot count
@@ -192,13 +217,13 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 		// draw sequence matches besu/nethermind/geth — same --seed →
 		// identical canonical entitygen MPT root across MPT clients
 		// (locked in by client/reth/golden_test.go).
-		if cfg.NumContracts > 0 {
+		if cfg.NumContracts > 0 && !targetReached {
 			codeSize := cfg.CodeSize
 			if codeSize <= 0 {
 				codeSize = 256
 			}
 			remaining := cfg.NumContracts
-			for remaining > 0 {
+			for remaining > 0 && !targetReached {
 				b := batchSize
 				if remaining < b {
 					b = remaining
@@ -221,6 +246,15 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 				}
 				contractsCreated += b
 				remaining -= b
+				if cfg.TargetSize > 0 {
+					if size, err := dirSize(cfg.DBPath); err == nil && size >= cfg.TargetSize {
+						if cfg.Verbose {
+							log.Printf("reth Phase 4c: dirSize %d MiB >= target %d MiB — stopping contract loop",
+								size>>20, cfg.TargetSize>>20)
+						}
+						targetReached = true
+					}
+				}
 			}
 		}
 	}
@@ -275,4 +309,38 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 		AccountsCreated:  accountsCreated,
 		ContractsCreated: contractsCreated,
 	}, nil
+}
+
+// dirSize returns the total disk-allocated bytes used by all regular
+// files under path, recursively. Used by Phase 4b/4c's --target-size
+// sampling: we walk cfg.DBPath after each batch flush and stop
+// generation once it reaches the requested target.
+//
+// Critical detail: reth's mdbx.dat is preallocated as a sparse file
+// (mdbxGrowthStep = 4 GiB on first growth — see dbs_cgo.go). os.FileInfo.
+// Size() reports the logical size, which would trip the cap immediately
+// regardless of actual data written. Instead we read the block count
+// from syscall.Stat_t (Linux + macOS both expose it) so dirSize tracks
+// actual disk usage. Windows falls back to logical size — reth is Linux/
+// Docker-only in practice, so this is fine.
+//
+// Mirrors the helper in client/geth/state_writer.go + client/nethermind/
+// entitygen_cgo.go in shape, but uses apparent size to handle MDBX's
+// sparse preallocation (geth + nethermind use Pebble + grocksdb which
+// don't preallocate aggressively).
+func dirSize(path string) (uint64, error) {
+	var total uint64
+	err := filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if !info.IsDir() {
+			total += apparentSize(info)
+		}
+		return nil
+	})
+	return total, err
 }
