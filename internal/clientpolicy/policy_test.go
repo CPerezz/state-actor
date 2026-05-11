@@ -39,15 +39,15 @@ func TestValidateForClient_BinaryTrieGethOnly(t *testing.T) {
 	}
 }
 
-func TestValidateForClient_TargetSizeRejectsReth(t *testing.T) {
-	for _, c := range []string{"geth", "nethermind", "besu"} {
+// TestValidateForClient_TargetSizeAllowed verifies --target-size is honored
+// by every client after state-actor#54 added per-batch dirSize caps to
+// nethermind (Phase 2) and reth (per-batch). Previously reth rejected the
+// flag at parse time; that rejection is gone.
+func TestValidateForClient_TargetSizeAllowed(t *testing.T) {
+	for _, c := range []string{"geth", "nethermind", "besu", "reth"} {
 		if err := ValidateForClient(c, FlagValues{TargetSize: "5GB"}); err != nil {
 			t.Errorf("%s + --target-size should be allowed: %v", c, err)
 		}
-	}
-	err := ValidateForClient("reth", FlagValues{TargetSize: "5GB"})
-	if err == nil || !strings.Contains(err.Error(), "target-size") {
-		t.Errorf("reth + --target-size should reject, got %v", err)
 	}
 }
 

@@ -34,9 +34,9 @@ type FlagValues struct {
 // Two layers:
 //  1. Client recognition: erigon → not-yet-implemented; unknown → reject.
 //  2. Per-client compatibility: --binary-trie is geth-only (the others
-//     lack EIP-7864 support); --target-size is incompatible with reth;
-//     --fork is clamped at each client's writer ceiling (see
-//     genesis.MaxForkForClient).
+//     lack EIP-7864 support); --fork is clamped at each client's writer
+//     ceiling (see genesis.MaxForkForClient). --target-size is honored
+//     by every client.
 func ValidateForClient(client string, fv FlagValues) error {
 	switch client {
 	case "geth", "nethermind", "besu", "reth":
@@ -57,12 +57,6 @@ func ValidateForClient(client string, fv FlagValues) error {
 		case "reth":
 			return fmt.Errorf("--binary-trie is not supported with --client=reth (Reth does not implement EIP-7864)")
 		}
-	}
-
-	// Reth has no Phase-1 stop hook (its streaming Phase 4 sorter would
-	// need a per-batch projected-size check that nobody's wired up).
-	if fv.TargetSize != "" && client == "reth" {
-		return fmt.Errorf("--target-size is not yet supported with --client=reth; set --accounts / --contracts explicitly")
 	}
 
 	// Per-client fork ceiling. Empty means "auto"; the caller resolves
