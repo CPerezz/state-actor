@@ -33,15 +33,15 @@ func nethImageRef() string {
 	return pinnedNethImage
 }
 
-// nethermindE2EConfigTemplate is the Nethermind config for the e2e suite
-// (boot + spamoor mining). Mirrors client/nethermind/testdata/configs/
-// sa-dev-v2.json but inlined here so the test is self-contained — written
-// into the datadir at runtime with the chainspec / DB paths plugged in,
-// so DinD mode (where the test container places state-actor data at
-// /data/<testName>/) and direct mode (/data) both resolve correctly.
+// nethermindE2EConfigTemplate is the Nethermind config for the e2e suite.
+// Inlined rather than loaded from testdata so DinD mode (container sees
+// /data/<testName>) and direct mode (/data) can both resolve at runtime.
 //
-// Mining.Enabled = true and EnableUnsecuredDevWallet = true so spamoor's
-// --privkey deployer can submit txs and advance the chain.
+// Engine RPC on port 8551 + UnsecureDevNoRpcAuthentication=true is the
+// symmetric equivalent of besu's --engine-rpc-enabled / --engine-jwt-disabled.
+// Merge.Enabled + TerminalTotalDifficulty=0 + the Ethash chainspec engine
+// hand block production to MergePlugin via the engine API from genesis;
+// EthashPlugin's PoW path never runs.
 //
 // Two %s placeholders, in order:
 //  1. ChainSpecPath  — full path to state-actor's parity-chainspec.json
@@ -72,11 +72,15 @@ const nethermindE2EConfigTemplate = `{
     "Timeout": 20000,
     "Host": "0.0.0.0",
     "Port": 8545,
-    "EnabledModules": ["Eth", "Net", "Web3"]
+    "EnabledModules": ["Eth", "Net", "Web3"],
+    "EngineHost": "0.0.0.0",
+    "EnginePort": 8551,
+    "EngineEnabledModules": ["Engine", "Eth", "Net", "Web3", "Subscribe"],
+    "UnsecureDevNoRpcAuthentication": true
   },
   "Metrics": {"Enabled": false},
   "Merge": {"Enabled": true, "TerminalTotalDifficulty": "0"},
-  "Mining": {"Enabled": true}
+  "Mining": {"Enabled": false}
 }`
 
 // TestE2ESuite — see client/besu/e2e_test.go for the full phase
@@ -85,7 +89,8 @@ const nethermindE2EConfigTemplate = `{
 //
 // nethermind-specific bits:
 //   - --fork=osaka (unified across all 4 clients after the writer migration to internal/genesisheader.Build)
-//   - inline boot.cfg with Mining.Enabled=true (NethDev produces blocks)
+//   - Ethash-from-genesis chainspec + Merge.Enabled → engine-API-driven
+//     block production via the EngineDriver mock CL (mirrors besu).
 //   - SlotDuration=250ms in Phase 5 (matches smoke-nethermind-spamoor pacing)
 func TestE2ESuite(t *testing.T) {
 	if testing.Short() {
@@ -191,14 +196,14 @@ func TestE2ESuite(t *testing.T) {
 		t.Fatalf("RPC never came up (logs captured in t.Cleanup): %v", err)
 	}
 
-	// Phases 3-4 only — SkipBlockProduction because nethermind's NethDev
-	// consensus engine doesn't produce blocks on a post-Prague chain
-	// with the EIP-4788/2935/7002/7251 system contracts deployed in
-	// genesis state (cf. ethereum/state-actor#56). Phase 3 still
-	// captures the genesis stateRoot → result.json so the cross-client
-	// genesis-root aggregator CI gate runs as expected. Proper fix:
-	// switch nethermind e2e to the engine API + EngineDriver mock
-	// (same as besu).
+	// Mock CL: drive block production via engine API. MergePlugin's
+	// seal-engine allowlist is {BeaconChain, Clique, Ethash}, so on an
+	// Ethash chainspec with Merge.Enabled + TTD=0 the engine API is the
+	// only path that produces blocks. Goroutine runs for the rest of
+	// the test so spamoor's txs (Phase 5) get included in blocks.
+	oracle.StartEngineDriver(t, containerIP, rpcURL, oracle.ForkOsaka)
+
+	// Phases 3-7: shared via internal/oracle.RunSuitePhases.
 	oracle.RunSuitePhases(t, oracle.SuitePhasesCfg{
 		ClientName:          "nethermind",
 		RPCURL:              rpcURL,
@@ -206,6 +211,5 @@ func TestE2ESuite(t *testing.T) {
 		Contracts:           contracts,
 		GeneratorConfig:     &cfg,
 		SpamoorSlotDuration: 250 * time.Millisecond,
-		SkipBlockProduction: true,
 	})
 }
