@@ -32,6 +32,7 @@ import (
 
 	"github.com/nerolation/state-actor/generator"
 	"github.com/nerolation/state-actor/genesis"
+	"github.com/nerolation/state-actor/internal/genesisheader"
 	"github.com/nerolation/state-actor/internal/neth"
 )
 
@@ -64,20 +65,11 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 		return nil, errors.New("--db is required for --client=nethermind")
 	}
 
-	// Pull genesis fields from cfg.Genesis. Production callers (main.go)
-	// always set this; tests can leave it nil and get the default chainspec.
+	// Pull genesis from cfg. Production callers (main.go) always set
+	// this; tests can leave it nil and get the default chainspec via
+	// genesis.OrDefault. Header construction below pulls every header
+	// field from g via internal/genesisheader.Build.
 	g := genesis.OrDefault(cfg.Genesis)
-	gasLimit := uint64(g.GasLimit)
-	if gasLimit == 0 {
-		gasLimit = 30_000_000
-	}
-	extraData := []byte(g.ExtraData)
-	timestamp := uint64(g.Timestamp)
-	// chainID embedding is a B7 follow-up: nethermind reads chainID from
-	// the chainspec at boot, not the on-disk DB. Until state-actor writes
-	// a Parity chainspec under cfg.DBPath, the supplied chainID is recorded
-	// here for documentation and stays inert.
-	_ = g.Config.ChainID
 
 	dbs, err := openNethDBs(cfg.DBPath)
 	if err != nil {
@@ -129,8 +121,11 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 		}
 	}
 
-	header := buildEmptyAllocGenesisHeader(g.Config.ChainID.Int64(), gasLimit, extraData, timestamp)
-	header.Root = stateRoot
+	// Header construction now flows through internal/genesisheader.Build —
+	// same path as besu/reth. Per-fork field activation
+	// (BaseFee/WithdrawalsHash/ParentBeaconRoot/ExcessBlobGas/
+	// BlobGasUsed/RequestsHash) is centralized there.
+	header := genesisheader.Build(g, 0, common.Hash{}, stateRoot)
 
 	hash, err := writeGenesisBlockToDBs(dbs, header)
 	if err != nil {

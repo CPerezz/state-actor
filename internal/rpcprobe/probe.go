@@ -5,14 +5,15 @@
 // The exported helpers cover the read-side surface every "the node booted
 // and serves the state we wrote" oracle test needs:
 //
-//   - Call             — generic JSON-RPC call returning the raw result blob.
-//   - WaitForRPC       — polls eth_blockNumber until the endpoint responds.
-//   - EthGetBalance    — typed eth_getBalance, parsed to *big.Int.
-//   - EthGetCode       — typed eth_getCode, returned as raw []byte.
-//   - EthGetStorageAt  — typed eth_getStorageAt, returned as common.Hash.
-//   - EthBlockNumber   — typed eth_blockNumber, parsed to uint64.
-//   - BlockByNumber    — eth_getBlockByNumber returning Block (stateRoot, etc).
-//   - GenesisStateRoot — convenience: BlockByNumber("0x0").StateRoot.
+//   - Call                 — generic JSON-RPC call returning the raw result blob.
+//   - WaitForRPC           — polls eth_blockNumber until the endpoint responds.
+//   - EthGetBalance        — typed eth_getBalance, parsed to *big.Int.
+//   - EthGetCode           — typed eth_getCode, returned as raw []byte.
+//   - EthGetStorageAt      — typed eth_getStorageAt, returned as common.Hash.
+//   - EthGetTransactionCount — typed eth_getTransactionCount, parsed to uint64.
+//   - EthBlockNumber       — typed eth_blockNumber, parsed to uint64.
+//   - BlockByNumber        — eth_getBlockByNumber returning Block (stateRoot, etc).
+//   - GenesisStateRoot     — convenience: BlockByNumber("0x0").StateRoot.
 //
 // Caller passes a fully-qualified URL ("http://host:port") and a block tag
 // per the JSON-RPC spec ("0x0", "latest", "earliest", or a hex height).
@@ -119,8 +120,11 @@ func EthGetBalance(url string, addr common.Address, block string) (*big.Int, err
 	if err := json.Unmarshal(raw, &hexStr); err != nil {
 		return nil, fmt.Errorf("unmarshal balance: %w (raw: %s)", err, raw)
 	}
+	// Canonical "0x0" only — short-circuiting on bare "0" (no 0x prefix)
+	// would silently treat malformed inputs as zero. MEMORY.md rule:
+	// "no silent-zero hex parsers — bug bit twice on this project".
 	hexStr = strings.TrimPrefix(hexStr, "0x")
-	if hexStr == "" || hexStr == "0" {
+	if hexStr == "" {
 		return new(big.Int), nil
 	}
 	n := new(big.Int)
@@ -182,9 +186,10 @@ func EthBlockNumber(url string) (uint64, error) {
 	if err := json.Unmarshal(raw, &hexStr); err != nil {
 		return 0, fmt.Errorf("unmarshal blockNumber: %w (raw: %s)", err, raw)
 	}
+	// Canonical "0x0" only — see EthGetBalance for the rationale.
 	hexStr = strings.TrimPrefix(hexStr, "0x")
 	if hexStr == "" {
-		return 0, nil
+		return 0, fmt.Errorf("eth_blockNumber returned empty hex (after 0x trim)")
 	}
 	n := new(big.Int)
 	if _, ok := n.SetString(hexStr, 16); !ok {
@@ -205,9 +210,10 @@ func EthGetTransactionCount(url string, addr common.Address, block string) (uint
 	if err := json.Unmarshal(raw, &hexStr); err != nil {
 		return 0, fmt.Errorf("unmarshal txCount: %w (raw: %s)", err, raw)
 	}
+	// Canonical "0x0" only — see EthGetBalance for the rationale.
 	hexStr = strings.TrimPrefix(hexStr, "0x")
 	if hexStr == "" {
-		return 0, nil
+		return 0, fmt.Errorf("eth_getTransactionCount returned empty hex (after 0x trim)")
 	}
 	n := new(big.Int)
 	if _, ok := n.SetString(hexStr, 16); !ok {
@@ -231,6 +237,13 @@ type Block struct {
 // header view. blockTag is a JSON-RPC tag: "0x0", "latest", "earliest", or
 // a hex height. The fullTxObjects param is hardcoded to false — oracle
 // callers don't read tx bodies through this helper.
+//
+// Rejects three failure modes that would otherwise silently produce a
+// zero-shaped Block: (1) result == null (block not found), (2) Number
+// field empty (incomplete reply), (3) StateRoot is zero (misconfigured
+// client returning {}-shaped headers). These checks defend the
+// cross-client stateRoot invariant against false-PASS via missing
+// fields — see MEMORY.md's "no silent-zero hex parsers" guidance.
 func BlockByNumber(url, blockTag string) (*Block, error) {
 	raw, err := Call(url, "eth_getBlockByNumber", []any{blockTag, false})
 	if err != nil {
@@ -242,6 +255,12 @@ func BlockByNumber(url, blockTag string) (*Block, error) {
 	var b Block
 	if err := json.Unmarshal(raw, &b); err != nil {
 		return nil, fmt.Errorf("unmarshal block: %w (raw: %s)", err, raw)
+	}
+	if b.Number == "" {
+		return nil, fmt.Errorf("eth_getBlockByNumber(%s): empty Number field (incomplete reply: %s)", blockTag, raw)
+	}
+	if b.StateRoot == (common.Hash{}) {
+		return nil, fmt.Errorf("eth_getBlockByNumber(%s): zero stateRoot (misconfigured client or incomplete reply)", blockTag)
 	}
 	return &b, nil
 }

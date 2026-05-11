@@ -12,10 +12,12 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/params"
 	"github.com/linxGnu/grocksdb"
 
 	"github.com/nerolation/state-actor/genesis"
 	"github.com/nerolation/state-actor/internal/besu/keys"
+	"github.com/nerolation/state-actor/internal/genesisheader"
 	"github.com/nerolation/state-actor/internal/testhex"
 )
 
@@ -93,7 +95,7 @@ func testDifferentialOracleGenesisNonce(t *testing.T) {
 		t.Fatalf("writeGenesisAllocAccounts: %v", err)
 	}
 
-	header := buildGenesisHeader(g, rootHash)
+	header := genesisheader.Build(g, 0, common.Hash{}, rootHash)
 	if got := header.Hash().Hex(); got != wantBlockHash {
 		t.Fatalf("genesisNonce blockHash mismatch:\n  got:  %s\n  want: %s\n  (computed stateRoot: %s)",
 			got, wantBlockHash, rootHash.Hex())
@@ -157,9 +159,22 @@ func loadFixtureAllocs(t *testing.T, path string) map[common.Address]genesis.Gen
 	return out
 }
 
-// loadFixtureGenesis loads both the alloc and a minimal besuGenesis from a
-// Besu fixture JSON (for header construction in genesisNonce test).
-func loadFixtureGenesis(t *testing.T, path string) (*besuGenesis, map[common.Address]genesis.GenesisAccount) {
+// loadFixtureGenesis loads both the alloc and a minimal *genesis.Genesis
+// from a Besu fixture JSON (for header construction in genesisNonce
+// test). After the writer migration, header construction goes through
+// internal/genesisheader.Build which takes *genesis.Genesis directly.
+//
+// Fixtures are pre-London (homestead/constantinople-era), so we attach
+// an empty *params.ChainConfig with NO fork blocks/times set —
+// IsLondon/IsShanghai/IsCancun/etc all return false, so Build emits a
+// pre-London header (no BaseFee, no WithdrawalsHash, no Cancun blob
+// fields, no RequestsHash). That matches what besu's
+// GenesisState.buildHeader produces for these fixtures — load-bearing
+// for the differential oracle's pinned hashes.
+//
+// genesisheader.Build panics on g.Config == nil, hence the empty
+// non-nil ChainConfig (vs leaving Config nil).
+func loadFixtureGenesis(t *testing.T, path string) (*genesis.Genesis, map[common.Address]genesis.GenesisAccount) {
 	t.Helper()
 	allocs := loadFixtureAllocs(t, path)
 
@@ -186,21 +201,20 @@ func loadFixtureGenesis(t *testing.T, path string) (*besuGenesis, map[common.Add
 		t.Fatalf("unmarshal header: %v", err)
 	}
 
-	g := &besuGenesis{}
-	g.coinbase = common.HexToAddress(h.Coinbase)
-	g.difficulty = testhex.Big(t, "difficulty", h.Difficulty)
+	g := &genesis.Genesis{Config: &params.ChainConfig{}}
+	g.Coinbase = common.HexToAddress(h.Coinbase)
+	g.Difficulty = (*hexutil.Big)(testhex.Big(t, "difficulty", h.Difficulty))
 	if h.ExtraData != "" && h.ExtraData != "0x" {
 		ed, err := hexutil.Decode(h.ExtraData)
 		if err != nil {
 			t.Fatalf("parse extraData: %v", err)
 		}
-		g.extraData = ed
+		g.ExtraData = hexutil.Bytes(ed)
 	}
-	g.gasLimit = testhex.Uint64(t, "gasLimit", h.GasLimit)
-	g.mixHash = common.HexToHash(h.MixHash)
-	g.nonce = testhex.Uint64(t, "nonce", h.Nonce)
-	g.timestamp = testhex.Uint64(t, "timestamp", h.Timestamp)
-	g.parentHash = common.Hash{}
+	g.GasLimit = hexutil.Uint64(testhex.Uint64(t, "gasLimit", h.GasLimit))
+	g.Mixhash = common.HexToHash(h.MixHash)
+	g.Nonce = hexutil.Uint64(testhex.Uint64(t, "nonce", h.Nonce))
+	g.Timestamp = hexutil.Uint64(testhex.Uint64(t, "timestamp", h.Timestamp))
 
 	return g, allocs
 }

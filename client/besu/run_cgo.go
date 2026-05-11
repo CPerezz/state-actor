@@ -9,10 +9,10 @@ import (
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/nerolation/state-actor/generator"
 	"github.com/nerolation/state-actor/genesis"
+	"github.com/nerolation/state-actor/internal/genesisheader"
 )
 
 // runImpl is the cgo_besu orchestrator. The on-disk write order is the
@@ -34,16 +34,17 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 	// B7 (chainID embedding via state-actor-written chainspec) is the
 	// follow-up that makes --chain-id take effect end-to-end.
 	//
-	// Tests can leave cfg.Genesis nil; we synthesize a Shanghai default
-	// (besu's writer ceiling — see genesis.MaxForkForClient("besu")) so
-	// the supportedForkChainConfig gate doesn't reject the global default.
+	// Tests can leave cfg.Genesis nil; synthesize an Osaka default
+	// (besu's writer ceiling after the writer migration to internal/genesisheader.Build — see
+	// genesis.MaxForkForClient("besu")). Header construction goes
+	// through internal/genesisheader.Build, which handles every fork
+	// up through Osaka uniformly across all 4 clients.
 	g := cfg.Genesis
 	if g == nil {
-		g, _ = genesis.BuildSynthetic("shanghai", nil, 0, 0, nil)
+		g, _ = genesis.BuildSynthetic("osaka", nil, 0, 0, nil)
 	}
-	genesisCfg := besuGenesisFromConfig(g)
-	if err := supportedForkChainConfig(g); err != nil {
-		return nil, err
+	if g.Config == nil {
+		return nil, errors.New("besu: cfg.Genesis must have Config set (use genesis.BuildSynthetic)")
 	}
 
 	db, err := openBesuDB(cfg.DBPath)
@@ -60,14 +61,18 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 		return nil, err
 	}
 
-	header := buildGenesisHeader(genesisCfg, rootHash)
+	header := genesisheader.Build(g, 0, common.Hash{}, rootHash)
 	if err := sink.SaveWorldState(header.Hash(), rootHash, rootRLP); err != nil {
 		return nil, err
 	}
 	if err := db.writeAdvisorySentinels(); err != nil {
 		return nil, err
 	}
-	if err := db.writeGenesisBlock(header, genesisCfg.difficulty); err != nil {
+	totalDifficulty := big.NewInt(0)
+	if g.Difficulty != nil {
+		totalDifficulty = g.Difficulty.ToInt()
+	}
+	if err := db.writeGenesisBlock(header, totalDifficulty); err != nil {
 		return nil, err
 	}
 	if err := WriteDatabaseMetadata(cfg.DBPath); err != nil {
@@ -85,85 +90,8 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 	return stats, nil
 }
 
-// besuGenesis holds the header fields besu's writer needs. Built from
-// the in-memory cfg.Genesis (synthesized by genesis.BuildSynthetic in
-// main.go); no JSON re-parsing required.
-type besuGenesis struct {
-	chainID    *big.Int
-	gasLimit   uint64
-	difficulty *big.Int
-	timestamp  uint64
-	extraData  []byte
-	coinbase   common.Address
-	mixHash    common.Hash
-	parentHash common.Hash
-	nonce      uint64
-	baseFee    *big.Int // nil if pre-London; *big.Int if londonBlock <= 0
-}
-
-// besuGenesisFromConfig translates an in-memory *genesis.Genesis into the
-// flat besuGenesis struct the writer consumes.
-func besuGenesisFromConfig(g *genesis.Genesis) *besuGenesis {
-	gasLimit := uint64(g.GasLimit)
-	if gasLimit == 0 {
-		gasLimit = 30_000_000
-	}
-	diff := big.NewInt(0)
-	if g.Difficulty != nil {
-		diff = g.Difficulty.ToInt()
-	}
-	chainID := big.NewInt(1337)
-	if g.Config != nil && g.Config.ChainID != nil {
-		chainID = g.Config.ChainID
-	}
-	var baseFee *big.Int
-	if g.BaseFee != nil {
-		baseFee = g.BaseFee.ToInt()
-	}
-	return &besuGenesis{
-		chainID:    chainID,
-		gasLimit:   gasLimit,
-		difficulty: diff,
-		timestamp:  uint64(g.Timestamp),
-		extraData:  []byte(g.ExtraData),
-		coinbase:   g.Coinbase,
-		mixHash:    g.Mixhash,
-		parentHash: g.ParentHash,
-		nonce:      uint64(g.Nonce),
-		baseFee:    baseFee,
-	}
-}
-
-// buildGenesisHeader assembles a *types.Header for the genesis block from
-// the besuGenesis fields plus the computed state root.
-//
-// Empty-list / empty-trie fields (TxHash, ReceiptHash, UncleHash, Bloom,
-// WithdrawalsHash if Shanghai+) use the canonical Ethereum constants so
-// the resulting block hash matches what Besu's GenesisState.buildHeader
-// would compute for the same alloc.
-func buildGenesisHeader(g *besuGenesis, stateRoot common.Hash) *types.Header {
-	// EmptyTrie is the standard Ethereum MPT root for empty txs/receipts.
-	emptyTrie := common.HexToHash("0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421")
-	// Empty list keccak — used as the OmmersHash for genesis.
-	emptyList := common.HexToHash("0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347")
-
-	header := &types.Header{
-		ParentHash:  g.parentHash,
-		UncleHash:   emptyList,
-		Coinbase:    g.coinbase,
-		Root:        stateRoot,
-		TxHash:      emptyTrie,
-		ReceiptHash: emptyTrie,
-		Bloom:       types.Bloom{},
-		Difficulty:  g.difficulty,
-		Number:      big.NewInt(0),
-		GasLimit:    g.gasLimit,
-		GasUsed:     0,
-		Time:        g.timestamp,
-		Extra:       g.extraData,
-		MixDigest:   g.mixHash,
-		Nonce:       types.EncodeNonce(g.nonce),
-		BaseFee:     g.baseFee, // nil if pre-London; *big.Int if londonBlock=0
-	}
-	return header
-}
+// Header construction now flows through internal/genesisheader.Build
+// — same path as geth/reth/(after the writer migration to internal/genesisheader.Build) nethermind. Per-fork field
+// activation (BaseFee/WithdrawalsHash/ParentBeaconRoot/ExcessBlobGas/
+// BlobGasUsed/RequestsHash) is centralized there. The previous hand-
+// rolled *besuGenesis struct + buildGenesisHeader func are gone.

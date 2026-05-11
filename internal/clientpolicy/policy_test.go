@@ -52,24 +52,23 @@ func TestValidateForClient_TargetSizeRejectsReth(t *testing.T) {
 }
 
 func TestValidateForClient_ForkCeiling(t *testing.T) {
+	// Pre-Prague forks are EOL and rejected globally by
+	// genesis.BuildChainConfigForFork, so clientpolicy never sees them
+	// in practice. The per-client ceiling check still matters for
+	// future forks past osaka.
 	cases := []struct {
 		client   string
 		fork     string
 		wantPass bool
 	}{
 		{"geth", "prague", true},
-		{"geth", "osaka", true}, // bumped 2026-05 — Osaka adds no new genesis-header fields beyond Prague
-		{"geth", "shanghai", true},
+		{"geth", "osaka", true},
 		{"reth", "prague", true},
 		{"reth", "osaka", true},
-		{"besu", "shanghai", true},
-		{"besu", "prague", false},
-		{"besu", "cancun", false},
-		{"besu", "osaka", false},
-		{"nethermind", "merge", true},
-		{"nethermind", "shanghai", false},
-		{"nethermind", "prague", false},
-		{"nethermind", "osaka", false},
+		{"besu", "prague", true},
+		{"besu", "osaka", true},
+		{"nethermind", "prague", true},
+		{"nethermind", "osaka", true},
 	}
 	for _, tc := range cases {
 		err := ValidateForClient(tc.client, FlagValues{Fork: tc.fork})

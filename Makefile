@@ -1,4 +1,4 @@
-.PHONY: all build test clean install lint fmt help \
+.PHONY: all build test test-race test-coverage bench clean install lint fmt tidy deps help \
 	image-reth image-besu image-nethermind \
 	docker-nethermind smoke-nethermind smoke-nethermind-spamoor \
 	docker-besu smoke-besu smoke-besu-spamoor \
@@ -260,7 +260,7 @@ smoke-geth: docker-geth
 	  --client=geth --db=/datadir/geth/chaindata \
 	  --accounts=$(GETH_SMOKE_ACCOUNTS) --contracts=$(GETH_SMOKE_CONTRACTS) \
 	  --seed=$(GETH_SMOKE_SEED) \
-	  --chain-id=1337 --fork=shanghai --inject-accounts=$(SMOKE_INJECT_ADDRS) \
+	  --chain-id=1337 --fork=osaka --inject-accounts=$(SMOKE_INJECT_ADDRS) \
 	  --verbose 2>&1 \
 	  | tee $(SA_DB_GETH)/smoke.log
 	@expected_root=$$(grep -E '^State Root:' $(SA_DB_GETH)/smoke.log | awk '{print $$NF}'); \
@@ -293,6 +293,13 @@ image-reth:
 
 RESULT_DIR ?= $(PWD)/_artifacts
 
+# All cgo test suites bind-mount the host's spamoor binary at
+# /usr/local/bin/spamoor inside the container (read-only) and override
+# the SPAMOOR env var to point at it. The $(shell command -v ...)
+# fallback to /dev/null keeps `make` from erroring when SPAMOOR is
+# unset on the host — the test then fails loud via REQUIRE_SPAMOOR=1
+# rather than silently t.Skipping.
+
 ## test-besu-suite: Run the besu end-to-end suite (db-gen → boot → spamoor → re-query)
 BESU_SUITE_VOL ?= besu-suite-datadir
 test-besu-suite: image-besu
@@ -302,14 +309,16 @@ test-besu-suite: image-besu
 	docker run --rm \
 	  -v $(BESU_SUITE_VOL):/oracle-data \
 	  -v $(RESULT_DIR):/result \
+	  -v $(shell command -v $(SPAMOOR) 2>/dev/null || echo /dev/null):/usr/local/bin/spamoor:ro \
 	  -v /var/run/docker.sock:/var/run/docker.sock \
 	  -e BESU_ORACLE_DATADIR=/oracle-data \
 	  -e BESU_ORACLE_VOL=$(BESU_SUITE_VOL) \
 	  -e BESU_DOCKER_PLATFORM \
 	  -e RESULT_PATH=/result/besu-result.json \
-	  -e SPAMOOR=$(SPAMOOR) \
-	  --entrypoint bash state-actor-besu-builder:latest \
-	  -c 'cd /app && go test -tags '\''cgo_besu oracle spamoor'\'' ./client/besu/ -run TestE2ESuite -v -timeout 1800s'
+	  -e SPAMOOR=/usr/local/bin/spamoor \
+	  -e REQUIRE_SPAMOOR=1 \
+	  state-actor-besu-builder:latest \
+	  go test -tags 'cgo_besu oracle' ./client/besu/ -run 'TestE2ESuite|TestDifferentialOracle' -v -timeout 1800s
 	docker volume rm -f $(BESU_SUITE_VOL) >/dev/null 2>&1 || true
 
 ## test-nethermind-suite: Run the nethermind end-to-end suite
@@ -321,14 +330,16 @@ test-nethermind-suite: image-nethermind
 	docker run --rm \
 	  -v $(NETH_SUITE_VOL):/oracle-data \
 	  -v $(RESULT_DIR):/result \
+	  -v $(shell command -v $(SPAMOOR) 2>/dev/null || echo /dev/null):/usr/local/bin/spamoor:ro \
 	  -v /var/run/docker.sock:/var/run/docker.sock \
 	  -e NETH_ORACLE_DATADIR=/oracle-data \
 	  -e NETH_ORACLE_VOL=$(NETH_SUITE_VOL) \
 	  -e NETH_DOCKER_PLATFORM \
 	  -e RESULT_PATH=/result/nethermind-result.json \
-	  -e SPAMOOR=$(SPAMOOR) \
-	  --entrypoint bash state-actor-nethermind-builder:latest \
-	  -c 'cd /app && go test -tags '\''cgo_neth oracle spamoor'\'' ./client/nethermind/ -run TestE2ESuite -v -timeout 1800s'
+	  -e SPAMOOR=/usr/local/bin/spamoor \
+	  -e REQUIRE_SPAMOOR=1 \
+	  state-actor-nethermind-builder:latest \
+	  go test -tags 'cgo_neth oracle' ./client/nethermind/ -run 'TestE2ESuite|TestDifferentialOracle' -v -timeout 1800s
 	docker volume rm -f $(NETH_SUITE_VOL) >/dev/null 2>&1 || true
 
 ## test-reth-suite: Run the reth end-to-end suite
@@ -340,20 +351,22 @@ test-reth-suite: image-reth
 	docker run --rm \
 	  -v $(RETH_SUITE_VOL):/oracle-data \
 	  -v $(RESULT_DIR):/result \
+	  -v $(shell command -v $(SPAMOOR) 2>/dev/null || echo /dev/null):/usr/local/bin/spamoor:ro \
 	  -v /var/run/docker.sock:/var/run/docker.sock \
 	  -e RETH_ORACLE_DATADIR=/oracle-data \
 	  -e RETH_ORACLE_VOL=$(RETH_SUITE_VOL) \
 	  -e RETH_DOCKER_PLATFORM \
 	  -e RESULT_PATH=/result/reth-result.json \
-	  -e SPAMOOR=$(SPAMOOR) \
-	  state-actor-reth go test -tags 'cgo_reth oracle spamoor' ./client/reth/ -run TestE2ESuite -v -timeout 1800s
+	  -e SPAMOOR=/usr/local/bin/spamoor \
+	  -e REQUIRE_SPAMOOR=1 \
+	  state-actor-reth go test -tags 'cgo_reth oracle' ./client/reth/ -v -timeout 2700s
 	docker volume rm -f $(RETH_SUITE_VOL) >/dev/null 2>&1 || true
 
 ## test-geth-suite: Run the geth end-to-end suite (pure Go, no Docker build)
 test-geth-suite:
 	mkdir -p $(RESULT_DIR)
-	RESULT_PATH=$(RESULT_DIR)/geth-result.json SPAMOOR=$(SPAMOOR) \
-	  $(GOTEST) -tags 'oracle spamoor' -run TestE2ESuite -v -timeout 1800s ./client/geth/...
+	RESULT_PATH=$(RESULT_DIR)/geth-result.json SPAMOOR=$(SPAMOOR) REQUIRE_SPAMOOR=1 \
+	  $(GOTEST) -tags oracle -run TestE2ESuite -v -timeout 1800s ./client/geth/...
 
 ## help: Show this help
 help:

@@ -55,7 +55,15 @@ var forks = []forkSpec{
 		c.MergeNetsplitBlock = big.NewInt(0)
 	}},
 	{"shanghai", true, func(c *params.ChainConfig) { c.ShanghaiTime = newUint64Ptr(0) }},
-	{"cancun", true, func(c *params.ChainConfig) { c.CancunTime = newUint64Ptr(0) }},
+	{"cancun", true, func(c *params.ChainConfig) {
+		c.CancunTime = newUint64Ptr(0)
+		// go-ethereum v1.17.2+ requires BlobScheduleConfig once Cancun
+		// is active, otherwise core.SetupGenesisBlock fails with
+		// "missing entry for fork \"cancun\" in blobSchedule". Default
+		// schedule covers Cancun + Prague + Osaka with mainnet-current
+		// target/max/updateFraction values.
+		c.BlobScheduleConfig = params.DefaultBlobSchedule
+	}},
 	{"prague", true, func(c *params.ChainConfig) { c.PragueTime = newUint64Ptr(0) }},
 	{"osaka", true, func(c *params.ChainConfig) { c.OsakaTime = newUint64Ptr(0) }},
 }
@@ -65,11 +73,16 @@ var forks = []forkSpec{
 // historical order are also activated at 0, so every IsX(0) predicate
 // returns true up to and including the chosen fork.
 //
-// chainID becomes the chain's only chainID (no override semantics — the
-// new --chain-id flag is the source of truth).
+// User-selectable forks: prague, osaka. Pre-Prague forks are rejected
+// at parse time — state-actor only supports current/future mainnet
+// configs (PoW + pre-Pectra are EOL). Pre-Prague entries in the forks
+// slice stay as cascade-only steps (they apply when a post-Prague fork
+// is selected so the resulting ChainConfig is structurally complete).
 //
-// Returns an error if name is empty or unknown. Use ListForks() for the
-// full set of accepted names; "latest" / "default" alias DefaultFork.
+// chainID becomes the chain's only chainID (no override semantics —
+// the --chain-id flag is the source of truth).
+//
+// Returns an error if name is empty, unknown, or pre-Prague.
 func BuildChainConfigForFork(name string, chainID *big.Int) (*params.ChainConfig, error) {
 	if chainID == nil {
 		return nil, fmt.Errorf("genesis: chainID cannot be nil")
@@ -88,6 +101,9 @@ func BuildChainConfigForFork(name string, chainID *big.Int) (*params.ChainConfig
 	if idx < 0 {
 		return nil, fmt.Errorf("genesis: unknown fork %q (use --list-forks to see valid names)", name)
 	}
+	if !ForkAtLeast(canonical, "prague") {
+		return nil, fmt.Errorf("genesis: fork %q rejected — state-actor only supports prague and later (PoW + pre-Pectra are EOL)", canonical)
+	}
 	cfg := &params.ChainConfig{ChainID: new(big.Int).Set(chainID)}
 	for i := 0; i <= idx; i++ {
 		forks[i].apply(cfg)
@@ -100,13 +116,16 @@ func BuildChainConfigForFork(name string, chainID *big.Int) (*params.ChainConfig
 // reflect the current default without duplicating the constant.
 func LatestForkName() string { return DefaultFork }
 
-// ListForks returns the canonical fork names in historical activation
-// order. Backed directly by the forks slice so changes to the catalogue
-// flow through automatically.
+// ListForks returns the user-selectable fork names in historical
+// activation order — prague and later. Pre-Prague forks (PoW +
+// pre-Pectra) are EOL and rejected at parse time; not surfaced here.
 func ListForks() []string {
-	out := make([]string, len(forks))
-	for i, f := range forks {
-		out[i] = f.name
+	out := make([]string, 0, len(forks))
+	for _, f := range forks {
+		if !ForkAtLeast(f.name, "prague") {
+			continue
+		}
+		out = append(out, f.name)
 	}
 	return out
 }
@@ -124,33 +143,26 @@ func SortedForks() []string {
 // ceiling should be rejected at parse time so the resulting DB doesn't
 // boot with a "wrong genesis hash" mismatch.
 //
-// Today's ceilings:
-//   - geth, reth: osaka — Osaka adds zero new genesis-block fields per
-//     go-ethereum v1.17.2 (Header struct unchanged from Prague's
-//     RequestsHash through Osaka activation; OsakaTime gates only
-//     consensus rules like EIP-7691 BPO + EIP-7825 per-tx gas cap, not
-//     header initialization). geth uses go-ethereum's native genesis
-//     builder; reth uses internal/genesisheader.Build which already
-//     handles up through Prague.
-//   - besu: shanghai (genesis_cgo.supportedFork rejects Cancun+; writer
-//     lacks ParentBeaconRoot/ExcessBlobGas/BlobGasUsed/RequestsHash).
-//     Bumping further requires adding Cancun, Prague, and Osaka header
-//     fields to client/besu/genesis_cgo.buildGenesisHeader — tracked
-//     separately.
-//   - nethermind: merge (writer hardcodes a pre-Shanghai header — no
-//     WithdrawalsHash, no Cancun+ fields). Bumping requires adding
-//     Shanghai, Cancun, Prague, Osaka support to
-//     client/nethermind/genesis_cgo.go — tracked separately.
+// Today's ceilings (all 4 clients on Osaka after the writer migration to internal/genesisheader.Build):
+//   - geth, reth, besu, nethermind: osaka. Header construction flows
+//     through internal/genesisheader.Build for besu/reth/nethermind
+//     (geth uses go-ethereum's native genesis builder, which handles
+//     every fork through Osaka identically). Per-client chainspec
+//     writers emit shanghaiTime/cancunTime/pragueTime/osakaTime/
+//     terminalTotalDifficulty/blobSchedule conditionally based on
+//     g.Config — same activation set the writer encodes.
 //
-// Bump after the corresponding writer adds the missing header fields.
+// Osaka adds zero new genesis-block fields per go-ethereum v1.17.2
+// (Header struct unchanged from Prague's RequestsHash; OsakaTime gates
+// only consensus rules like EIP-7691 BPO + EIP-7825 per-tx gas cap).
+// Verified by internal/genesisheader/osaka_smoke_test.go.
+//
+// Bump beyond Osaka (e.g. Amsterdam) once each writer adds the
+// corresponding header fields.
 func MaxForkForClient(client string) string {
 	switch client {
-	case "geth", "reth":
+	case "geth", "reth", "besu", "nethermind":
 		return "osaka"
-	case "besu":
-		return "shanghai"
-	case "nethermind":
-		return "merge"
 	default:
 		return DefaultFork
 	}
