@@ -1,0 +1,60 @@
+# Story 1 from the spec design doc: reth MDBX dataset with 3 ERC-20s of
+# different sizes, 5 EIP-7702 EOAs, and 20 random-code contracts (the latter
+# come from the existing synthetic-fill loop, not from this spec).
+entities:
+  - kind: contract
+    template: erc20
+    name: token-large
+    parameters:
+      symbol: TOKL
+      decimals: 18
+      name: TokenLarge
+    approximate_size_bytes: 10_000_000_000
+
+  - kind: contract
+    template: erc20
+    name: token-mid
+    parameters:
+      symbol: TOKM
+      decimals: 18
+      name: TokenMid
+    approximate_size_bytes: 5_000_000_000
+
+  - kind: contract
+    template: erc20
+    name: token-small
+    parameters:
+      symbol: TOKS
+      decimals: 18
+      name: TokenSmall
+    approximate_size_bytes: 1_000_000_000
+
+  - kind: eoa
+    name: delegator-1
+    balance: "1000000000000000000"
+    nonce: 10
+    code: "0xef0100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+  - kind: eoa
+    name: delegator-2
+    balance: "1000000000000000000"
+    nonce: 10
+    code: "0xef0100bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+  - kind: eoa
+    name: delegator-3
+    balance: "1000000000000000000"
+    nonce: 10
+    code: "0xef0100cccccccccccccccccccccccccccccccccccccccc"
+
+  - kind: eoa
+    name: delegator-4
+    balance: "1000000000000000000"
+    nonce: 10
+    code: "0xef0100dddddddddddddddddddddddddddddddddddddddd"
+
+  - kind: eoa
+    name: delegator-5
+    balance: "1000000000000000000"
+    nonce: 10
+    code: "0xef0100eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
