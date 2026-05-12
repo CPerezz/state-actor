@@ -43,6 +43,13 @@ var emptyMPTRoot = common.HexToHash("0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b9
 //     (~100K accounts) plus Pebble's 64 MiB write buffer, regardless of
 //     total N. Mirrors client/nethermind/entitygen_cgo.go.
 //     a. Inject pre-funded accounts (cfg.InjectAddresses).
+//     a.5. Genesis-alloc accounts (cfg.GenesisAccounts/Code/Storage). Used
+//        by the e2e suite to deploy EIP-4788/2935/7002/7251 system
+//        contracts at their canonical addresses via
+//        oracle.AddPragueSystemContracts — required for post-Prague block
+//        processing. Routed through WriteContracts so StateAccount.Root +
+//        .CodeHash get spliced from the supplied Storage + Code before the
+//        per-account RLP is stashed in the sorter.
 //     b. Synthetic EOAs in 100K batches.
 //     c. Synthetic contracts in 100K batches. WriteContracts
 //        mutates each contract's StateAccount.Root + .CodeHash IN-PLACE
