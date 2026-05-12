@@ -13,6 +13,7 @@ require (
 	github.com/holiman/uint256 v1.3.2
 	github.com/linxGnu/grocksdb v1.10.8
 	github.com/pierrec/lz4/v4 v4.1.22
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
