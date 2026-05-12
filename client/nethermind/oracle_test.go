@@ -16,6 +16,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/holiman/uint256"
 
+	"github.com/nerolation/state-actor/generator"
 	"github.com/nerolation/state-actor/internal/neth"
 	"github.com/nerolation/state-actor/internal/testhex"
 )
@@ -76,10 +77,14 @@ func TestDifferentialOracle(t *testing.T) {
 			defer dbs.Close()
 
 			stateRoot := common.Hash(neth.EmptyTreeHash)
+			var stats generator.Stats
 			if len(accounts) > 0 {
-				stateRoot, err = writeGenesisAllocAccounts(dbs, accounts, codes, storages)
+				stateRoot, err = writeGenesisAllocAccounts(dbs, accounts, codes, storages, &stats)
 				if err != nil {
 					t.Fatalf("write genesis alloc: %v", err)
+				}
+				if stats.AccountBytes == 0 {
+					t.Errorf("writeGenesisAllocAccounts: stats.AccountBytes == 0 for %d accounts — accounting silently broken", len(accounts))
 				}
 			}
 

@@ -70,39 +70,42 @@ func NewBytecodeWriter(txn *mdbx.Txn, dbi mdbx.DBI, capacity int) *BytecodeWrite
 }
 
 // Write the bytecode under its keccak-256 hash. Returns the hash for splice
-// into Account.BytecodeHash. Idempotent — duplicate writes are skipped.
+// into Account.BytecodeHash, and a bool reporting whether the code was
+// actually written this call (false on LRU hit, DB hit, or empty code).
+// Callers that bill bytes-written stats should gate the increment on the
+// returned bool so dedup hits don't inflate the count.
 //
 // Empty bytecode is allowed (returns the canonical KECCAK_EMPTY hash) but
 // is NOT written to the DB; reth treats EmptyCodeHash specially.
-func (w *BytecodeWriter) Write(code []byte) (common.Hash, error) {
+func (w *BytecodeWriter) Write(code []byte) (common.Hash, bool, error) {
 	hash := crypto.Keccak256Hash(code)
 
 	// Empty code: don't store; reth handles EmptyCodeHash specially.
 	if len(code) == 0 {
-		return hash, nil
+		return hash, false, nil
 	}
 
 	// Already seen via LRU?
 	if _, ok := w.seen.Get(hash); ok {
-		return hash, nil
+		return hash, false, nil
 	}
 
 	// LRU miss: check DB to avoid duplicate writes.
 	if _, err := w.txn.Get(w.dbi, hash[:]); err == nil {
 		// Already in DB; update LRU and return.
 		w.seen.Add(hash, struct{}{})
-		return hash, nil
+		return hash, false, nil
 	} else if !errors.Is(err, mdbx.ErrNotFound) {
-		return common.Hash{}, fmt.Errorf("BytecodeWriter.Write: get %s: %w", hash.Hex(), err)
+		return common.Hash{}, false, fmt.Errorf("BytecodeWriter.Write: get %s: %w", hash.Hex(), err)
 	}
 
 	// Encode and write.
 	val := encodeBytecodeCompact(code)
 	if err := w.txn.Put(w.dbi, hash[:], val, 0); err != nil {
-		return common.Hash{}, fmt.Errorf("BytecodeWriter.Write: put %s: %w", hash.Hex(), err)
+		return common.Hash{}, false, fmt.Errorf("BytecodeWriter.Write: put %s: %w", hash.Hex(), err)
 	}
 	w.seen.Add(hash, struct{}{})
-	return hash, nil
+	return hash, true, nil
 }
 
 // encodeBytecodeCompact encodes code into reth's Bytecode Compact wire format.

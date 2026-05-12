@@ -112,6 +112,10 @@ func (s *stateDBSink) SetStorageNode(addrHash [32]byte, path []byte, pathLen int
 // `storages` may be nil or empty when the alloc carries no contract
 // storage; the per-account storage-trie path is skipped and only the
 // account-trie is built.
+//
+// stats (optional) accumulates AccountBytes (per-account Nethermind RLP
+// encoding length), CodeBytes (raw bytecode length), and StorageBytes
+// (per-slot trimmed-RLP value length). Pass nil to skip accounting.
 func writeGenesisAllocAccounts(
 	dbs *nethDBs,
 	accounts map[common.Address]*types.StateAccount,

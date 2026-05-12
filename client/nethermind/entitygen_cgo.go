@@ -57,6 +57,13 @@ import (
 // genesisAccounts/genesisCodes carry --genesis alloc entries: they go into
 // the same sorted account trie so the resulting state root incorporates
 // both synthetic and explicitly-named accounts.
+//
+// stats (optional) accumulates AccountBytes (per-entity RLP-encoded
+// StateAccount length), CodeBytes (raw bytecode length per contract), and
+// StorageBytes (per-slot trimmed-RLP storage value length). Pass nil to
+// skip accounting. Mirrors the reth/besu writers' "writer-emitted bytes"
+// semantics — values differ across clients because each writer encodes
+// state in its own on-disk format.
 func writeSyntheticAccounts(
 	dbs *nethDBs,
 	cfg generator.Config,
@@ -382,13 +389,15 @@ type hashedSlot struct {
 }
 
 // dirSize returns the total bytes used by all regular files under path,
-// recursively. Used by Phase 2's --target-size sampling: we walk the
+// recursively. Used by Phase 1's --target-size sampling: we walk the
 // nethermind chaindata directory (which contains all 7 RocksDB subdirs
-// plus the chainspec) after each sink flush and stop iteration once it
-// reaches the requested target. Returns 0 + nil if path doesn't exist
-// yet (rare at this point in the writer, but defensive). Mirrors the
-// helper in client/geth/state_writer.go (intentionally duplicated per-
-// client — matches the existing project convention).
+// plus the chainspec) after each contract-batch sink flush and stop the
+// contract loop once it reaches the requested target. (Phase 2 only adds
+// the account-trie nodes on top of what Phase 1 already wrote, so Phase 1
+// is where the size budget is actually enforced.) Returns 0 + nil if path
+// doesn't exist yet (rare at this point in the writer, but defensive).
+// Mirrors the helper in client/geth/state_writer.go (intentionally
+// duplicated per-client — matches the existing project convention).
 func dirSize(path string) (uint64, error) {
 	var total uint64
 	err := filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {

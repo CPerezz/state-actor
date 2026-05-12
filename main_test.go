@@ -20,10 +20,13 @@ import (
 // process Populate). 10 EOAs + 3 contracts with at least 1 slot each is
 // enough to make all three byte counts strictly positive.
 //
-// `go run .` compiles state-actor on the fly, so the build tag matrix
-// (cgo_neth, cgo_reth, etc.) doesn't matter — geth is the always-built
-// default. The test compiles the binary once via `go build` to avoid
-// paying the compile cost per assertion if more cases are added later.
+// The test invokes `go build` to compile state-actor once into a temp
+// binary, then runs that binary with `--benchmark`. Geth is the default
+// client and the only one that builds without `cgo_neth`/`cgo_reth` tags
+// (Docker-only writers), so the geth path is what's exercised here. The
+// nethermind/reth equivalents are pinned at writer-unit level in
+// client/{nethermind,reth}/run_cgo_stats_test.go and
+// client/reth/{data,contracts}_writer_cgo_test.go.
 func TestMainBenchmarkPrintsStats(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping benchmark e2e in short mode")

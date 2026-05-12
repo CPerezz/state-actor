@@ -29,10 +29,19 @@ import (
 // (0 for genesis).
 //
 // stats (optional) accumulates AccountBytes (compact-Account encoding),
-// CodeBytes (raw bytecode length, post-dedupe), and StorageBytes (sum of
-// non-zero slot values written). Pass nil to skip accounting.
+// CodeBytes (raw bytecode length, only counted when BytecodeWriter actually
+// writes — duplicate code is skipped at the LRU/DB layer and does not
+// inflate the count), and StorageBytes (sum of PlainStorageState compact-
+// encoded entries — mirrors nethermind's value-bytes semantics). Pass nil
+// to skip accounting. Increments are applied to stats only after the MDBX
+// transaction commits; a write that rolls back leaves stats untouched.
 func WriteContracts(envs *Envs, contracts []*entitygen.Account, blockNum uint64, stats *generator.Stats) error {
-	return envs.Mdbx.Update(func(txn *mdbx.Txn) error {
+	var (
+		localAccountBytes uint64
+		localStorageBytes uint64
+		localCodeBytes    uint64
+	)
+	err := envs.Mdbx.Update(func(txn *mdbx.Txn) error {
 		blockKey := beU64(blockNum)
 
 		// Shared BytecodeWriter deduplicates across all contracts in this call.
@@ -49,13 +58,15 @@ func WriteContracts(envs *Envs, contracts []*entitygen.Account, blockNum uint64,
 				return fmt.Errorf("WriteContracts: computeStorageRoot %s: %w", contract.Address.Hex(), err)
 			}
 
-			// Step 2: write bytecode and get the code hash.
-			codeHash, err := bw.Write(contract.Code)
+			// Step 2: write bytecode and get the code hash. `wrote` is false on
+			// dedup hits (LRU or DB) — gate the byte count so duplicate code
+			// doesn't inflate stats.CodeBytes beyond what's persisted.
+			codeHash, wrote, err := bw.Write(contract.Code)
 			if err != nil {
 				return fmt.Errorf("WriteContracts: bytecode write %s: %w", contract.Address.Hex(), err)
 			}
-			if stats != nil {
-				stats.CodeBytes += uint64(len(contract.Code))
+			if wrote {
+				localCodeBytes += uint64(len(contract.Code))
 			}
 
 			// Step 3: splice storage root and code hash into StateAccount.
@@ -71,12 +82,6 @@ func WriteContracts(envs *Envs, contracts []*entitygen.Account, blockNum uint64,
 			var accBuf bytes.Buffer
 			ethAccount.EncodeCompact(&accBuf)
 			accountBytes := accBuf.Bytes()
-			if stats != nil {
-				stats.AccountBytes += uint64(len(accountBytes))
-				for _, slot := range contract.Storage {
-					stats.StorageBytes += uint64(len(slot.Value))
-				}
-			}
 
 			// PlainAccountState — raw addr → Account
 			if err := txn.Put(envs.MdbxDBIs["PlainAccountState"], contract.Address[:], accountBytes, 0); err != nil {
@@ -106,12 +111,30 @@ func WriteContracts(envs *Envs, contracts []*entitygen.Account, blockNum uint64,
 				return fmt.Errorf("AccountsHistory %s: %w", contract.Address.Hex(), err)
 			}
 
-			// Step 5: write the 4 storage tables via WriteContractStorage.
-			if err := WriteContractStorage(txn, envs.MdbxDBIs, contract, blockNum); err != nil {
+			// Step 5: write the 4 storage tables via WriteContractStorage. The
+			// returned uint64 is the sum of PlainStorageState entry sizes — see
+			// WriteContractStorage's docstring for the byte semantics.
+			storBytes, err := WriteContractStorage(txn, envs.MdbxDBIs, contract, blockNum)
+			if err != nil {
 				return fmt.Errorf("WriteContracts: WriteContractStorage %s: %w", contract.Address.Hex(), err)
 			}
+
+			// All Puts for this contract succeeded — bank into the local
+			// accumulators. Transferred to the user's stats only if the
+			// enclosing Update commits.
+			localAccountBytes += uint64(len(accountBytes))
+			localStorageBytes += storBytes
 		}
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	if stats != nil {
+		stats.AccountBytes += localAccountBytes
+		stats.StorageBytes += localStorageBytes
+		stats.CodeBytes += localCodeBytes
+	}
+	return nil
 }
 
