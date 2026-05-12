@@ -1,0 +1,72 @@
+# Canonical CI fixture for the --spec feature.
+#
+# Exercises every v1 schema feature in one file. The cross-client spec
+# state-root invariant runs against this YAML; any layer that breaks any
+# feature surfaces here as a state-root mismatch across geth/besu/
+# nethermind/reth.
+#
+# Total on-disk footprint is intentionally modest (~100 MB total) so CI
+# stays fast. Heavier sizing is exercised by the nightly
+# spec-calibration.yml workflow.
+entities:
+  # 1. Template-driven contract with explicit address.
+  - kind: contract
+    template: erc20
+    name: explicit-token
+    address: 0x000000000000000000000000000000000000aaaa
+    balance: "0"
+    parameters:
+      symbol: EXP
+      decimals: 6
+      name: Explicit
+    approximate_size_bytes: 100_000_000
+
+  # 2. Template-driven contract with name-derived address.
+  - kind: contract
+    template: erc20
+    name: named-token
+    parameters:
+      symbol: NMD
+      decimals: 18
+      name: NamedToken
+    approximate_size_bytes: 100_000_000
+
+  # 3. Template-driven contract with position-derived address (no name,
+  # no address — relies on entity index in the spec).
+  - kind: contract
+    template: erc20
+    parameters:
+      symbol: ANON
+      decimals: 18
+      name: AnonToken
+    approximate_size_bytes: 50_000_000
+
+  # 4. Raw-bytecode contract with synthetic storage bloat.
+  - kind: contract
+    name: my-custom-contract
+    code: "0x6080604052348015600f57600080fd5b50603f80601d6000396000f3fe6080604052600080fdfea2"
+    approximate_size_bytes: 50_000_000
+
+  # 5. EOA with EIP-7702 delegation marker AND storage bloat.
+  - kind: eoa
+    name: bloated-validator
+    balance: "1000000000000000000"
+    nonce: 10
+    code: "0xef01001111111111111111111111111111111111111111"
+    approximate_size_bytes: 100_000_000
+
+  # 6. Plain EOA with explicit address.
+  - kind: eoa
+    address: 0x1111111111111111111111111111111111111111
+    balance: "1000000000000000000"
+    nonce: 0
+
+  # 7. Template-default storage only (no approximate_size_bytes — the
+  # template emits just its constant slots: _name/_symbol/_totalSupply).
+  - kind: contract
+    template: erc20
+    name: skeleton-token
+    parameters:
+      symbol: SKL
+      decimals: 18
+      name: SkeletonToken
