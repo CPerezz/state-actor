@@ -126,3 +126,10 @@ func TestAddPragueSystemContracts_NilCfgSafe(t *testing.T) {
 	}()
 	AddPragueSystemContracts(nil)
 }
+
+func safePrefix(b []byte, n int) []byte {
+	if len(b) < n {
+		return b
+	}
+	return b[:n]
+}

@@ -15,6 +15,7 @@ import (
 
 	stategenesis "github.com/nerolation/state-actor/genesis"
 	"github.com/nerolation/state-actor/generator"
+	e2e "github.com/nerolation/state-actor/internal/e2e_testing"
 	"github.com/nerolation/state-actor/internal/oracle"
 	"github.com/nerolation/state-actor/internal/rpcprobe"
 )
@@ -36,7 +37,7 @@ func besuImageRef() string {
 // TestE2ESuite — per-PR end-to-end gate for the besu writer + boot path.
 // Phase 1-2 (datadir + Run + boot besu) is besu-specific; Phase 3-7
 // (capture root → re-query → spamoor → re-query → write result) is in
-// internal/oracle.RunSuitePhases — same shape across all 4 client suites.
+// internal/e2e.RunSuitePhases — same shape across all 4 client suites.
 //
 // Build-tagged `cgo_besu && oracle`. Run via `make test-besu-suite`;
 // not in plain `go test ./...`. Spamoor binary must be on PATH or
@@ -63,7 +64,7 @@ func TestE2ESuite(t *testing.T) {
 		t.Fatalf("BuildSynthetic: %v", err)
 	}
 
-	dd, cleanup := oracle.AcquireDatadir(t, "BESU")
+	dd, cleanup := e2e.AcquireDatadir(t, "BESU")
 	defer cleanup()
 
 	cfg := generator.Config{
@@ -112,9 +113,9 @@ func TestE2ESuite(t *testing.T) {
 	// (clique broken post-Shanghai per hyperledger/besu#8532, removed
 	// in 26.4.0). JWT is disabled for tests.
 	imageRef := besuImageRef()
-	containerName := "state-actor-besu-boot-" + oracle.RandSuffix(8)
+	containerName := "state-actor-besu-boot-" + e2e.RandSuffix(8)
 	chainspecPath := dd.ContainerDatadir + "/" + ChainSpecFileName
-	runArgs := append([]string{"run", "-d"}, oracle.DockerPlatformArgs("BESU_DOCKER_PLATFORM")...)
+	runArgs := append([]string{"run", "-d"}, e2e.DockerPlatformArgs("BESU_DOCKER_PLATFORM")...)
 	runArgs = append(runArgs,
 		"--name", containerName,
 		"-v", dd.VolMount,
@@ -151,7 +152,7 @@ func TestE2ESuite(t *testing.T) {
 		exec.Command("docker", "rm", "-f", containerName).Run() //nolint:errcheck
 	})
 
-	containerIP, err := oracle.InspectContainerIP(containerName)
+	containerIP, err := e2e.InspectContainerIP(containerName)
 	if err != nil {
 		logs, _ := exec.Command("docker", "logs", containerName).CombinedOutput()
 		t.Fatalf("InspectContainerIP: %v\nbesu logs:\n%s", err, logs)
@@ -167,10 +168,10 @@ func TestE2ESuite(t *testing.T) {
 	// Mock CL: drive block production via engine API. Modeled after besu's
 	// own PragueAcceptanceTestHelper.java. The goroutine runs for the
 	// rest of the test so spamoor's txs (Phase 5) get included in blocks.
-	oracle.StartEngineDriver(t, containerIP, rpcURL, oracle.ForkOsaka)
+	e2e.StartEngineDriver(t, containerIP, rpcURL, e2e.ForkOsaka)
 
-	// Phases 3-7: shared via internal/oracle.RunSuitePhases.
-	oracle.RunSuitePhases(t, oracle.SuitePhasesCfg{
+	// Phases 3-7: shared via internal/e2e.RunSuitePhases.
+	e2e.RunSuitePhases(t, e2e.SuitePhasesCfg{
 		ClientName:      "besu",
 		RPCURL:          rpcURL,
 		EOAs:            eoas,

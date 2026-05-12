@@ -15,6 +15,7 @@ import (
 
 	stategenesis "github.com/nerolation/state-actor/genesis"
 	"github.com/nerolation/state-actor/generator"
+	e2e "github.com/nerolation/state-actor/internal/e2e_testing"
 	"github.com/nerolation/state-actor/internal/oracle"
 	iReth "github.com/nerolation/state-actor/internal/reth"
 	"github.com/nerolation/state-actor/internal/rpcprobe"
@@ -63,7 +64,7 @@ func TestRethDbStats(t *testing.T) {
 		t.Skip("oracle test in short mode")
 	}
 
-	dd, cleanup := oracle.AcquireDatadir(t, "RETH")
+	dd, cleanup := e2e.AcquireDatadir(t, "RETH")
 	defer cleanup()
 
 	cfg := generator.Config{DBPath: dd.HostPath}
@@ -71,7 +72,7 @@ func TestRethDbStats(t *testing.T) {
 		t.Fatalf("RunCgo: %v", err)
 	}
 
-	args := append([]string{"run", "--rm"}, oracle.DockerPlatformArgs("RETH_DOCKER_PLATFORM")...)
+	args := append([]string{"run", "--rm"}, e2e.DockerPlatformArgs("RETH_DOCKER_PLATFORM")...)
 	args = append(args,
 		"-v", dd.VolMount,
 		rethImageRef(),
@@ -97,7 +98,7 @@ func TestRethDbStatsSyntheticEOAs(t *testing.T) {
 	}
 	const numAccounts = 100
 
-	dd, cleanup := oracle.AcquireDatadir(t, "RETH")
+	dd, cleanup := e2e.AcquireDatadir(t, "RETH")
 	defer cleanup()
 
 	cfg := generator.Config{DBPath: dd.HostPath, NumAccounts: numAccounts, Seed: 12345}
@@ -109,7 +110,7 @@ func TestRethDbStatsSyntheticEOAs(t *testing.T) {
 		t.Fatalf("AccountsCreated = %d, want %d", stats.AccountsCreated, numAccounts)
 	}
 
-	args := append([]string{"run", "--rm"}, oracle.DockerPlatformArgs("RETH_DOCKER_PLATFORM")...)
+	args := append([]string{"run", "--rm"}, e2e.DockerPlatformArgs("RETH_DOCKER_PLATFORM")...)
 	args = append(args,
 		"-v", dd.VolMount,
 		rethImageRef(),
@@ -148,7 +149,7 @@ func TestRethNodeBootEmptyAlloc(t *testing.T) {
 		t.Skip("oracle boot test skipped in short mode")
 	}
 
-	dd, cleanup := oracle.AcquireDatadir(t, "RETH")
+	dd, cleanup := e2e.AcquireDatadir(t, "RETH")
 	defer cleanup()
 
 	cfg := generator.Config{DBPath: dd.HostPath} // empty alloc
@@ -157,9 +158,9 @@ func TestRethNodeBootEmptyAlloc(t *testing.T) {
 	}
 
 	imageRef := rethImageRef()
-	containerName := "state-actor-reth-boot-empty-" + oracle.RandSuffix(8)
+	containerName := "state-actor-reth-boot-empty-" + e2e.RandSuffix(8)
 	chainspecPath := dd.ContainerDatadir + "/chainspec.json"
-	runArgs := append([]string{"run", "-d"}, oracle.DockerPlatformArgs("RETH_DOCKER_PLATFORM")...)
+	runArgs := append([]string{"run", "-d"}, e2e.DockerPlatformArgs("RETH_DOCKER_PLATFORM")...)
 	runArgs = append(runArgs,
 		"--name", containerName,
 		"-v", dd.VolMount,
@@ -185,7 +186,7 @@ func TestRethNodeBootEmptyAlloc(t *testing.T) {
 		exec.Command("docker", "rm", "-f", containerName).Run() //nolint:errcheck
 	})
 
-	containerIP, err := oracle.InspectContainerIP(containerName)
+	containerIP, err := e2e.InspectContainerIP(containerName)
 	if err != nil {
 		logs, _ := exec.Command("docker", "logs", containerName).CombinedOutput()
 		t.Fatalf("InspectContainerIP: %v\nreth logs:\n%s", err, logs)
@@ -227,7 +228,7 @@ func TestE2ESuite(t *testing.T) {
 		t.Fatalf("BuildSynthetic: %v", err)
 	}
 
-	dd, cleanup := oracle.AcquireDatadir(t, "RETH")
+	dd, cleanup := e2e.AcquireDatadir(t, "RETH")
 	defer cleanup()
 
 	cfg := generator.Config{
@@ -260,9 +261,9 @@ func TestE2ESuite(t *testing.T) {
 	})
 
 	imageRef := rethImageRef()
-	containerName := "state-actor-reth-boot-" + oracle.RandSuffix(8)
+	containerName := "state-actor-reth-boot-" + e2e.RandSuffix(8)
 	chainspecPath := dd.ContainerDatadir + "/chainspec.json"
-	runArgs := append([]string{"run", "-d"}, oracle.DockerPlatformArgs("RETH_DOCKER_PLATFORM")...)
+	runArgs := append([]string{"run", "-d"}, e2e.DockerPlatformArgs("RETH_DOCKER_PLATFORM")...)
 	runArgs = append(runArgs,
 		"--name", containerName,
 		"-v", dd.VolMount,
@@ -288,7 +289,7 @@ func TestE2ESuite(t *testing.T) {
 		exec.Command("docker", "rm", "-f", containerName).Run() //nolint:errcheck
 	})
 
-	containerIP, err := oracle.InspectContainerIP(containerName)
+	containerIP, err := e2e.InspectContainerIP(containerName)
 	if err != nil {
 		logs, _ := exec.Command("docker", "logs", containerName).CombinedOutput()
 		t.Fatalf("InspectContainerIP: %v\nreth logs:\n%s", err, logs)
@@ -300,8 +301,8 @@ func TestE2ESuite(t *testing.T) {
 		t.Fatalf("RPC never came up (logs captured in t.Cleanup): %v", err)
 	}
 
-	// Phases 3-7: shared via internal/oracle.RunSuitePhases.
-	oracle.RunSuitePhases(t, oracle.SuitePhasesCfg{
+	// Phases 3-7: shared via internal/e2e.RunSuitePhases.
+	e2e.RunSuitePhases(t, e2e.SuitePhasesCfg{
 		ClientName:      "reth",
 		RPCURL:          rpcURL,
 		EOAs:            eoas,

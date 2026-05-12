@@ -18,6 +18,7 @@ import (
 
 	stategenesis "github.com/nerolation/state-actor/genesis"
 	"github.com/nerolation/state-actor/generator"
+	e2e "github.com/nerolation/state-actor/internal/e2e_testing"
 	"github.com/nerolation/state-actor/internal/oracle"
 	"github.com/nerolation/state-actor/internal/rpcprobe"
 )
@@ -124,7 +125,7 @@ func TestE2ESuite(t *testing.T) {
 	// the chainID in state-actor's genesis. --db.engine=pebble points
 	// geth at our Pebble datadir. --http.api includes txpool so spamoor
 	// can monitor pending txs.
-	containerName := "state-actor-geth-boot-" + oracle.RandSuffix(8)
+	containerName := "state-actor-geth-boot-" + e2e.RandSuffix(8)
 	hostPort := freeTCPPort(t)
 
 	// Run geth as the test process's UID/GID so any files it writes to
@@ -132,7 +133,7 @@ func TestE2ESuite(t *testing.T) {
 	// on native Linux (e.g. GHA runners), geth's default-root container
 	// would write root-owned files into datadir, and t.TempDir's cleanup
 	// (running as the test user) would fail with "permission denied".
-	runArgs := append([]string{"run", "-d"}, oracle.DockerPlatformArgs("GETH_DOCKER_PLATFORM")...)
+	runArgs := append([]string{"run", "-d"}, e2e.DockerPlatformArgs("GETH_DOCKER_PLATFORM")...)
 	runArgs = append(runArgs,
 		"--name", containerName,
 		"--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
@@ -174,8 +175,8 @@ func TestE2ESuite(t *testing.T) {
 		t.Fatalf("RPC never came up (logs captured in t.Cleanup): %v", err)
 	}
 
-	// Phases 3-7: shared via internal/oracle.RunSuitePhases.
-	oracle.RunSuitePhases(t, oracle.SuitePhasesCfg{
+	// Phases 3-7: shared via internal/e2e.RunSuitePhases.
+	e2e.RunSuitePhases(t, e2e.SuitePhasesCfg{
 		ClientName:      "geth",
 		RPCURL:          rpcURL,
 		EOAs:            eoas,

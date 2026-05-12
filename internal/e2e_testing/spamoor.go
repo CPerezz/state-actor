@@ -1,4 +1,4 @@
-package oracle
+package e2e_testing
 
 import (
 	"errors"
