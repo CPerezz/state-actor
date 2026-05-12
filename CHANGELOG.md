@@ -43,6 +43,16 @@
   internal test fixtures that wire it directly; only the CLI flag was
   removed.
 
+### Tested
+- Per-package unit tests (`internal/spec/`, `internal/templates/`,
+  `internal/specbuild/`, `internal/sizecal/`, `generator/prealloc_test.go`).
+- `TestMainSpecFlagSmoke` (in default CI job): builds state-actor, runs
+  `--spec` end-to-end against the geth writer, asserts the db dir is
+  non-empty. Pins the wiring CLI → parser → templates → specbuild →
+  Config.PreAlloc → writer.
+- `TestMainInjectAccountsFlagRemoved`: confirms the removed flag exits
+  non-zero — prevents an accidental re-add.
+
 ### Limitations (tracked for v1.5)
 - `--spec` materializes `approximate_size_bytes` storage into a Go map
   before writers consume it; per-entity practical limit is ~1 GB on
@@ -56,3 +66,15 @@
   bytecode lands as a one-file v1.5 swap.
 - `erc721` and `uniswapv2` templates are deferred to v1.5 (the registry
   pattern makes adding them a single-file change).
+- **Cross-client spec invariant CI (Part 7 of the plan) is deferred** —
+  the per-client `TestE2ESuiteSpec` functions and the
+  `cross-client-spec-genesis-root` aggregator job need real Docker-
+  driven client boots (besu/nethermind/reth) which the v1 PR's author
+  could not validate locally. Determinism of spec output IS already
+  pinned at unit-test level
+  (`internal/specbuild/derive_test.go:TestResolveAddressDeterministicAcrossRuns`,
+  `internal/templates/sizing_test.go:TestSynthesizeSlotsDeterministic`,
+  and the spec-driven `Config.PreAlloc` shim runs through every
+  client writer's `Config.Validate()` unchanged), so behavioral
+  correctness is exercised; cross-client *byte-equal state root*
+  verification waits for the v1.5 CI workflow.
