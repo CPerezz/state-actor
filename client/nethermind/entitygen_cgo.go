@@ -69,6 +69,7 @@ func writeSyntheticAccounts(
 	cfg generator.Config,
 	genesisAccounts map[common.Address]*types.StateAccount,
 	genesisCodes map[common.Address][]byte,
+	genesisStorages map[common.Address]map[common.Hash]common.Hash,
 	stats *generator.Stats,
 ) (common.Hash, error) {
 	sink := newStateDBSink(dbs.state)
@@ -104,9 +105,16 @@ func writeSyntheticAccounts(
 	codeWO := grocksdb.NewDefaultWriteOptions()
 	defer codeWO.Destroy()
 
-	// genesis-alloc accounts go to the temp DB AND the code DB (for
-	// contracts with bytecode), but not through the storage-trie path —
-	// genesis allocs don't yet carry storage in this writer.
+	// Genesis-alloc accounts go to the temp DB AND the code DB AND
+	// (for storage-bearing accounts) into the per-account storage-trie
+	// path that produces account.Root before the account RLP is queued.
+	//
+	// Storage handling closes the nethermind half of issue #22: storage
+	// slots supplied via the legacy GenesisStorage map (or materialized
+	// from Config.PreAlloc by Validate's shim) are now written exactly
+	// like writeGenesisAllocAccounts does it — keccak(slotKey)-sorted
+	// slots driven through builder.AddStorageSlot, then FinalizeStorageRoot
+	// stamping account.Root.
 	for addr, acc := range genesisAccounts {
 		if code, ok := genesisCodes[addr]; ok && len(code) > 0 {
 			ch := crypto.Keccak256Hash(code)
@@ -118,6 +126,58 @@ func writeSyntheticAccounts(
 				stats.CodeBytes += uint64(len(code))
 			}
 		}
+
+		// Storage trie. Lifted from writeGenesisAllocAccounts:154-213 —
+		// same sort discipline (keccak(slotKey) ascending), same
+		// leading-zero-trim + RLP encode, same finalize-and-stamp pattern.
+		if slots := genesisStorages[addr]; len(slots) > 0 {
+			ahBytes := crypto.Keccak256Hash(addr[:])
+			var ah [32]byte
+			copy(ah[:], ahBytes[:])
+
+			type hashedSlot struct {
+				keyHash common.Hash
+				value   common.Hash
+			}
+			hashed := make([]hashedSlot, 0, len(slots))
+			for k, v := range slots {
+				hashed = append(hashed, hashedSlot{
+					keyHash: crypto.Keccak256Hash(k[:]),
+					value:   v,
+				})
+			}
+			sort.Slice(hashed, func(i, j int) bool {
+				return bytes.Compare(hashed[i].keyHash[:], hashed[j].keyHash[:]) < 0
+			})
+			for _, s := range hashed {
+				v := s.value[:]
+				for len(v) > 0 && v[0] == 0 {
+					v = v[1:]
+				}
+				if len(v) == 0 {
+					continue // zero slot = deletion; skip
+				}
+				valRLP, err := gethrlp.EncodeToBytes(v)
+				if err != nil {
+					return common.Hash{}, fmt.Errorf("encode genesis-alloc slot %s/%s: %w",
+						addr.Hex(), s.keyHash.Hex(), err)
+				}
+				if err := builder.AddStorageSlot(ah, [32]byte(s.keyHash), valRLP); err != nil {
+					return common.Hash{}, fmt.Errorf("add genesis-alloc storage slot %s/%s: %w",
+						addr.Hex(), s.keyHash.Hex(), err)
+				}
+				if stats != nil {
+					stats.StorageBytes += uint64(len(valRLP))
+				}
+			}
+			storageRoot, err := builder.FinalizeStorageRoot(ah)
+			if err != nil {
+				return common.Hash{}, fmt.Errorf("finalize genesis-alloc storage root for %s: %w",
+					addr.Hex(), err)
+			}
+			acc.Root = common.Hash(storageRoot)
+		}
+
 		ah := crypto.Keccak256Hash(addr[:])
 		data, err := gethrlp.EncodeToBytes(acc)
 		if err != nil {

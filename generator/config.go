@@ -9,6 +9,7 @@ import (
 
 	"github.com/nerolation/state-actor/genesis"
 	"github.com/nerolation/state-actor/internal/entitygen"
+	"github.com/nerolation/state-actor/internal/templates"
 )
 
 // TrieMode represents the trie algorithm used for state root computation.
@@ -123,6 +124,19 @@ type Config struct {
 	// GroupDepth is the binary trie group depth (1-8, default 8).
 	// Controls how many trie levels are serialized per DB entry.
 	GroupDepth int
+
+	// PreAlloc carries entities produced by the --spec flag's YAML
+	// translator (internal/specbuild/). It is the v1.5+ unified replacement
+	// for GenesisAccounts/Code/Storage; in v1 the back-compat shim in
+	// Validate() folds PreAlloc into the three legacy maps so every writer
+	// keeps its existing code path. Eventually writers will consume
+	// PreAlloc natively (enabling streaming storage iteration for multi-GB
+	// per-entity specs) and the legacy maps will be removed.
+	//
+	// Validate() must be called before any writer consumes Config — that
+	// is where the materialization happens. Writers should treat reading
+	// PreAlloc directly as an error until v1.5.
+	PreAlloc []templates.PreAllocEntity
 }
 
 // Validate rejects malformed Config combinations at command start, before
@@ -131,15 +145,29 @@ type Config struct {
 // silently corrupt state (e.g. besu writes InjectAddresses first, geth
 // writes GenesisAccounts first; same cfg → different outcomes).
 //
+// Validate also materializes PreAlloc entries (from the --spec YAML
+// translator) into the legacy GenesisAccounts/Code/Storage maps so v1
+// writers don't need to change. This is the back-compat shim — see the
+// PreAlloc field comment. Writers should call Validate as their first
+// non-trivial step.
+//
 // Rejects:
 //   - InjectAddresses ∩ GenesisAccounts ≠ ∅ — ambiguous precedence.
-//   - GenesisCode address not in GenesisAccounts — orphan code (would
-//     silently disappear in writers that lookup by account first).
+//   - PreAlloc addresses collide with GenesisAccounts/InjectAddresses
+//     (caught after materialization).
+//   - GenesisCode address not in GenesisAccounts — orphan code.
 //   - GenesisStorage address not in GenesisAccounts — orphan storage.
 //
 // Called by client writers as the first non-trivial step of
 // Run() / Populate() / runImpl().
 func (c *Config) Validate() error {
+	// Step 1: materialize PreAlloc → legacy maps. After this point the
+	// existing checks treat both YAML-spec entries and programmatic
+	// alloc entries uniformly.
+	if err := c.materializePreAlloc(); err != nil {
+		return err
+	}
+
 	if len(c.InjectAddresses) > 0 && len(c.GenesisAccounts) > 0 {
 		injectSet := make(map[common.Address]struct{}, len(c.InjectAddresses))
 		for _, a := range c.InjectAddresses {
@@ -165,6 +193,60 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("Config: GenesisStorage[%s] has no corresponding GenesisAccounts entry (orphan storage)", a.Hex())
 		}
 	}
+	return nil
+}
+
+// materializePreAlloc folds Config.PreAlloc into the legacy
+// GenesisAccounts/Code/Storage maps. Each PreAllocEntity becomes one
+// GenesisAccounts entry plus optional GenesisCode/GenesisStorage entries.
+// Storage iter.Seq2 is drained into a map — RAM is proportional to the
+// total slot count across all entities. Multi-GB spec entries should not
+// use this v1 path (a streaming-writer follow-up will avoid the
+// materialization).
+//
+// After PreAlloc is materialized, the field is left as-is so callers can
+// still inspect it (e.g. for diagnostics) but writers should not iterate
+// it directly.
+//
+// Idempotent: calling Validate twice does not double-materialize because
+// the function refuses to overwrite an existing key in GenesisAccounts
+// (returns an error instead, surfacing the collision).
+func (c *Config) materializePreAlloc() error {
+	if len(c.PreAlloc) == 0 {
+		return nil
+	}
+	if c.GenesisAccounts == nil {
+		c.GenesisAccounts = make(map[common.Address]*types.StateAccount, len(c.PreAlloc))
+	}
+	if c.GenesisCode == nil {
+		c.GenesisCode = make(map[common.Address][]byte)
+	}
+	if c.GenesisStorage == nil {
+		c.GenesisStorage = make(map[common.Address]map[common.Hash]common.Hash)
+	}
+
+	for i, pe := range c.PreAlloc {
+		if _, dup := c.GenesisAccounts[pe.Address]; dup {
+			return fmt.Errorf("Config.PreAlloc[%d]: address %s already present in GenesisAccounts (programmatic-alloc + spec-alloc collision)", i, pe.Address.Hex())
+		}
+		c.GenesisAccounts[pe.Address] = pe.Account
+		if len(pe.Code) > 0 {
+			c.GenesisCode[pe.Address] = pe.Code
+		}
+		if pe.Storage != nil {
+			storage := make(map[common.Hash]common.Hash)
+			pe.Storage(func(k, v common.Hash) bool {
+				storage[k] = v
+				return true
+			})
+			if len(storage) > 0 {
+				c.GenesisStorage[pe.Address] = storage
+			}
+		}
+	}
+	// PreAlloc has been consumed; clearing it makes Validate idempotent
+	// across multiple calls (some test harnesses validate twice).
+	c.PreAlloc = nil
 	return nil
 }
 

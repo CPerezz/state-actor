@@ -95,23 +95,11 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 	stats := &generator.Stats{}
 	switch {
 	case cfg.NumAccounts > 0 || cfg.NumContracts > 0:
-		// writeSyntheticAccounts doesn't yet thread alloc storage through
-		// the temp-Pebble pipeline. If a test supplies cfg.GenesisStorage
-		// AND asks for synthetic accounts, those storage slots would
-		// silently disappear from the state root. Fail loud — tracked at
+		// Issue #22 is fixed: writeSyntheticAccounts now threads
+		// allocStorages through the per-account storage-trie path so
+		// alloc storage AND synthetic state coexist correctly. Closes
 		// https://github.com/nerolation/state-actor/issues/22.
-		if len(allocStorages) > 0 {
-			return nil, fmt.Errorf(
-				"--client=nethermind: cfg.GenesisStorage with %d storage-bearing alloc account(s) "+
-					"is incompatible with --accounts/--contracts > 0. The synthetic-accounts path "+
-					"does not yet write alloc storage tries; using it now would silently drop your "+
-					"storage entries. Run with --accounts=0 --contracts=0 to use the alloc-only path, "+
-					"or remove storage from the alloc. Tracked at "+
-					"https://github.com/nerolation/state-actor/issues/22.",
-				len(allocStorages),
-			)
-		}
-		stateRoot, err = writeSyntheticAccounts(dbs, cfg, allocAccounts, allocCodes, stats)
+		stateRoot, err = writeSyntheticAccounts(dbs, cfg, allocAccounts, allocCodes, allocStorages, stats)
 		if err != nil {
 			return nil, fmt.Errorf("write synthetic accounts: %w", err)
 		}
