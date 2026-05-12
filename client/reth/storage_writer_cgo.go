@@ -28,17 +28,26 @@ import (
 //
 // For genesis (blockNum=0) the "before" value in StorageChangeSets is 0 —
 // the slot was newly set. Composable with WriteEOAs / future WriteContracts.
+//
+// Returns the per-slot StorageEntry size (PlainStorageState compact encoding)
+// summed over all slots. This is the byte unit reth's writer commits to the
+// primary storage table — used by the caller's stats accumulator. The
+// auxiliary tables (HashedStorages / StorageChangeSets / StoragesHistory) and
+// their keys are not counted, mirroring nethermind's "value-bytes" semantics.
+// Caller is responsible for transferring the returned count to *generator.Stats
+// only after the enclosing MDBX transaction commits.
 func WriteContractStorage(
 	txn *mdbx.Txn,
 	dbis map[string]mdbx.DBI,
 	contract *entitygen.Account,
 	blockNum uint64,
-) error {
+) (uint64, error) {
 	blockKey := iReth.BlockNumberAddress{BlockNumber: blockNum, Address: contract.Address}
 	var blockKeyBuf bytes.Buffer
 	blockKey.EncodeKey(&blockKeyBuf)
 	blockKeyBytes := blockKeyBuf.Bytes()
 
+	var storageBytes uint64
 	for _, slot := range contract.Storage {
 		slotValueU256 := uint256.NewInt(0).SetBytes(slot.Value[:])
 
@@ -46,8 +55,9 @@ func WriteContractStorage(
 		plainEntry := iReth.StorageEntry{Key: slot.Key, Value: slotValueU256}
 		var plainBuf bytes.Buffer
 		plainEntry.EncodeCompact(&plainBuf)
-		if err := txn.Put(dbis["PlainStorageState"], contract.Address[:], plainBuf.Bytes(), 0); err != nil {
-			return fmt.Errorf("PlainStorageState %s slot %s: %w",
+		plainEntryBytes := plainBuf.Bytes()
+		if err := txn.Put(dbis["PlainStorageState"], contract.Address[:], plainEntryBytes, 0); err != nil {
+			return 0, fmt.Errorf("PlainStorageState %s slot %s: %w",
 				contract.Address.Hex(), slot.Key.Hex(), err)
 		}
 
@@ -57,7 +67,7 @@ func WriteContractStorage(
 		var hashedBuf bytes.Buffer
 		hashedEntry.EncodeCompact(&hashedBuf)
 		if err := txn.Put(dbis["HashedStorages"], contract.AddrHash[:], hashedBuf.Bytes(), 0); err != nil {
-			return fmt.Errorf("HashedStorages %s slot %s: %w",
+			return 0, fmt.Errorf("HashedStorages %s slot %s: %w",
 				contract.AddrHash.Hex(), slot.Key.Hex(), err)
 		}
 
@@ -67,7 +77,7 @@ func WriteContractStorage(
 		var changeBuf bytes.Buffer
 		changeEntry.EncodeCompact(&changeBuf)
 		if err := txn.Put(dbis["StorageChangeSets"], blockKeyBytes, changeBuf.Bytes(), 0); err != nil {
-			return fmt.Errorf("StorageChangeSets %s slot %s: %w",
+			return 0, fmt.Errorf("StorageChangeSets %s slot %s: %w",
 				contract.Address.Hex(), slot.Key.Hex(), err)
 		}
 
@@ -84,9 +94,10 @@ func WriteContractStorage(
 		var listBuf bytes.Buffer
 		iReth.EncodeIntegerList(&listBuf, []uint64{blockNum})
 		if err := txn.Put(dbis["StoragesHistory"], sskBuf.Bytes(), listBuf.Bytes(), 0); err != nil {
-			return fmt.Errorf("StoragesHistory %s slot %s: %w",
+			return 0, fmt.Errorf("StoragesHistory %s slot %s: %w",
 				contract.Address.Hex(), slot.Key.Hex(), err)
 		}
+		storageBytes += uint64(len(plainEntryBytes))
 	}
-	return nil
+	return storageBytes, nil
 }

@@ -43,6 +43,13 @@ var emptyMPTRoot = common.HexToHash("0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b9
 //     (~100K accounts) plus Pebble's 64 MiB write buffer, regardless of
 //     total N. Mirrors client/nethermind/entitygen_cgo.go.
 //     a. Inject pre-funded accounts (cfg.InjectAddresses).
+//     a.5. Genesis-alloc accounts (cfg.GenesisAccounts/Code/Storage). Used
+//        by the e2e suite to deploy EIP-4788/2935/7002/7251 system
+//        contracts at their canonical addresses via
+//        oracle.AddPragueSystemContracts — required for post-Prague block
+//        processing. Routed through WriteContracts so StateAccount.Root +
+//        .CodeHash get spliced from the supplied Storage + Code before the
+//        per-account RLP is stashed in the sorter.
 //     b. Synthetic EOAs in 100K batches.
 //     c. Synthetic contracts in 100K batches. WriteContracts
 //        mutates each contract's StateAccount.Root + .CodeHash IN-PLACE
@@ -88,6 +95,7 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 	stateRoot := emptyMPTRoot
 	accountsCreated := 0
 	contractsCreated := 0
+	stats := &generator.Stats{}
 
 	// Pebble-backed sorter colocated with the datadir. The temp dir lives
 	// under cfg.DBPath/reth-sort-* so it shares disk budget with the (often
@@ -124,7 +132,7 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 		for i, addr := range cfg.InjectAddresses {
 			injected[i] = buildInjectedAccount(addr)
 		}
-		if err := WriteEOAs(envs, injected, 0); err != nil {
+		if err := WriteEOAs(envs, injected, 0, stats); err != nil {
 			return nil, fmt.Errorf("RunCgo: WriteEOAs(injected): %w", err)
 		}
 		for _, acc := range injected {
@@ -145,7 +153,7 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 	// captures the correct global-state-trie values.
 	if len(cfg.GenesisAccounts) > 0 {
 		allocAccounts := buildAllocAccounts(cfg)
-		if err := WriteContracts(envs, allocAccounts, 0); err != nil {
+		if err := WriteContracts(envs, allocAccounts, 0, stats); err != nil {
 			return nil, fmt.Errorf("RunCgo: WriteContracts(alloc): %w", err)
 		}
 		for _, acc := range allocAccounts {
@@ -188,7 +196,7 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 			for i := 0; i < b; i++ {
 				batch[i] = entitygen.GenerateEOA(rng)
 			}
-			if err := WriteEOAs(envs, batch, 0); err != nil {
+			if err := WriteEOAs(envs, batch, 0, stats); err != nil {
 				return nil, fmt.Errorf("RunCgo: WriteEOAs: %w", err)
 			}
 			for _, acc := range batch {
@@ -233,7 +241,7 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 				// (storage trie root) and .CodeHash in-place BEFORE
 				// returning, so the per-account RLP-encode below captures
 				// the correct values for the global state trie.
-				if err := WriteContracts(envs, batch, 0); err != nil {
+				if err := WriteContracts(envs, batch, 0, stats); err != nil {
 					return nil, fmt.Errorf("RunCgo: WriteContracts: %w", err)
 				}
 				for _, c := range batch {
@@ -301,11 +309,11 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 	}
 
 	// Phase 7: return stats (envs.Close is deferred above).
-	return &generator.Stats{
-		StateRoot:        stateRoot,
-		AccountsCreated:  accountsCreated,
-		ContractsCreated: contractsCreated,
-	}, nil
+	stats.StateRoot = stateRoot
+	stats.AccountsCreated = accountsCreated
+	stats.ContractsCreated = contractsCreated
+	stats.TotalBytes = stats.AccountBytes + stats.StorageBytes + stats.CodeBytes
+	return stats, nil
 }
 
 // dirSize returns the total disk-allocated bytes used by all regular

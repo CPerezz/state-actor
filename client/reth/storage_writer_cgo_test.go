@@ -41,7 +41,8 @@ func TestWriteContractStorageRoundtrip(t *testing.T) {
 	}
 
 	err = envs.Mdbx.Update(func(txn *mdbx.Txn) error {
-		return WriteContractStorage(txn, envs.MdbxDBIs, contract, 0)
+		_, err := WriteContractStorage(txn, envs.MdbxDBIs, contract, 0)
+		return err
 	})
 	if err != nil {
 		t.Fatalf("WriteContractStorage: %v", err)

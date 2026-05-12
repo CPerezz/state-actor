@@ -92,6 +92,7 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 	allocAccounts := cfg.GenesisAccounts
 	allocCodes := cfg.GenesisCode
 	allocStorages := cfg.GenesisStorage
+	stats := &generator.Stats{}
 	switch {
 	case cfg.NumAccounts > 0 || cfg.NumContracts > 0:
 		// writeSyntheticAccounts doesn't yet thread alloc storage through
@@ -110,16 +111,17 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 				len(allocStorages),
 			)
 		}
-		stateRoot, err = writeSyntheticAccounts(dbs, cfg, allocAccounts, allocCodes)
+		stateRoot, err = writeSyntheticAccounts(dbs, cfg, allocAccounts, allocCodes, stats)
 		if err != nil {
 			return nil, fmt.Errorf("write synthetic accounts: %w", err)
 		}
 	case len(allocAccounts) > 0:
-		stateRoot, err = writeGenesisAllocAccounts(dbs, allocAccounts, allocCodes, allocStorages)
+		stateRoot, err = writeGenesisAllocAccounts(dbs, allocAccounts, allocCodes, allocStorages, stats)
 		if err != nil {
 			return nil, fmt.Errorf("write genesis alloc: %w", err)
 		}
 	}
+	stats.TotalBytes = stats.AccountBytes + stats.StorageBytes + stats.CodeBytes
 
 	// Header construction now flows through internal/genesisheader.Build —
 	// same path as besu/reth. Per-fork field activation
@@ -151,10 +153,9 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 		}
 	}
 
-	return &generator.Stats{
-		StateRoot:        header.Root,
-		AccountsCreated:  cfg.NumAccounts + len(cfg.InjectAddresses),
-		ContractsCreated: cfg.NumContracts,
-	}, nil
+	stats.StateRoot = header.Root
+	stats.AccountsCreated = cfg.NumAccounts + len(cfg.InjectAddresses)
+	stats.ContractsCreated = cfg.NumContracts
+	return stats, nil
 }
 

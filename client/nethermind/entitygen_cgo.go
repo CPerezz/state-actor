@@ -57,11 +57,19 @@ import (
 // genesisAccounts/genesisCodes carry --genesis alloc entries: they go into
 // the same sorted account trie so the resulting state root incorporates
 // both synthetic and explicitly-named accounts.
+//
+// stats (optional) accumulates AccountBytes (per-entity RLP-encoded
+// StateAccount length), CodeBytes (raw bytecode length per contract), and
+// StorageBytes (per-slot trimmed-RLP storage value length). Pass nil to
+// skip accounting. Mirrors the reth/besu writers' "writer-emitted bytes"
+// semantics — values differ across clients because each writer encodes
+// state in its own on-disk format.
 func writeSyntheticAccounts(
 	dbs *nethDBs,
 	cfg generator.Config,
 	genesisAccounts map[common.Address]*types.StateAccount,
 	genesisCodes map[common.Address][]byte,
+	stats *generator.Stats,
 ) (common.Hash, error) {
 	sink := newStateDBSink(dbs.state)
 	defer func() { _ = sink.close() }()
@@ -106,6 +114,9 @@ func writeSyntheticAccounts(
 				return common.Hash{}, fmt.Errorf("write genesis code for %s: %w", addr.Hex(), err)
 			}
 			acc.CodeHash = ch[:]
+			if stats != nil {
+				stats.CodeBytes += uint64(len(code))
+			}
 		}
 		ah := crypto.Keccak256Hash(addr[:])
 		data, err := gethrlp.EncodeToBytes(acc)
@@ -114,6 +125,9 @@ func writeSyntheticAccounts(
 		}
 		if err := batch.Put(ah[:], data); err != nil {
 			return common.Hash{}, fmt.Errorf("queue genesis account: %w", err)
+		}
+		if stats != nil {
+			stats.AccountBytes += uint64(len(data))
 		}
 		if err := flushBatchIfFull(); err != nil {
 			return common.Hash{}, err
@@ -145,6 +159,9 @@ func writeSyntheticAccounts(
 		}
 		if err := batch.Put(ah[:], data); err != nil {
 			return common.Hash{}, fmt.Errorf("queue injected account: %w", err)
+		}
+		if stats != nil {
+			stats.AccountBytes += uint64(len(data))
 		}
 		if err := flushBatchIfFull(); err != nil {
 			return common.Hash{}, err
@@ -197,6 +214,9 @@ func writeSyntheticAccounts(
 		if err := batch.Put(acc.AddrHash[:], data); err != nil {
 			return common.Hash{}, fmt.Errorf("queue EOA: %w", err)
 		}
+		if stats != nil {
+			stats.AccountBytes += uint64(len(data))
+		}
 		if err := flushBatchIfFull(); err != nil {
 			return common.Hash{}, err
 		}
@@ -222,6 +242,9 @@ func writeSyntheticAccounts(
 		// Write code first — keccak(code) goes into the State leaf below.
 		if err := dbs.code.Put(codeWO, contract.CodeHash[:], contract.Code); err != nil {
 			return common.Hash{}, fmt.Errorf("write contract code: %w", err)
+		}
+		if stats != nil {
+			stats.CodeBytes += uint64(len(contract.Code))
 		}
 
 		// Storage trie. AddStorageSlot expects slotKeyHash-ascending order.
@@ -252,6 +275,9 @@ func writeSyntheticAccounts(
 				if err := builder.AddStorageSlot([32]byte(contract.AddrHash), [32]byte(s.keyHash), valueRLP); err != nil {
 					return common.Hash{}, fmt.Errorf("add storage slot: %w", err)
 				}
+				if stats != nil {
+					stats.StorageBytes += uint64(len(valueRLP))
+				}
 			}
 			storageRoot, err := builder.FinalizeStorageRoot([32]byte(contract.AddrHash))
 			if err != nil {
@@ -266,6 +292,9 @@ func writeSyntheticAccounts(
 		}
 		if err := batch.Put(contract.AddrHash[:], data); err != nil {
 			return common.Hash{}, fmt.Errorf("queue contract: %w", err)
+		}
+		if stats != nil {
+			stats.AccountBytes += uint64(len(data))
 		}
 		if err := flushBatchIfFull(); err != nil {
 			return common.Hash{}, err
@@ -360,13 +389,15 @@ type hashedSlot struct {
 }
 
 // dirSize returns the total bytes used by all regular files under path,
-// recursively. Used by Phase 2's --target-size sampling: we walk the
+// recursively. Used by Phase 1's --target-size sampling: we walk the
 // nethermind chaindata directory (which contains all 7 RocksDB subdirs
-// plus the chainspec) after each sink flush and stop iteration once it
-// reaches the requested target. Returns 0 + nil if path doesn't exist
-// yet (rare at this point in the writer, but defensive). Mirrors the
-// helper in client/geth/state_writer.go (intentionally duplicated per-
-// client — matches the existing project convention).
+// plus the chainspec) after each contract-batch sink flush and stop the
+// contract loop once it reaches the requested target. (Phase 2 only adds
+// the account-trie nodes on top of what Phase 1 already wrote, so Phase 1
+// is where the size budget is actually enforced.) Returns 0 + nil if path
+// doesn't exist yet (rare at this point in the writer, but defensive).
+// Mirrors the helper in client/geth/state_writer.go (intentionally
+// duplicated per-client — matches the existing project convention).
 func dirSize(path string) (uint64, error) {
 	var total uint64
 	err := filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {

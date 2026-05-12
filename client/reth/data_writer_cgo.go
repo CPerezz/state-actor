@@ -8,6 +8,7 @@ import (
 
 	"github.com/erigontech/mdbx-go/mdbx"
 
+	"github.com/nerolation/state-actor/generator"
 	"github.com/nerolation/state-actor/internal/entitygen"
 	iReth "github.com/nerolation/state-actor/internal/reth"
 )
@@ -26,8 +27,14 @@ import (
 //
 // Accounts are written in input order (caller is responsible for ordering).
 // Uses tx.Put (not cursor.Append) for safety regardless of input ordering.
-func WriteEOAs(envs *Envs, accounts []*entitygen.Account, blockNum uint64) error {
-	return envs.Mdbx.Update(func(txn *mdbx.Txn) error {
+//
+// stats (optional) accumulates AccountBytes — the encoded compact-Account
+// size for every account written. Pass nil to skip accounting. The
+// accumulator is applied to stats only after the MDBX transaction commits;
+// a write that rolls back leaves stats untouched.
+func WriteEOAs(envs *Envs, accounts []*entitygen.Account, blockNum uint64, stats *generator.Stats) error {
+	var localAccountBytes uint64
+	err := envs.Mdbx.Update(func(txn *mdbx.Txn) error {
 		blockKey := beU64(blockNum)
 
 		for _, acc := range accounts {
@@ -75,7 +82,19 @@ func WriteEOAs(envs *Envs, accounts []*entitygen.Account, blockNum uint64) error
 			if err := txn.Put(envs.MdbxDBIs["AccountsHistory"], keyBuf.Bytes(), listBuf.Bytes(), 0); err != nil {
 				return fmt.Errorf("AccountsHistory %s: %w", acc.Address.Hex(), err)
 			}
+
+			// All four Puts succeeded — bank the row's bytes locally. The
+			// local accumulator is transferred to stats only if Update
+			// returns nil below.
+			localAccountBytes += uint64(len(accountBytes))
 		}
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	if stats != nil {
+		stats.AccountBytes += localAccountBytes
+	}
+	return nil
 }
