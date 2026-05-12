@@ -13,6 +13,7 @@ import (
 	gethrlp "github.com/ethereum/go-ethereum/rlp"
 	"github.com/linxGnu/grocksdb"
 
+	"github.com/nerolation/state-actor/generator"
 	"github.com/nerolation/state-actor/internal/neth"
 	nethrlp "github.com/nerolation/state-actor/internal/neth/rlp"
 	nethstorage "github.com/nerolation/state-actor/internal/neth/storage"
@@ -116,6 +117,7 @@ func writeGenesisAllocAccounts(
 	accounts map[common.Address]*types.StateAccount,
 	codes map[common.Address][]byte,
 	storages map[common.Address]map[common.Hash]common.Hash,
+	stats *generator.Stats,
 ) (common.Hash, error) {
 	if len(accounts) == 0 {
 		return common.Hash(neth.EmptyTreeHash), nil
@@ -155,6 +157,9 @@ func writeGenesisAllocAccounts(
 				return common.Hash{}, fmt.Errorf("write code for %s: %w", e.addr.Hex(), err)
 			}
 			acc.CodeHash = codeHash[:]
+			if stats != nil {
+				stats.CodeBytes += uint64(len(code))
+			}
 		}
 
 		// Build the account's storage trie if it has any non-zero slots.
@@ -193,6 +198,9 @@ func writeGenesisAllocAccounts(
 				if err := builder.AddStorageSlot(e.addrHash, [32]byte(s.keyHash), valRLP); err != nil {
 					return common.Hash{}, fmt.Errorf("add storage slot for %s: %w", e.addr.Hex(), err)
 				}
+				if stats != nil {
+					stats.StorageBytes += uint64(len(valRLP))
+				}
 			}
 			storageRoot, err := builder.FinalizeStorageRoot(e.addrHash)
 			if err != nil {
@@ -207,6 +215,9 @@ func writeGenesisAllocAccounts(
 		}
 		if err := builder.AddAccount(e.addrHash, accRLP); err != nil {
 			return common.Hash{}, fmt.Errorf("add account %s: %w", e.addr.Hex(), err)
+		}
+		if stats != nil {
+			stats.AccountBytes += uint64(len(accRLP))
 		}
 	}
 

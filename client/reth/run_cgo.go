@@ -88,6 +88,7 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 	stateRoot := emptyMPTRoot
 	accountsCreated := 0
 	contractsCreated := 0
+	stats := &generator.Stats{}
 
 	// Pebble-backed sorter colocated with the datadir. The temp dir lives
 	// under cfg.DBPath/reth-sort-* so it shares disk budget with the (often
@@ -124,7 +125,7 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 		for i, addr := range cfg.InjectAddresses {
 			injected[i] = buildInjectedAccount(addr)
 		}
-		if err := WriteEOAs(envs, injected, 0); err != nil {
+		if err := WriteEOAs(envs, injected, 0, stats); err != nil {
 			return nil, fmt.Errorf("RunCgo: WriteEOAs(injected): %w", err)
 		}
 		for _, acc := range injected {
@@ -145,7 +146,7 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 	// captures the correct global-state-trie values.
 	if len(cfg.GenesisAccounts) > 0 {
 		allocAccounts := buildAllocAccounts(cfg)
-		if err := WriteContracts(envs, allocAccounts, 0); err != nil {
+		if err := WriteContracts(envs, allocAccounts, 0, stats); err != nil {
 			return nil, fmt.Errorf("RunCgo: WriteContracts(alloc): %w", err)
 		}
 		for _, acc := range allocAccounts {
@@ -188,7 +189,7 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 			for i := 0; i < b; i++ {
 				batch[i] = entitygen.GenerateEOA(rng)
 			}
-			if err := WriteEOAs(envs, batch, 0); err != nil {
+			if err := WriteEOAs(envs, batch, 0, stats); err != nil {
 				return nil, fmt.Errorf("RunCgo: WriteEOAs: %w", err)
 			}
 			for _, acc := range batch {
@@ -233,7 +234,7 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 				// (storage trie root) and .CodeHash in-place BEFORE
 				// returning, so the per-account RLP-encode below captures
 				// the correct values for the global state trie.
-				if err := WriteContracts(envs, batch, 0); err != nil {
+				if err := WriteContracts(envs, batch, 0, stats); err != nil {
 					return nil, fmt.Errorf("RunCgo: WriteContracts: %w", err)
 				}
 				for _, c := range batch {
@@ -301,11 +302,11 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 	}
 
 	// Phase 7: return stats (envs.Close is deferred above).
-	return &generator.Stats{
-		StateRoot:        stateRoot,
-		AccountsCreated:  accountsCreated,
-		ContractsCreated: contractsCreated,
-	}, nil
+	stats.StateRoot = stateRoot
+	stats.AccountsCreated = accountsCreated
+	stats.ContractsCreated = contractsCreated
+	stats.TotalBytes = stats.AccountBytes + stats.StorageBytes + stats.CodeBytes
+	return stats, nil
 }
 
 // dirSize returns the total disk-allocated bytes used by all regular

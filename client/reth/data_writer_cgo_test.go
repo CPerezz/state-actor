@@ -28,7 +28,7 @@ func TestWriteEOAsRoundtrip(t *testing.T) {
 		accounts[i] = entitygen.GenerateEOA(rng)
 	}
 
-	if err := WriteEOAs(envs, accounts, 0); err != nil {
+	if err := WriteEOAs(envs, accounts, 0, nil); err != nil {
 		t.Fatalf("WriteEOAs: %v", err)
 	}
 

@@ -8,6 +8,7 @@ import (
 
 	"github.com/erigontech/mdbx-go/mdbx"
 
+	"github.com/nerolation/state-actor/generator"
 	"github.com/nerolation/state-actor/internal/entitygen"
 	iReth "github.com/nerolation/state-actor/internal/reth"
 )
@@ -26,7 +27,11 @@ import (
 //
 // blockNum is the block at which these contracts came into existence
 // (0 for genesis).
-func WriteContracts(envs *Envs, contracts []*entitygen.Account, blockNum uint64) error {
+//
+// stats (optional) accumulates AccountBytes (compact-Account encoding),
+// CodeBytes (raw bytecode length, post-dedupe), and StorageBytes (sum of
+// non-zero slot values written). Pass nil to skip accounting.
+func WriteContracts(envs *Envs, contracts []*entitygen.Account, blockNum uint64, stats *generator.Stats) error {
 	return envs.Mdbx.Update(func(txn *mdbx.Txn) error {
 		blockKey := beU64(blockNum)
 
@@ -49,6 +54,9 @@ func WriteContracts(envs *Envs, contracts []*entitygen.Account, blockNum uint64)
 			if err != nil {
 				return fmt.Errorf("WriteContracts: bytecode write %s: %w", contract.Address.Hex(), err)
 			}
+			if stats != nil {
+				stats.CodeBytes += uint64(len(contract.Code))
+			}
 
 			// Step 3: splice storage root and code hash into StateAccount.
 			contract.StateAccount.Root = storageRoot
@@ -63,6 +71,12 @@ func WriteContracts(envs *Envs, contracts []*entitygen.Account, blockNum uint64)
 			var accBuf bytes.Buffer
 			ethAccount.EncodeCompact(&accBuf)
 			accountBytes := accBuf.Bytes()
+			if stats != nil {
+				stats.AccountBytes += uint64(len(accountBytes))
+				for _, slot := range contract.Storage {
+					stats.StorageBytes += uint64(len(slot.Value))
+				}
+			}
 
 			// PlainAccountState — raw addr → Account
 			if err := txn.Put(envs.MdbxDBIs["PlainAccountState"], contract.Address[:], accountBytes, 0); err != nil {

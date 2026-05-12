@@ -8,6 +8,7 @@ import (
 
 	"github.com/erigontech/mdbx-go/mdbx"
 
+	"github.com/nerolation/state-actor/generator"
 	"github.com/nerolation/state-actor/internal/entitygen"
 	iReth "github.com/nerolation/state-actor/internal/reth"
 )
@@ -26,7 +27,10 @@ import (
 //
 // Accounts are written in input order (caller is responsible for ordering).
 // Uses tx.Put (not cursor.Append) for safety regardless of input ordering.
-func WriteEOAs(envs *Envs, accounts []*entitygen.Account, blockNum uint64) error {
+//
+// stats (optional) accumulates AccountBytes — the encoded compact-Account
+// size for every account written. Pass nil to skip accounting.
+func WriteEOAs(envs *Envs, accounts []*entitygen.Account, blockNum uint64, stats *generator.Stats) error {
 	return envs.Mdbx.Update(func(txn *mdbx.Txn) error {
 		blockKey := beU64(blockNum)
 
@@ -43,6 +47,9 @@ func WriteEOAs(envs *Envs, accounts []*entitygen.Account, blockNum uint64) error
 			var accBuf bytes.Buffer
 			ethAccount.EncodeCompact(&accBuf)
 			accountBytes := accBuf.Bytes()
+			if stats != nil {
+				stats.AccountBytes += uint64(len(accountBytes))
+			}
 
 			// 1. PlainAccountState — raw addr → Account
 			if err := txn.Put(envs.MdbxDBIs["PlainAccountState"], acc.Address[:], accountBytes, 0); err != nil {

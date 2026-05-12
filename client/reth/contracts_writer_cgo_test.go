@@ -28,7 +28,7 @@ func TestWriteContractsSmall(t *testing.T) {
 		contracts[i] = entitygen.GenerateContract(rng, 16, 3)
 	}
 
-	if err := WriteContracts(envs, contracts, 0); err != nil {
+	if err := WriteContracts(envs, contracts, 0, nil); err != nil {
 		t.Fatalf("WriteContracts: %v", err)
 	}
 
