@@ -34,6 +34,10 @@ import (
 	"github.com/nerolation/state-actor/generator"
 	"github.com/nerolation/state-actor/genesis"
 	"github.com/nerolation/state-actor/internal/clientpolicy"
+	"github.com/nerolation/state-actor/internal/sizecal"
+	"github.com/nerolation/state-actor/internal/spec"
+	"github.com/nerolation/state-actor/internal/specbuild"
+	"github.com/nerolation/state-actor/internal/templates"
 )
 
 var (
@@ -56,10 +60,15 @@ var (
 	// itself — no --genesis path. The four header knobs users actually
 	// vary are exposed as flags below; everything else takes a sensible
 	// default (Difficulty=0, Coinbase=0x0, Mixhash=0x0, Alloc empty).
-	fork           = flag.String("fork", "", "Hard fork active at genesis. Empty (default) resolves to the latest fork the chosen --client can write. Use --list-forks to see all values.")
-	listForks      = flag.Bool("list-forks", false, "Print the list of accepted --fork values and exit.")
-	injectAccounts = flag.String("inject-accounts", "", "Comma-separated hex addresses to inject with 999999999 ETH (e.g. 0xf39F...2266). Use this instead of a --genesis alloc.")
-	chainID        = flag.Int64("chain-id", 1337, "Chain ID embedded in the synthesized genesis chainspec (default 1337, the devnet convention).")
+	fork      = flag.String("fork", "", "Hard fork active at genesis. Empty (default) resolves to the latest fork the chosen --client can write. Use --list-forks to see all values.")
+	listForks = flag.Bool("list-forks", false, "Print the list of accepted --fork values and exit.")
+	chainID   = flag.Int64("chain-id", 1337, "Chain ID embedded in the synthesized genesis chainspec (default 1337, the devnet convention).")
+
+	// Customizable state generation: a YAML spec declaring concrete EOAs +
+	// contracts the writer must include. Spec entities are written first;
+	// the synthetic-fill loop (--accounts/--contracts) runs on top until
+	// --target-size is reached. See docs/SPEC.md.
+	specFile = flag.String("spec", "", "Path to YAML state-spec file. See docs/SPEC.md for the schema.")
 	gasLimit       = flag.Uint64("gas-limit", 30_000_000, "Genesis block gas limit (default 30M).")
 	timestamp      = flag.Uint64("timestamp", 0, "Genesis block timestamp (unix seconds, default 0).")
 	extraData      = flag.String("extra-data", "", "Genesis block extraData as hex (default empty).")
@@ -110,20 +119,11 @@ func main() {
 		trieMode = generator.TrieModeBinary
 	}
 
-	// Parse --inject-accounts
+	// --inject-accounts was removed in favor of --spec (see docs/SPEC.md).
+	// Existing CI/scripts using --inject-accounts will hit Go's "flag
+	// provided but not defined" error; the migration is a one-line YAML
+	// snippet documented in CHANGELOG.md.
 	var injectAddrs []common.Address
-	if *injectAccounts != "" {
-		for _, s := range strings.Split(*injectAccounts, ",") {
-			s = strings.TrimSpace(s)
-			if s == "" {
-				continue
-			}
-			if !common.IsHexAddress(s) {
-				log.Fatalf("Invalid address in --inject-accounts: %q", s)
-			}
-			injectAddrs = append(injectAddrs, common.HexToAddress(s))
-		}
-	}
 
 	// Parse --target-size
 	var parsedTargetSize uint64
@@ -189,6 +189,39 @@ func main() {
 	if *verbose {
 		log.Printf("Synthesized genesis: fork=%s chainID=%s gasLimit=%d timestamp=%d extraData=%dB",
 			chosenFork, genesisConfig.Config.ChainID, uint64(genesisConfig.GasLimit), uint64(genesisConfig.Timestamp), len(genesisConfig.ExtraData))
+	}
+
+	// --spec: load YAML state spec, translate to PreAlloc. The
+	// per-writer Validate() (called inside each client's Run/Populate/
+	// runImpl) folds PreAlloc into the existing GenesisAccounts/Code/
+	// Storage maps via the back-compat shim — writers don't change.
+	if *specFile != "" {
+		specDoc, err := spec.ParseFile(*specFile)
+		if err != nil {
+			log.Fatalf("--spec: %v", err)
+		}
+		validateRes, err := specDoc.Validate(templates.Names())
+		if err != nil {
+			log.Fatalf("--spec validate: %v", err)
+		}
+		for _, w := range validateRes.Warnings {
+			log.Printf("--spec warning: %s", w)
+		}
+		preAlloc, diag, err := specbuild.Build(specDoc, specbuild.BuildOptions{
+			Seed:       *seed,
+			ClientName: *client,
+			Sizer:      sizecal.Default(),
+		})
+		if err != nil {
+			log.Fatalf("--spec build: %v", err)
+		}
+		for _, w := range diag.Warnings {
+			log.Printf("--spec warning: %s", w)
+		}
+		config.PreAlloc = preAlloc
+		if *verbose {
+			log.Printf("--spec: loaded %d entities from %s", len(preAlloc), *specFile)
+		}
 	}
 
 	if *verbose {

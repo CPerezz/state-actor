@@ -1,0 +1,34 @@
+# Story 2: three EIP-7702-delegating EOAs with bloated storage (10 GB / 5 GB
+# / 2 GB on disk). Per the EIP-7702 semantics, the EOA's *own* storage at
+# its address is what gets populated — the delegation target's bytecode
+# determines which slots are used at runtime, but the storage we pre-
+# populate sits at the EOA's address regardless.
+#
+# To use (any client):
+#   state-actor --client=geth --db=/tmp/story2 \
+#     --spec=examples/spec-eoa-bloat.yaml \
+#     --accounts=10000000 --target-size=20GB
+#
+# Spec writes the three bloated EOAs first; --accounts=10M synthetic EOAs
+# fill the remaining target-size budget.
+entities:
+  - kind: eoa
+    name: bloated-eoa-10g
+    balance: "1000000000000000000"
+    nonce: 0
+    code: "0xef01001111111111111111111111111111111111111111"
+    approximate_size_bytes: 10_000_000_000
+
+  - kind: eoa
+    name: bloated-eoa-5g
+    balance: "1000000000000000000"
+    nonce: 0
+    code: "0xef01002222222222222222222222222222222222222222"
+    approximate_size_bytes: 5_000_000_000
+
+  - kind: eoa
+    name: bloated-eoa-2g
+    balance: "1000000000000000000"
+    nonce: 0
+    code: "0xef01003333333333333333333333333333333333333333"
+    approximate_size_bytes: 2_000_000_000

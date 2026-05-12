@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -104,4 +105,96 @@ func parseByteRow(t *testing.T, stdout, category string) uint64 {
 		mult = 1024 * 1024 * 1024 * 1024
 	}
 	return uint64(val * float64(mult))
+}
+
+// TestMainSpecFlagSmoke verifies the --spec end-to-end happy path: a YAML
+// spec file loads, parses, validates, expands, and the writer produces a
+// non-empty datadir without erroring. Runs against --client=geth (the
+// only no-Docker writer) so it lives in the default CI job.
+//
+// This is the per-feature companion to TestMainBenchmarkPrintsStats — it
+// pins the wiring from CLI flag → spec parser → templates registry →
+// specbuild translator → Config.PreAlloc → writer. A regression in any
+// of those layers fails this test.
+func TestMainSpecFlagSmoke(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping --spec smoke test in short mode")
+	}
+
+	// Build state-actor.
+	binDir := t.TempDir()
+	binPath := filepath.Join(binDir, "state-actor")
+	build := exec.Command("go", "build", "-o", binPath, ".")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, out)
+	}
+
+	// Write a minimal spec file inline — exercises raw contract + 7702
+	// EOA + plain EOA, all three address resolution modes.
+	specPath := filepath.Join(binDir, "spec.yaml")
+	const specYAML = `entities:
+  - kind: contract
+    name: my-contract
+    code: "0x6080"
+  - kind: eoa
+    address: 0x1111111111111111111111111111111111111111
+    balance: "1000000000000000000"
+  - kind: eoa
+    name: delegator
+    code: "0xef0100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+`
+	if err := os.WriteFile(specPath, []byte(specYAML), 0o644); err != nil {
+		t.Fatalf("write spec: %v", err)
+	}
+
+	dbDir := filepath.Join(binDir, "chaindata")
+	cmd := exec.Command(binPath,
+		"--db", dbDir,
+		"--spec", specPath,
+		"--accounts", "0",
+		"--contracts", "0",
+		"--seed", "42",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("state-actor --spec exited: %v\n%s", err, out)
+	}
+
+	// Validate the writer actually produced files. We don't pin a specific
+	// subdir layout (geth's path discipline can evolve); just that the db
+	// directory exists and is non-empty after the run.
+	entries, err := os.ReadDir(dbDir)
+	if err != nil {
+		t.Fatalf("read db dir: %v\n--- state-actor stdout ---\n%s", err, out)
+	}
+	if len(entries) == 0 {
+		t.Errorf("db dir empty after --spec run; spec entities were not persisted\n--- state-actor stdout ---\n%s", out)
+	}
+}
+
+// TestMainInjectAccountsFlagRemoved confirms the legacy --inject-accounts
+// flag is no longer accepted. Users who pass it should hit Go's "flag
+// provided but not defined" error rather than the flag being silently
+// ignored. Pinpoints the removal at CLI level so a future PR can't
+// accidentally re-add the flag.
+func TestMainInjectAccountsFlagRemoved(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping --inject-accounts removal test in short mode")
+	}
+	binDir := t.TempDir()
+	binPath := filepath.Join(binDir, "state-actor")
+	build := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, out)
+	}
+	cmd := exec.Command(binPath, "--inject-accounts=0x1111111111111111111111111111111111111111", "--db=/tmp/never")
+	out, _ := cmd.CombinedOutput()
+	// Exit code must be non-zero AND stderr must mention the unknown flag.
+	if cmd.ProcessState.ExitCode() == 0 {
+		t.Errorf("expected non-zero exit when passing removed --inject-accounts flag")
+	}
+	if !strings.Contains(string(out), "inject-accounts") {
+		t.Errorf("expected error to mention 'inject-accounts'; got:\n%s", out)
+	}
 }
