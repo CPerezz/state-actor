@@ -17,6 +17,7 @@ import (
 
 	stategenesis "github.com/nerolation/state-actor/genesis"
 	"github.com/nerolation/state-actor/generator"
+	e2e "github.com/nerolation/state-actor/internal/e2e_testing"
 	"github.com/nerolation/state-actor/internal/oracle"
 	"github.com/nerolation/state-actor/internal/rpcprobe"
 )
@@ -85,7 +86,7 @@ const nethermindE2EConfigTemplate = `{
 
 // TestE2ESuite — see client/besu/e2e_test.go for the full phase
 // description. Phase 1-2 (datadir + Run + boot nethermind) is per-client;
-// Phase 3-7 is internal/oracle.RunSuitePhases.
+// Phase 3-7 is internal/e2e.RunSuitePhases.
 //
 // nethermind-specific bits:
 //   - --fork=osaka (unified across all 4 clients after the writer migration to internal/genesisheader.Build)
@@ -114,7 +115,7 @@ func TestE2ESuite(t *testing.T) {
 		t.Fatalf("BuildSynthetic: %v", err)
 	}
 
-	dd, cleanup := oracle.AcquireDatadir(t, "NETH")
+	dd, cleanup := e2e.AcquireDatadir(t, "NETH")
 	defer cleanup()
 
 	cfg := generator.Config{
@@ -161,9 +162,9 @@ func TestE2ESuite(t *testing.T) {
 	})
 
 	imageRef := nethImageRef()
-	containerName := "state-actor-neth-boot-" + oracle.RandSuffix(8)
+	containerName := "state-actor-neth-boot-" + e2e.RandSuffix(8)
 	containerCfgPath := dd.ContainerDatadir + "/boot.cfg"
-	runArgs := append([]string{"run", "-d"}, oracle.DockerPlatformArgs("NETH_DOCKER_PLATFORM")...)
+	runArgs := append([]string{"run", "-d"}, e2e.DockerPlatformArgs("NETH_DOCKER_PLATFORM")...)
 	runArgs = append(runArgs,
 		"--name", containerName,
 		"-v", dd.VolMount,
@@ -183,7 +184,7 @@ func TestE2ESuite(t *testing.T) {
 		exec.Command("docker", "rm", "-f", containerName).Run() //nolint:errcheck
 	})
 
-	containerIP, err := oracle.InspectContainerIP(containerName)
+	containerIP, err := e2e.InspectContainerIP(containerName)
 	if err != nil {
 		logs, _ := exec.Command("docker", "logs", containerName).CombinedOutput()
 		t.Fatalf("InspectContainerIP: %v\nnethermind logs:\n%s", err, logs)
@@ -201,10 +202,10 @@ func TestE2ESuite(t *testing.T) {
 	// Ethash chainspec with Merge.Enabled + TTD=0 the engine API is the
 	// only path that produces blocks. Goroutine runs for the rest of
 	// the test so spamoor's txs (Phase 5) get included in blocks.
-	oracle.StartEngineDriver(t, containerIP, rpcURL, oracle.ForkOsaka)
+	e2e.StartEngineDriver(t, containerIP, rpcURL, e2e.ForkOsaka)
 
-	// Phases 3-7: shared via internal/oracle.RunSuitePhases.
-	oracle.RunSuitePhases(t, oracle.SuitePhasesCfg{
+	// Phases 3-7: shared via internal/e2e.RunSuitePhases.
+	e2e.RunSuitePhases(t, e2e.SuitePhasesCfg{
 		ClientName:          "nethermind",
 		RPCURL:              rpcURL,
 		EOAs:                eoas,

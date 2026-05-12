@@ -1,4 +1,4 @@
-package oracle
+package e2e_testing
 
 import (
 	"os"
@@ -8,6 +8,7 @@ import (
 
 	"github.com/nerolation/state-actor/generator"
 	"github.com/nerolation/state-actor/internal/entitygen"
+	"github.com/nerolation/state-actor/internal/oracle"
 	"github.com/nerolation/state-actor/internal/rpcprobe"
 )
 
@@ -134,7 +135,7 @@ func RunSuitePhases(t *testing.T, cfg SuitePhasesCfg) {
 	postBlock, err := SpamoorRun(SpamoorRunCfg{
 		Binary:           spamoorBin,
 		RPCURL:           cfg.RPCURL,
-		PrivKey:          SpamoorSenderPrivKey,
+		PrivKey:          oracle.SpamoorSenderPrivKey,
 		Seed:             12345,
 		TargetBlockDelta: 100,
 		SlotDuration:     slotDur,
@@ -154,15 +155,24 @@ func RunSuitePhases(t *testing.T, cfg SuitePhasesCfg) {
 	} else {
 		result.PostSpamoorEntityCheck = "entitygen entities drifted post-spamoor"
 	}
-	deployerNonce, err := rpcprobe.EthGetTransactionCount(cfg.RPCURL, SpamoorSenderAddr, "latest")
+	deployerNonce, err := rpcprobe.EthGetTransactionCount(cfg.RPCURL, oracle.SpamoorSenderAddr, "latest")
 	if err != nil {
-		t.Errorf("eth_getTransactionCount %s: %v", SpamoorSenderAddr.Hex(), err)
+		t.Errorf("eth_getTransactionCount %s: %v", oracle.SpamoorSenderAddr.Hex(), err)
 	} else {
 		result.PostSpamoorDeployerNonce = deployerNonce
 		if deployerNonce == 0 {
 			t.Errorf("post-spamoor deployer nonce is 0 — spamoor didn't send any txs?")
 		}
 	}
+
+	// ---- Phase 6a: spamoor output verification ----
+	// Phase 6 above proves spamoor's deployer SENT txs (nonce ticked) but
+	// not that the client actually EXECUTED them. AssertSpamoorOutputs
+	// finds spamoor's contract-creation tx in early blocks and asserts
+	// the receipt is non-revert AND the deployed contract has code on
+	// chain — closes the "txs landed in blocks but EVM silently dropped
+	// the work" hole.
+	AssertSpamoorOutputs(t, cfg.RPCURL)
 
 	// ---- Phase 7: write final result JSON ----
 	if err := WriteResult(result); err != nil {

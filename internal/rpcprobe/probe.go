@@ -278,3 +278,71 @@ func GenesisStateRoot(url string) (common.Hash, error) {
 	}
 	return b.StateRoot, nil
 }
+
+// TxRef is the subset of an eth_getBlockByNumber(_, true) transaction we
+// read to find contract-creation calls. Contract creations have a null
+// "to" field, so To is a pointer.
+type TxRef struct {
+	Hash  common.Hash     `json:"hash"`
+	From  common.Address  `json:"from"`
+	To    *common.Address `json:"to"`
+	Nonce string          `json:"nonce"` // hex with 0x prefix
+}
+
+// BlockWithTxs is BlockByNumber's reply when called with fullTxObjects=true.
+type BlockWithTxs struct {
+	Number       string  `json:"number"`
+	Hash         common.Hash `json:"hash"`
+	Transactions []TxRef `json:"transactions"`
+}
+
+// BlockByNumberWithTxs calls eth_getBlockByNumber(blockTag, true) and
+// returns the block with its full transactions list. Used by spamoor-
+// output verification to find the contract-creation tx and its sender.
+func BlockByNumberWithTxs(url, blockTag string) (*BlockWithTxs, error) {
+	raw, err := Call(url, "eth_getBlockByNumber", []any{blockTag, true})
+	if err != nil {
+		return nil, err
+	}
+	if len(bytes.TrimSpace(raw)) == 0 || string(raw) == "null" {
+		return nil, fmt.Errorf("eth_getBlockByNumber(%s, true): block not found", blockTag)
+	}
+	var b BlockWithTxs
+	if err := json.Unmarshal(raw, &b); err != nil {
+		return nil, fmt.Errorf("unmarshal block: %w (raw: %s)", err, raw)
+	}
+	if b.Number == "" {
+		return nil, fmt.Errorf("eth_getBlockByNumber(%s, true): empty Number field", blockTag)
+	}
+	return &b, nil
+}
+
+// TxReceipt is the subset of eth_getTransactionReceipt's reply we read.
+// ContractAddress is the deployed-contract address for creation txs and
+// the zero address otherwise; Status is "0x1" on success, "0x0" on revert.
+type TxReceipt struct {
+	TransactionHash common.Hash     `json:"transactionHash"`
+	ContractAddress *common.Address `json:"contractAddress"`
+	Status          string          `json:"status"`
+}
+
+// EthGetTransactionReceipt calls eth_getTransactionReceipt(txHash). Returns
+// an error if the receipt is missing or empty-shaped (defensive against
+// clients that return {} or null for unknown hashes).
+func EthGetTransactionReceipt(url string, txHash common.Hash) (*TxReceipt, error) {
+	raw, err := Call(url, "eth_getTransactionReceipt", []any{txHash.Hex()})
+	if err != nil {
+		return nil, err
+	}
+	if len(bytes.TrimSpace(raw)) == 0 || string(raw) == "null" {
+		return nil, fmt.Errorf("eth_getTransactionReceipt(%s): receipt not found", txHash.Hex())
+	}
+	var r TxReceipt
+	if err := json.Unmarshal(raw, &r); err != nil {
+		return nil, fmt.Errorf("unmarshal receipt: %w (raw: %s)", err, raw)
+	}
+	if r.Status == "" {
+		return nil, fmt.Errorf("eth_getTransactionReceipt(%s): empty status (incomplete reply)", txHash.Hex())
+	}
+	return &r, nil
+}
