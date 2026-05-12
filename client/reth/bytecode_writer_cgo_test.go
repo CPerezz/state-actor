@@ -28,12 +28,12 @@ func TestBytecodeWriterDedup(t *testing.T) {
 	if err := envs.Mdbx.Update(func(txn *mdbx.Txn) error {
 		w := NewBytecodeWriter(txn, envs.MdbxDBIs["Bytecodes"], 100)
 		var err error
-		hash1, err = w.Write(code1)
+		hash1, _, err = w.Write(code1)
 		if err != nil {
 			return err
 		}
 		// Same code again → dedup, no DB write
-		hash1Again, err := w.Write(code1)
+		hash1Again, _, err := w.Write(code1)
 		if err != nil {
 			return err
 		}
@@ -41,7 +41,7 @@ func TestBytecodeWriterDedup(t *testing.T) {
 			t.Errorf("dedup hash mismatch: %v vs %v", hash1, hash1Again)
 		}
 		// Different code → new entry
-		hash2, err = w.Write(code2)
+		hash2, _, err = w.Write(code2)
 		if err != nil {
 			return err
 		}
@@ -84,7 +84,7 @@ func TestBytecodeWriterEmptyCode(t *testing.T) {
 	if err := envs.Mdbx.Update(func(txn *mdbx.Txn) error {
 		w := NewBytecodeWriter(txn, envs.MdbxDBIs["Bytecodes"], 100)
 		var err error
-		gotHash, err = w.Write([]byte{})
+		gotHash, _, err = w.Write([]byte{})
 		return err
 	}); err != nil {
 		t.Fatalf("Write empty: %v", err)
@@ -238,7 +238,7 @@ func TestBytecodeWriterDBSeekDedup(t *testing.T) {
 	if err := envs.Mdbx.Update(func(txn *mdbx.Txn) error {
 		w := NewBytecodeWriter(txn, envs.MdbxDBIs["Bytecodes"], 100)
 		var err error
-		hash1, err = w.Write(code)
+		hash1, _, err = w.Write(code)
 		return err
 	}); err != nil {
 		t.Fatalf("first write: %v", err)
@@ -249,7 +249,7 @@ func TestBytecodeWriterDBSeekDedup(t *testing.T) {
 	if err := envs.Mdbx.Update(func(txn *mdbx.Txn) error {
 		w := NewBytecodeWriter(txn, envs.MdbxDBIs["Bytecodes"], 100)
 		var err error
-		hash2, err = w.Write(code)
+		hash2, _, err = w.Write(code)
 		return err
 	}); err != nil {
 		t.Fatalf("second write: %v", err)
