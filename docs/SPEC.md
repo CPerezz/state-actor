@@ -125,17 +125,6 @@ Every entity in the spec fixture is RPC-verified post-boot:
 `cfg.GenesisAccounts` for balances and `cfg.GenesisCode` for bytecode,
 asserting RPC-returned values match the spec's intent.
 
-## Removed flag
-
-- `--inject-accounts` was removed. The equivalent YAML is:
-
-  ```yaml
-  entities:
-    - kind: eoa
-      address: 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
-      balance: "999999999000000000000000000"
-  ```
-
 ## Examples
 
 - `examples/spec-erc20-mixed-sizes.yaml` — Story 1: three ERC-20s of
