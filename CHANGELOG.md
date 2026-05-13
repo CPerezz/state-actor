@@ -33,18 +33,20 @@
   nethermind for the first time.
 
 ### Removed
-- **`--inject-accounts` flag** — superseded by `--spec`. Migration: an
-  EOA that was previously written as
-  `--inject-accounts=0xABC...` is now declared in YAML as:
+- **`--inject-accounts` flag AND `Config.InjectAddresses` Go field** —
+  fully superseded by `--spec`. Migration: an EOA that was previously
+  written as `--inject-accounts=0xABC...` is now declared in YAML as:
   ```yaml
   entities:
     - kind: eoa
       address: 0xABC...
       balance: "999999999000000000000000000"
   ```
-  `Config.InjectAddresses` (the programmatic Go field) remains for
-  internal test fixtures that wire it directly; only the CLI flag was
-  removed.
+  Programmatic Go callers that wired `cfg.InjectAddresses = [...]` must
+  migrate to `cfg.PreAlloc = [...]templates.PreAllocEntity{...}`. All
+  in-tree CI/test code already migrated. The per-client writer code
+  paths that consumed `cfg.InjectAddresses` have been deleted in geth
+  / besu / nethermind / reth.
 
 ### Tested
 - Per-package unit tests (`internal/spec/`, `internal/templates/`,
@@ -65,9 +67,19 @@
   drives writer → boot → spamoor → RPC re-query → golden-hash on
   every client.
 - **`CheckInjections` extended** to walk `cfg.GenesisAccounts` for
-  balance verification (in addition to its prior `cfg.InjectAddresses`
-  + `cfg.GenesisCode` checks). All spec entities are now RPC-verified
-  at Phase 4.
+  balance verification AND `cfg.GenesisStorage` (with deterministic
+  sampling — see below) for storage-slot verification. All spec
+  entities are now RPC-verified at Phase 4: balances, code, AND
+  storage slots get the round-trip eth_getBalance / eth_getCode /
+  eth_getStorageAt treatment.
+- **Storage-slot sampling**: `sampleStorageSlots` deterministically
+  picks up to 5 keys per entity (first/last/middle-spaced) from a
+  sorted view. Same input → same sampled keys → reproducible across
+  CI runs and clients. Bounds RPC roundtrips at
+  O(addresses × 5) regardless of fixture size; ~30 calls for the
+  CI baseline. Catches the bug class "spec entity injected into the
+  writer but vanished by RPC time" — ERC-20 holder balances, 7702 EOA
+  storage-bloat slots, raw-contract synthesized storage.
 - `examples/spec-ci-baseline.yaml`: rewritten as the rich CI fixture
   (~12 entities) including the spamoor sender at
   `oracle.SpamoorSenderAddr`, replacing the legacy

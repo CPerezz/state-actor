@@ -20,7 +20,6 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/trie"
-	"github.com/holiman/uint256"
 
 	"github.com/nerolation/state-actor/generator"
 	"github.com/nerolation/state-actor/internal/entitygen"
@@ -127,10 +126,9 @@ func writeStateAndCollectRoot(
 	}
 
 	// genesisAddrs prevents synthetic-RNG addresses from colliding with
-	// pre-allocated genesis or inject addresses. Random-random
-	// collisions across 2^160 addresses are not modelled — astronomical.
-	genesisAddrs := make(map[common.Address]struct{},
-		len(cfg.GenesisAccounts)+len(cfg.InjectAddresses))
+	// pre-allocated genesis addresses. Random-random collisions across
+	// 2^160 addresses are not modelled — astronomical.
+	genesisAddrs := make(map[common.Address]struct{}, len(cfg.GenesisAccounts))
 
 	writeBlob := func(addrHash common.Hash, blob []byte) error {
 		if err := batch.Set(addrHash[:], blob, nil); err != nil {
@@ -174,26 +172,6 @@ func writeStateAndCollectRoot(
 		}
 		if err := writeBlob(addrHash, blob); err != nil {
 			return common.Hash{}, nil, fmt.Errorf("phase1 genesis alloc: %w", err)
-		}
-	}
-
-	// 1b. Inject-addresses (e.g. the Anvil default account). Modelled as
-	// EOAs with a fixed 999_999_999 ETH balance, matching the
-	// generator's existing semantics.
-	injectBalance := new(uint256.Int).Mul(uint256.NewInt(999_999_999), uint256.NewInt(1_000_000_000_000_000_000))
-	for _, addr := range cfg.InjectAddresses {
-		if _, dup := genesisAddrs[addr]; dup {
-			continue
-		}
-		genesisAddrs[addr] = struct{}{}
-		addrHash := crypto.Keccak256Hash(addr[:])
-		blob := encodeEntityEOA(0, injectBalance)
-		if err := writeBlob(addrHash, blob); err != nil {
-			return common.Hash{}, nil, fmt.Errorf("phase1 inject: %w", err)
-		}
-		stats.AccountsCreated++
-		if cfg.Verbose {
-			log.Printf("Injected account %s with %s wei", addr.Hex(), injectBalance.String())
 		}
 	}
 

@@ -74,20 +74,6 @@ func TestPreAllocShimRejectsCollisionWithGenesisAccounts(t *testing.T) {
 	}
 }
 
-func TestPreAllocShimRejectsCollisionWithInjectAddresses(t *testing.T) {
-	addr := common.HexToAddress("0x000000000000000000000000000000000000cccc")
-	cfg := &Config{
-		InjectAddresses: []common.Address{addr},
-		PreAlloc: []templates.PreAllocEntity{{
-			Address: addr,
-			Account: &types.StateAccount{Nonce: 0, Balance: uint256.NewInt(0), Root: types.EmptyRootHash, CodeHash: types.EmptyCodeHash[:]},
-		}},
-	}
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected collision error between InjectAddresses + spec alloc")
-	}
-}
-
 // TestValidateRejectsSpecExceedingTargetSize pins the SPEC.md promise that
 // Config.Validate fails when spec storage exceeds --target-size. Pre-fix
 // this check was silently absent — users would get truncated state.

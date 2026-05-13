@@ -18,7 +18,6 @@ import (
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/ethdb/pebble"
 	"github.com/ethereum/go-ethereum/rlp"
-	"github.com/holiman/uint256"
 
 	"github.com/nerolation/state-actor/internal/entitygen"
 )
@@ -284,35 +283,6 @@ func (g *Generator) generateStreamingBinary() (retStats *Stats, retErr error) {
 	if g.config.Verbose && len(g.config.GenesisAccounts) > 0 {
 		log.Printf("Included %d genesis alloc accounts (%d EOAs, %d contracts)",
 			len(g.config.GenesisAccounts), stats.AccountsCreated, stats.ContractsCreated)
-	}
-
-	// Inject any explicitly-requested addresses (e.g. Anvil's default account).
-	for _, addr := range g.config.InjectAddresses {
-		if genesisAddrs[addr] {
-			continue
-		}
-		genesisAddrs[addr] = true
-		injectBalance := new(uint256.Int).Mul(uint256.NewInt(999999999), uint256.NewInt(1e18))
-		injectAccount := &types.StateAccount{
-			Nonce:    0,
-			Balance:  injectBalance,
-			Root:     types.EmptyRootHash,
-			CodeHash: types.EmptyCodeHash.Bytes(),
-		}
-		entryBuf = collectAccountEntries(addr, injectAccount, 0, nil, nil, entryBuf[:0])
-		if err := writeEntries(entryBuf, &preambleEntries); err != nil {
-			return nil, fmt.Errorf("failed to write injected trie entries: %w", err)
-		}
-		ad := &accountData{
-			address:  addr,
-			addrHash: crypto.Keccak256Hash(addr[:]),
-			account:  injectAccount,
-		}
-		snapCh <- snapshotWork{acc: ad}
-		stats.AccountsCreated++
-		if g.config.Verbose {
-			log.Printf("Injected account %s with %s wei", addr.Hex(), injectBalance.String())
-		}
 	}
 
 	// 1b. EOA generation.

@@ -135,3 +135,97 @@ func TestSafePrefix(t *testing.T) {
 		})
 	}
 }
+
+// TestSampleStorageSlotsReturnsAllWhenSmall: when the storage map has
+// ≤ storageSampleSize entries, every key must be sampled (sorted).
+func TestSampleStorageSlotsReturnsAllWhenSmall(t *testing.T) {
+	slots := map[common.Hash]common.Hash{
+		common.HexToHash("0x03"): {},
+		common.HexToHash("0x01"): {},
+		common.HexToHash("0x02"): {},
+	}
+	got := sampleStorageSlots(slots)
+	if len(got) != 3 {
+		t.Fatalf("got %d keys, want 3", len(got))
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i-1].Hex() > got[i].Hex() {
+			t.Errorf("output not sorted: %v", got)
+		}
+	}
+}
+
+// TestSampleStorageSlotsCapsAtSampleSize: large maps get exactly
+// storageSampleSize keys.
+func TestSampleStorageSlotsCapsAtSampleSize(t *testing.T) {
+	slots := make(map[common.Hash]common.Hash, 1000)
+	for i := 0; i < 1000; i++ {
+		var k common.Hash
+		k[31] = byte(i & 0xff)
+		k[30] = byte((i >> 8) & 0xff)
+		slots[k] = common.HexToHash("0xaa")
+	}
+	got := sampleStorageSlots(slots)
+	if len(got) != storageSampleSize {
+		t.Fatalf("got %d keys, want %d", len(got), storageSampleSize)
+	}
+}
+
+// TestSampleStorageSlotsDeterministic: same input → same output across
+// invocations. Critical because the test signal depends on which slots
+// got sampled.
+func TestSampleStorageSlotsDeterministic(t *testing.T) {
+	slots := make(map[common.Hash]common.Hash, 50)
+	for i := 0; i < 50; i++ {
+		var k common.Hash
+		k[31] = byte(i)
+		slots[k] = common.HexToHash("0xaa")
+	}
+	a := sampleStorageSlots(slots)
+	b := sampleStorageSlots(slots)
+	if len(a) != len(b) {
+		t.Fatalf("count mismatch: %d vs %d", len(a), len(b))
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			t.Errorf("sample[%d] differs across runs: %s vs %s", i, a[i].Hex(), b[i].Hex())
+		}
+	}
+}
+
+// TestSampleStorageSlotsSpread: the sampled keys span the sorted range —
+// first and last are always included. Catches a regression where sampling
+// clusters at one end.
+func TestSampleStorageSlotsSpread(t *testing.T) {
+	slots := make(map[common.Hash]common.Hash, 100)
+	for i := 0; i < 100; i++ {
+		var k common.Hash
+		k[31] = byte(i)
+		slots[k] = common.HexToHash("0xaa")
+	}
+	keys := make([]common.Hash, 0, len(slots))
+	for k := range slots {
+		keys = append(keys, k)
+	}
+	sortHashes(keys)
+
+	got := sampleStorageSlots(slots)
+	if got[0] != keys[0] {
+		t.Errorf("first sampled key is not the smallest: got %s, want %s",
+			got[0].Hex(), keys[0].Hex())
+	}
+	if got[len(got)-1] != keys[len(keys)-1] {
+		t.Errorf("last sampled key is not the largest: got %s, want %s",
+			got[len(got)-1].Hex(), keys[len(keys)-1].Hex())
+	}
+}
+
+// sortHashes — test-only helper to avoid importing sort in the file's
+// public surface. Mirrors sampleStorageSlots's internal sort.
+func sortHashes(s []common.Hash) {
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && s[j-1].Hex() > s[j].Hex(); j-- {
+			s[j-1], s[j] = s[j], s[j-1]
+		}
+	}
+}
