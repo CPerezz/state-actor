@@ -11,8 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ethereum/go-ethereum/common"
-
 	stategenesis "github.com/nerolation/state-actor/genesis"
 	"github.com/nerolation/state-actor/generator"
 	e2e "github.com/nerolation/state-actor/internal/e2e_testing"
@@ -69,17 +67,21 @@ func TestE2ESuite(t *testing.T) {
 	defer cleanup()
 
 	cfg := generator.Config{
-		DBPath:          dd.HostPath,
-		NumAccounts:     numAccounts,
-		NumContracts:    numContracts,
-		CodeSize:        codeSize,
-		MinSlots:        minSlots,
-		MaxSlots:        maxSlots,
-		Seed:            seed,
-		Verbose:         true,
-		TrieMode:        generator.TrieModeMPT,
-		Genesis:         g,
-		InjectAddresses: []common.Address{oracle.SpamoorSenderAddr},
+		DBPath:       dd.HostPath,
+		NumAccounts:  numAccounts,
+		NumContracts: numContracts,
+		CodeSize:     codeSize,
+		MinSlots:     minSlots,
+		MaxSlots:     maxSlots,
+		Seed:         seed,
+		Verbose:      true,
+		TrieMode:     generator.TrieModeMPT,
+		Genesis:      g,
+		// Spec-driven pre-alloc replaces the previous
+		// `InjectAddresses: []common.Address{oracle.SpamoorSenderAddr}`.
+		// Spamoor sender lives in examples/spec-ci-baseline.yaml with
+		// ~12 other entities exercising every schema variant.
+		PreAlloc: e2e.LoadCISpecPreAlloc(t, "../../examples/spec-ci-baseline.yaml", "besu"),
 	}
 	// Deploy EIP-4788/7002/7251/2935 system contracts at their canonical
 	// addresses — besu refuses to boot a Prague-active chain without

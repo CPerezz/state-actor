@@ -55,12 +55,29 @@
   Config.PreAlloc → writer.
 - `TestMainInjectAccountsFlagRemoved`: confirms the removed flag exits
   non-zero — prevents an accidental re-add.
-- **`client/geth/e2e_test.go:TestE2ESuiteSpec`** (geth-suite CI job):
-  loads `examples/spec-ci-min.yaml`, runs Populate, boots geth in --dev
-  mode, runs spamoor, captures the genesis state-root, goes through the
-  same RunSuitePhases pipeline as the synthetic-fill suite. **This is
-  the v1 CI guarantee that `--spec` works end-to-end through writer +
-  boot + spamoor.**
+- **Every per-client `TestE2ESuite` now drives `Config.PreAlloc` from
+  `examples/spec-ci-baseline.yaml`** via the shared
+  `internal/e2e_testing.LoadCISpecPreAlloc` helper. Same YAML on all
+  four clients (geth/besu/nethermind/reth) → identical state root
+  (via `sizecal.NewFixed(64)`) → the existing
+  `cross-client-genesis-root` aggregator job automatically becomes the
+  cross-client spec invariant. This is the v1 CI guarantee: `--spec`
+  drives writer → boot → spamoor → RPC re-query → golden-hash on
+  every client.
+- **`CheckInjections` extended** to walk `cfg.GenesisAccounts` for
+  balance verification (in addition to its prior `cfg.InjectAddresses`
+  + `cfg.GenesisCode` checks). All spec entities are now RPC-verified
+  at Phase 4.
+- `examples/spec-ci-baseline.yaml`: rewritten as the rich CI fixture
+  (~12 entities) including the spamoor sender at
+  `oracle.SpamoorSenderAddr`, replacing the legacy
+  `cfg.InjectAddresses: [SpamoorSenderAddr]` mechanism. Exercises every
+  schema variant: explicit/name-derived/position-derived addresses,
+  ERC-20 with `holders`, ERC-20 with explicit nonce, raw bytecode, 7702
+  delegation, 7702 + storage bloat, plain EOAs.
+- **`internal/e2e_testing/spec_setup_test.go:TestCISpecMatchesSpamoorSender`**
+  asserts the YAML's spamoor entity address matches
+  `oracle.SpamoorSenderAddr` — catches future drift.
 - Audit-driven coverage additions:
   - `TestValidateRejectsEIP170OversizeCode` + `TestValidateAcceptsExactlyMaxCodeSize`
   - `TestValidateCaseSensitiveKind` + `TestValidateCaseSensitiveTemplate`
@@ -88,15 +105,14 @@
   bytecode lands as a one-file v1.5 swap.
 - `erc721` and `uniswapv2` templates are deferred to v1.5 (the registry
   pattern makes adding them a single-file change).
-- **Cross-client spec-state-root invariant CI is partially landed in v1:
-  geth-only (Tier 1).** `client/geth/e2e_test.go:TestE2ESuiteSpec`
-  exercises writer → boot → spamoor → golden-hash with `--spec`. The
-  besu/nethermind/reth equivalents + a sibling
-  `cross-client-spec-genesis-root` aggregator job land in v1.5 — they
-  need Docker image builds the v1 PR's author couldn't validate
-  locally. Determinism of spec output is pinned at unit level for all
-  four clients (the same code path runs identically through every
-  `Config.Validate()` shim).
+- **Cross-client spec-state-root invariant: in CI for all 4 clients
+  from v1.** Every existing `TestE2ESuite` now loads
+  `examples/spec-ci-baseline.yaml` via the shared helper and runs
+  through the same boot + spamoor + golden-hash pipeline. The existing
+  `cross-client-genesis-root` aggregator job pins byte-equal state root
+  across geth/besu/nethermind/reth. The `sizecal.NewFixed(64)`
+  override in the helper neutralizes per-client calibration divergence
+  so the invariant is robust.
 - **ERC-20 template hardcodes nonce-floor at 1.** Per EIP-161, contracts
   on Spurious-Dragon+ forks have nonce ≥ 1. Users who explicitly set
   `nonce: 0` on a `template: erc20` entity get nonce=1 silently.

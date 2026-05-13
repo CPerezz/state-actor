@@ -14,17 +14,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ethereum/go-ethereum/common"
-
 	stategenesis "github.com/nerolation/state-actor/genesis"
 	"github.com/nerolation/state-actor/generator"
 	e2e "github.com/nerolation/state-actor/internal/e2e_testing"
 	"github.com/nerolation/state-actor/internal/oracle"
 	"github.com/nerolation/state-actor/internal/rpcprobe"
-	"github.com/nerolation/state-actor/internal/sizecal"
-	stspec "github.com/nerolation/state-actor/internal/spec"
-	"github.com/nerolation/state-actor/internal/specbuild"
-	"github.com/nerolation/state-actor/internal/templates"
 )
 
 // defaultGethImage is the upstream geth Docker tag the e2e suite pins
@@ -91,17 +85,24 @@ func TestE2ESuite(t *testing.T) {
 	// it. We mount the parent into the container at /data.
 	datadir := t.TempDir()
 	cfg := generator.Config{
-		DBPath:          filepath.Join(datadir, "geth", "chaindata"),
-		NumAccounts:     numAccounts,
-		NumContracts:    numContracts,
-		CodeSize:        codeSize,
-		MinSlots:        minSlots,
-		MaxSlots:        maxSlots,
-		Seed:            seed,
-		Verbose:         true,
-		TrieMode:        generator.TrieModeMPT,
-		Genesis:         g,
-		InjectAddresses: []common.Address{oracle.SpamoorSenderAddr},
+		DBPath:       filepath.Join(datadir, "geth", "chaindata"),
+		NumAccounts:  numAccounts,
+		NumContracts: numContracts,
+		CodeSize:     codeSize,
+		MinSlots:     minSlots,
+		MaxSlots:     maxSlots,
+		Seed:         seed,
+		Verbose:      true,
+		TrieMode:     generator.TrieModeMPT,
+		Genesis:      g,
+		// Spec-driven pre-alloc replaces the previous
+		// `InjectAddresses: []common.Address{oracle.SpamoorSenderAddr}`.
+		// The spamoor sender lives in examples/spec-ci-baseline.yaml
+		// alongside ~12 other entities exercising every schema variant.
+		// LoadCISpecPreAlloc uses sizecal.NewFixed so all 4 clients get
+		// byte-identical PreAlloc → cross-client-genesis-root invariant
+		// holds with the same YAML.
+		PreAlloc: e2e.LoadCISpecPreAlloc(t, "../../examples/spec-ci-baseline.yaml", "geth"),
 	}
 	// Deploy EIP-4788/2935/7002/7251 system contracts at their canonical
 	// addresses — required for the cross-client genesis-root invariant
@@ -189,144 +190,3 @@ func TestE2ESuite(t *testing.T) {
 	})
 }
 
-// TestE2ESuiteSpec is the geth-driven end-to-end test for the --spec
-// YAML feature: it loads examples/spec-ci-min.yaml, translates the
-// spec into cfg.PreAlloc, runs Populate (which materializes PreAlloc
-// into the legacy GenesisAccounts/Code/Storage maps via the
-// back-compat shim and writes a real on-disk datadir), boots geth in
-// --dev mode against that datadir, and runs the shared
-// RunSuitePhases boot → RPC re-query → spamoor → re-query flow.
-//
-// This is the test that pins the user's stated bar: "run state-actor
-// with this new feature prior to using spamoor and run the common-
-// golden-hash checks etc with this feature."
-//
-// Tier 1 of plan Part 7: geth only. Tier 2 (besu/nethermind/reth) lands
-// once the cross-client spec invariant aggregator is wired (v1.5).
-//
-// Build tag matches TestE2ESuite (oracle).
-func TestE2ESuiteSpec(t *testing.T) {
-	if testing.Short() {
-		t.Skip("e2e spec suite skipped in short mode")
-	}
-
-	const seed = int64(42)
-
-	g, err := stategenesis.BuildSynthetic("osaka", big.NewInt(1337), 60_000_000,
-		1_700_000_000, []byte{0xde, 0xad, 0xbe, 0xef})
-	if err != nil {
-		t.Fatalf("BuildSynthetic: %v", err)
-	}
-
-	// Resolve the spec fixture path relative to the test file. Using
-	// path/filepath here so the test works both locally and inside the
-	// CI container where the working directory differs.
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Getwd: %v", err)
-	}
-	specPath := filepath.Join(wd, "..", "..", "examples", "spec-ci-min.yaml")
-	specDoc, err := stspec.ParseFile(specPath)
-	if err != nil {
-		t.Fatalf("spec.ParseFile %s: %v", specPath, err)
-	}
-	if _, err := specDoc.Validate(templates.UserVisibleNames()); err != nil {
-		t.Fatalf("spec.Validate: %v", err)
-	}
-
-	// Use sizecal.NewFixed(64) so this test (and any future cross-client
-	// variant) doesn't depend on the per-client calibration factors —
-	// neutralizing the calibration-divergence risk Agent A flagged.
-	sizer := sizecal.NewFixed(64)
-	preAlloc, _, err := specbuild.Build(specDoc, specbuild.BuildOptions{
-		Seed: seed, ClientName: "geth", Sizer: sizer,
-	})
-	if err != nil {
-		t.Fatalf("specbuild.Build: %v", err)
-	}
-
-	datadir := t.TempDir()
-	cfg := generator.Config{
-		DBPath:          filepath.Join(datadir, "geth", "chaindata"),
-		Seed:            seed,
-		Verbose:         true,
-		TrieMode:        generator.TrieModeMPT,
-		Genesis:         g,
-		InjectAddresses: []common.Address{oracle.SpamoorSenderAddr},
-		PreAlloc:        preAlloc,
-		// No --accounts/--contracts: the spec is the entirety of the state.
-	}
-	// Prague system contracts: required for cross-client genesis-root
-	// invariant once Tier 2 ships. Geth tolerates their absence, but
-	// adding them keeps this test forward-compatible with the multi-
-	// client invariant.
-	oracle.AddPragueSystemContracts(&cfg)
-
-	if _, err := Populate(context.Background(), cfg, Options{}); err != nil {
-		t.Fatalf("Populate: %v", err)
-	}
-
-	// Boot geth — same flags as TestE2ESuite. The container name suffix
-	// differs so this test can run concurrently with TestE2ESuite under
-	// `-parallel`.
-	containerName := "state-actor-geth-spec-" + e2e.RandSuffix(8)
-	hostPort := freeTCPPort(t)
-	runArgs := append([]string{"run", "-d"}, e2e.DockerPlatformArgs("GETH_DOCKER_PLATFORM")...)
-	runArgs = append(runArgs,
-		"--name", containerName,
-		"--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
-		"-v", datadir+":/data",
-		"-p", fmt.Sprintf("127.0.0.1:%d:8545", hostPort),
-		gethImageRef(),
-		"--datadir", "/data",
-		"--db.engine", "pebble",
-		"--networkid", "1337",
-		"--dev",
-		"--dev.period", "1",
-		"--dev.gaslimit", "60000000",
-		"--http",
-		"--http.addr", "0.0.0.0",
-		"--http.port", "8545",
-		"--http.api", "eth,net,web3,txpool",
-		"--http.corsdomain", "*",
-		"--http.vhosts", "*",
-		"--verbosity", "3",
-	)
-	runOut, err := exec.Command("docker", runArgs...).CombinedOutput()
-	if err != nil {
-		t.Fatalf("docker run: %s\n%v", runOut, err)
-	}
-	t.Logf("geth container started: %s", strings.TrimSpace(string(runOut)))
-
-	t.Cleanup(func() {
-		logs, _ := exec.Command("docker", "logs", containerName).CombinedOutput()
-		t.Logf("geth-spec container logs:\n%s", logs)
-		exec.Command("docker", "stop", containerName).Run()    //nolint:errcheck
-		exec.Command("docker", "rm", "-f", containerName).Run() //nolint:errcheck
-	})
-
-	rpcURL := fmt.Sprintf("http://127.0.0.1:%d", hostPort)
-	t.Logf("geth-spec JSON-RPC: %s", rpcURL)
-
-	if err := rpcprobe.WaitForRPC(rpcURL, 60*time.Second); err != nil {
-		t.Fatalf("RPC never came up (logs captured in t.Cleanup): %v", err)
-	}
-
-	// Isolate this test's SuiteResult artifact so it doesn't overwrite
-	// the synthetic test's geth-result.json (CI uploads only the
-	// synthetic artifact for the cross-client-genesis-root aggregator;
-	// the spec aggregator lands in v1.5). t.Setenv restores RESULT_PATH
-	// to its prior value on test cleanup.
-	t.Setenv("RESULT_PATH", filepath.Join(t.TempDir(), "geth-spec-result.json"))
-
-	// Phases 3-7: shared via internal/e2e.RunSuitePhases.
-	// EOAs/Contracts are nil — spec entities are checked by the same
-	// CheckInjections path (which walks cfg.GenesisAccounts/Code via RPC).
-	e2e.RunSuitePhases(t, e2e.SuitePhasesCfg{
-		ClientName:      "geth-spec",
-		RPCURL:          rpcURL,
-		EOAs:            nil,
-		Contracts:       nil,
-		GeneratorConfig: &cfg,
-	})
-}
