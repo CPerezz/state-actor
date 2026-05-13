@@ -16,7 +16,6 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb/pebble"
 	gethrlp "github.com/ethereum/go-ethereum/rlp"
-	"github.com/holiman/uint256"
 	"github.com/linxGnu/grocksdb"
 
 	"github.com/nerolation/state-actor/generator"
