@@ -193,6 +193,28 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("Config: GenesisStorage[%s] has no corresponding GenesisAccounts entry (orphan storage)", a.Hex())
 		}
 	}
+
+	// Target-size budget enforcement: if --target-size is set, the spec
+	// alone must not exceed it. Conservative per-slot estimate (80 B/slot
+	// — the heaviest of the per-client calibration factors in
+	// internal/sizecal/factors.json) means we under-report and never
+	// false-reject; users can always raise --target-size if the warning
+	// fires spuriously. docs/SPEC.md promises this check.
+	if c.TargetSize > 0 {
+		const bytesPerSlot uint64 = 80
+		var totalSlots uint64
+		for _, slots := range c.GenesisStorage {
+			totalSlots += uint64(len(slots))
+		}
+		estimated := totalSlots * bytesPerSlot
+		if estimated > c.TargetSize {
+			return fmt.Errorf(
+				"Config: spec entities require an estimated %d bytes (%d slots × %d B/slot conservative estimate) "+
+					"which exceeds --target-size=%d. Raise --target-size or reduce approximate_size_bytes on spec entities.",
+				estimated, totalSlots, bytesPerSlot, c.TargetSize,
+			)
+		}
+	}
 	return nil
 }
 

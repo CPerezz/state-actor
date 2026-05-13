@@ -22,6 +22,10 @@ type eoaTemplate struct{}
 
 func (eoaTemplate) Name() string { return "eoa" }
 
+// UserVisible reports false: `eoa` is dispatched from `kind: eoa`, never
+// from a user-supplied `template:` value.
+func (eoaTemplate) UserVisible() bool { return false }
+
 func (eoaTemplate) ValidateParameters(params map[string]any) error {
 	// EOAs do not accept template parameters. The spec validator already
 	// rejects this, so this branch is only reached if Expand is called

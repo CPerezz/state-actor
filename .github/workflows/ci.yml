@@ -156,9 +156,13 @@ jobs:
           spamoor-ref: ${{ env.SPAMOOR_REF }}
 
   geth-suite:
-    name: geth · e2e suite (boot + spamoor + re-query)
+    name: geth · e2e suite (boot + spamoor + re-query, synthetic + spec)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Bumped from 45→60 min: the suite now runs TWO geth boots (synthetic
+    # TestE2ESuite + spec-driven TestE2ESuiteSpec). The spec variant is
+    # the v1 CI guarantee that --spec drives the writer → boot → spamoor
+    # → golden-hash flow end-to-end. Both tests share spamoor cache.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -179,13 +183,25 @@ jobs:
         if: steps.spamoor-cache.outputs.cache-hit != 'true'
         run: make spamoor-install SPAMOOR_COMMIT=${{ env.SPAMOOR_REF }}
 
-      - name: Run e2e suite
+      - name: Run e2e suite (synthetic + spec)
+        # Runs both TestE2ESuite (synthetic-fill cfg) AND TestE2ESuiteSpec
+        # (--spec=examples/spec-ci-min.yaml). The spec variant pins the
+        # plan's Part 7 Tier 1 promise: --spec exercises writer → boot →
+        # spamoor → golden-hash with non-empty PreAlloc-derived state.
+        # Tier 2 (besu/nethermind/reth) is tracked for v1.5.
+        #
+        # -run is a regex pattern matching both function names exactly.
+        # Each test writes to a distinct artifact path (synthetic →
+        # geth-result.json, spec → geth-spec-result.json) via the
+        # ClientName field passed to RunSuitePhases. Only the synthetic
+        # artifact participates in the existing cross-client-genesis-root
+        # aggregator below (the spec aggregator lands in v1.5).
         run: |
           mkdir -p _artifacts
           RESULT_PATH=$PWD/_artifacts/geth-result.json \
           SPAMOOR=/usr/local/bin/spamoor \
           REQUIRE_SPAMOOR=1 \
-            go test -tags oracle -run TestE2ESuite -v -timeout 30m ./client/geth/...
+            go test -tags oracle -run 'TestE2ESuite$|TestE2ESuiteSpec$' -v -timeout 45m ./client/geth/...
 
       - uses: actions/upload-artifact@v4
         if: always()

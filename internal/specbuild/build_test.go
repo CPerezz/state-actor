@@ -1,6 +1,7 @@
 package specbuild
 
 import (
+	"iter"
 	"strings"
 	"testing"
 
@@ -43,7 +44,7 @@ func TestBuildStory1(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load story 1: %v", err)
 	}
-	if _, err := s.Validate(templates.Names()); err != nil {
+	if _, err := s.Validate(templates.UserVisibleNames()); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
 
@@ -78,7 +79,7 @@ func TestBuildStory2(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load story 2: %v", err)
 	}
-	if _, err := s.Validate(templates.Names()); err != nil {
+	if _, err := s.Validate(templates.UserVisibleNames()); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
 
@@ -102,7 +103,7 @@ func TestBuildAllFeatures(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if _, err := s.Validate(templates.Names()); err != nil {
+	if _, err := s.Validate(templates.UserVisibleNames()); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
 
@@ -230,7 +231,7 @@ func TestBuildDetectsCrossEntityAddressCollision(t *testing.T) {
       decimals: 18`
 
 	s := parseSpec(t, yamlSrc)
-	if _, err := s.Validate(templates.Names()); err != nil {
+	if _, err := s.Validate(templates.UserVisibleNames()); err != nil {
 		t.Fatalf("Validate should pass (same name is permitted at parse time): %v", err)
 	}
 	_, _, err := Build(s, defaultOpts)
@@ -256,4 +257,83 @@ func TestBuildRejectsEmptySpec(t *testing.T) {
 	if _, _, err := Build(&spec.Spec{}, defaultOpts); err == nil {
 		t.Fatal("expected error for empty spec")
 	}
+}
+
+// TestBuildDeterminismEndToEnd is the strongest determinism guarantee
+// the feature ships: same YAML + same seed → byte-identical PreAlloc
+// across runs. Pins addresses, account fields, code, AND every
+// synthesized storage slot. Without this test, a non-deterministic
+// iteration path anywhere in spec→templates→specbuild→materialize
+// could silently produce different state across CI runs.
+func TestBuildDeterminismEndToEnd(t *testing.T) {
+	s, err := spec.ParseFile("../spec/testdata/valid-all-features.yaml")
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+	if _, err := s.Validate([]string{"erc20"}); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+
+	a, _, err := Build(s, defaultOpts)
+	if err != nil {
+		t.Fatalf("Build (run A): %v", err)
+	}
+	b, _, err := Build(s, defaultOpts)
+	if err != nil {
+		t.Fatalf("Build (run B): %v", err)
+	}
+
+	if len(a) != len(b) {
+		t.Fatalf("entity count differs across runs: %d vs %d", len(a), len(b))
+	}
+	for i := range a {
+		if a[i].Address != b[i].Address {
+			t.Errorf("entity[%d] address differs: %s vs %s", i, a[i].Address.Hex(), b[i].Address.Hex())
+		}
+		if a[i].Account.Nonce != b[i].Account.Nonce {
+			t.Errorf("entity[%d] nonce differs: %d vs %d", i, a[i].Account.Nonce, b[i].Account.Nonce)
+		}
+		if !a[i].Account.Balance.Eq(b[i].Account.Balance) {
+			t.Errorf("entity[%d] balance differs: %s vs %s", i, a[i].Account.Balance, b[i].Account.Balance)
+		}
+		if string(a[i].Account.CodeHash) != string(b[i].Account.CodeHash) {
+			t.Errorf("entity[%d] code hash differs", i)
+		}
+		if string(a[i].Code) != string(b[i].Code) {
+			t.Errorf("entity[%d] code bytes differ", i)
+		}
+		// Compare storage by draining both iterators into maps. Map
+		// equality covers content; iteration order is not part of the
+		// guarantee (Go maps shuffle; writers sort by keccak before
+		// inserting into the MPT, so storage-content equality is what
+		// matters for state-root determinism).
+		ma := drainStorage(a[i].Storage)
+		mb := drainStorage(b[i].Storage)
+		if len(ma) != len(mb) {
+			t.Errorf("entity[%d] storage slot count differs: %d vs %d", i, len(ma), len(mb))
+			continue
+		}
+		for k, va := range ma {
+			vb, ok := mb[k]
+			if !ok {
+				t.Errorf("entity[%d] key %s missing in run B", i, k.Hex())
+				continue
+			}
+			if va != vb {
+				t.Errorf("entity[%d] key %s: run A %s, run B %s", i, k.Hex(), va.Hex(), vb.Hex())
+			}
+		}
+	}
+}
+
+func drainStorage(seq iter.Seq2[common.Hash, common.Hash]) map[common.Hash]common.Hash {
+	out := map[common.Hash]common.Hash{}
+	if seq == nil {
+		return out
+	}
+	seq(func(k, v common.Hash) bool {
+		out[k] = v
+		return true
+	})
+	return out
 }

@@ -103,10 +103,27 @@ Built-in non-template handlers (no `template:` field needed):
 ## Determinism guarantees
 
 Same YAML + same `--seed` produces:
-- Identical entity addresses (all three modes).
-- Identical synthesized storage slot keys + values.
-- Identical state root on every MPT client (geth, besu, nethermind, reth).
-  Pinned in CI by `cross-client-spec-genesis-root`.
+- Identical entity addresses (all three modes). Pinned at unit level by
+  `internal/specbuild/derive_test.go:TestResolveAddressDeterministicAcrossRuns`.
+- Identical synthesized storage slot keys + values. Pinned by
+  `internal/templates/sizing_test.go:TestSynthesizeSlotsDeterministic`.
+- Identical end-to-end `PreAlloc` slice after parse → validate → build.
+  Pinned by `internal/specbuild/build_test.go:TestBuildDeterminismEndToEnd`.
+
+**v1 CI coverage**: the geth end-to-end suite
+(`client/geth/e2e_test.go:TestE2ESuiteSpec`) loads
+`examples/spec-ci-min.yaml`, runs Populate, boots geth, runs spamoor,
+and goes through the same RPC re-query phases as the synthetic-fill
+suite. This pins that `--spec` actually produces bootable, RPC-queryable
+state.
+
+**v1.5 follow-up**: cross-client byte-equal state root verification
+across geth/besu/nethermind/reth needs Docker-driven boots of the three
+cgo clients (besu/nethermind/reth) — those land alongside the
+`cross-client-spec-genesis-root` aggregator job in a follow-up PR. To
+keep the cross-client invariant robust against per-client storage
+calibration drift, that suite passes `sizecal.NewFixed(N)` (a fixed
+bytes-per-slot factor) rather than the per-client `sizecal.Default()`.
 
 ## Removed flag
 

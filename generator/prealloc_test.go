@@ -2,6 +2,7 @@ package generator
 
 import (
 	"iter"
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -84,6 +85,54 @@ func TestPreAllocShimRejectsCollisionWithInjectAddresses(t *testing.T) {
 	}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected collision error between InjectAddresses + spec alloc")
+	}
+}
+
+// TestValidateRejectsSpecExceedingTargetSize pins the SPEC.md promise that
+// Config.Validate fails when spec storage exceeds --target-size. Pre-fix
+// this check was silently absent — users would get truncated state.
+func TestValidateRejectsSpecExceedingTargetSize(t *testing.T) {
+	addr := common.HexToAddress("0x000000000000000000000000000000000000dddd")
+	// 1000 slots × 80 B/slot estimate = 80_000 bytes.
+	bigStorage := make(map[common.Hash]common.Hash, 1000)
+	for i := 0; i < 1000; i++ {
+		var k common.Hash
+		k[31] = byte(i)
+		bigStorage[k] = common.HexToHash("0xaa")
+	}
+
+	cfg := &Config{
+		TargetSize: 1000, // way below the 80_000 B estimate
+		PreAlloc: []templates.PreAllocEntity{{
+			Address: addr,
+			Account: &types.StateAccount{Nonce: 1, Balance: uint256.NewInt(0), Root: types.EmptyRootHash, CodeHash: types.EmptyCodeHash[:]},
+			Storage: storageMap(bigStorage),
+		}},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected target-size violation, got nil")
+	}
+	if !strings.Contains(err.Error(), "--target-size") {
+		t.Errorf("expected '--target-size' in error, got %q", err.Error())
+	}
+}
+
+func TestValidateAcceptsSpecUnderTargetSize(t *testing.T) {
+	addr := common.HexToAddress("0x000000000000000000000000000000000000eeee")
+	smallStorage := map[common.Hash]common.Hash{
+		common.HexToHash("0x01"): common.HexToHash("0xaa"),
+	}
+	cfg := &Config{
+		TargetSize: 1_000_000, // way above 1 slot × 80 B
+		PreAlloc: []templates.PreAllocEntity{{
+			Address: addr,
+			Account: &types.StateAccount{Nonce: 1, Balance: uint256.NewInt(0), Root: types.EmptyRootHash, CodeHash: types.EmptyCodeHash[:]},
+			Storage: storageMap(smallStorage),
+		}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("expected pass under budget, got %v", err)
 	}
 }
 

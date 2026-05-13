@@ -27,6 +27,10 @@ type rawTemplate struct{}
 
 func (rawTemplate) Name() string { return "raw" }
 
+// UserVisible reports false: `raw` is dispatched from `kind: contract`
+// + a `code:` field, never from a user-supplied `template:` value.
+func (rawTemplate) UserVisible() bool { return false }
+
 func (rawTemplate) ValidateParameters(params map[string]any) error {
 	if len(params) > 0 {
 		return fmt.Errorf("raw template does not accept parameters (got %d keys)", len(params))

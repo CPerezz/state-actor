@@ -37,14 +37,33 @@ func Lookup(name string) (Template, bool) {
 	return t, ok
 }
 
-// Names returns every registered template name, sorted. Used by the spec
-// validator to populate `knownTemplates` for unknown-template detection.
+// Names returns every registered template name, sorted. Includes
+// internal templates (raw, eoa) — used for diagnostics and tests.
+// For the user-facing validator, use UserVisibleNames instead.
 func Names() []string {
 	registryMu.RLock()
 	defer registryMu.RUnlock()
 	out := make([]string, 0, len(registry))
 	for n := range registry {
 		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// UserVisibleNames returns the subset of registered template names users
+// may set in the YAML `template:` field. Internal templates (`raw`, `eoa`)
+// are excluded — they're dispatched from `kind:` directly, and a user
+// writing `template: raw` would bypass intended semantics. Used by
+// spec.Validate to power the "unknown template" check.
+func UserVisibleNames() []string {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+	out := make([]string, 0, len(registry))
+	for n, t := range registry {
+		if t.UserVisible() {
+			out = append(out, n)
+		}
 	}
 	sort.Strings(out)
 	return out
