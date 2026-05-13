@@ -230,6 +230,98 @@ func TestValidateApproximateSizeWarning(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsEIP170OversizeCode(t *testing.T) {
+	// 24,577 bytes = MaxCodeSize + 1. Use printf-style construction to
+	// avoid pasting 49 KB of hex into the source.
+	hexBody := make([]byte, MaxCodeSize+1)
+	for i := range hexBody {
+		hexBody[i] = 0x00
+	}
+	codeHex := "0x" + hexEncode(hexBody)
+	yaml := "entities:\n  - kind: contract\n    name: oversize\n    code: \"" + codeHex + "\"\n"
+	s := parseStr(t, yaml)
+	_, err := s.Validate([]string{"erc20"})
+	if err == nil {
+		t.Fatal("expected EIP-170 violation, got nil")
+	}
+	if !strings.Contains(err.Error(), "EIP-170") {
+		t.Errorf("expected EIP-170 in error: %q", err.Error())
+	}
+}
+
+func TestValidateAcceptsExactlyMaxCodeSize(t *testing.T) {
+	hexBody := make([]byte, MaxCodeSize)
+	for i := range hexBody {
+		hexBody[i] = 0x00
+	}
+	codeHex := "0x" + hexEncode(hexBody)
+	yaml := "entities:\n  - kind: contract\n    name: max\n    code: \"" + codeHex + "\"\n"
+	s := parseStr(t, yaml)
+	if _, err := s.Validate([]string{"erc20"}); err != nil {
+		t.Errorf("expected exactly-max code to pass, got %v", err)
+	}
+}
+
+// hexEncode turns a byte slice into a lowercase hex string. Tiny test
+// helper — using encoding/hex would shadow the package import in types.go.
+func hexEncode(b []byte) string {
+	const digits = "0123456789abcdef"
+	out := make([]byte, len(b)*2)
+	for i, v := range b {
+		out[2*i] = digits[v>>4]
+		out[2*i+1] = digits[v&0x0f]
+	}
+	return string(out)
+}
+
+func TestValidateCaseSensitiveKind(t *testing.T) {
+	// `kind: Contract` (capitalized) must fail — schema is case-sensitive
+	// and a typo / casing error should produce a friendly error pointing
+	// at the lowercase forms.
+	cases := []struct {
+		name string
+		kind string
+	}{
+		{"Contract-capitalized", "Contract"},
+		{"EOA-uppercase", "EOA"},
+		{"Eoa-titlecase", "Eoa"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			yaml := "entities:\n  - kind: " + tc.kind + "\n    address: \"0x1111111111111111111111111111111111111111\"\n"
+			s := parseStr(t, yaml)
+			_, err := s.Validate(nil)
+			if err == nil {
+				t.Fatalf("expected error for kind=%q, got nil", tc.kind)
+			}
+			if !strings.Contains(err.Error(), "unknown kind") {
+				t.Errorf("expected 'unknown kind' in error: %q", err.Error())
+			}
+		})
+	}
+}
+
+func TestValidateCaseSensitiveTemplate(t *testing.T) {
+	// `template: ERC20` must fail — registry lookup is case-sensitive.
+	yaml := `entities:
+  - kind: contract
+    name: x
+    template: ERC20
+    parameters:
+      symbol: X
+      name: X
+      decimals: 18
+`
+	s := parseStr(t, yaml)
+	_, err := s.Validate([]string{"erc20"})
+	if err == nil {
+		t.Fatal("expected error for template=ERC20, got nil")
+	}
+	if !strings.Contains(err.Error(), "unknown template") {
+		t.Errorf("expected 'unknown template' in error: %q", err.Error())
+	}
+}
+
 func TestValidateEmptyKnownTemplatesSkipsCheck(t *testing.T) {
 	// When the caller passes an empty knownTemplates slice, the registry
 	// check is bypassed (useful for parse-only callers / tests that don't

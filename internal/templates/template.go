@@ -91,8 +91,15 @@ type SizeApproximator interface {
 // Determinism contract: for the same (ctx, e), Expand must return the same
 // []PreAllocEntity byte-for-byte across runs and across machines.
 type Template interface {
-	// Name is the registry key. Must match the YAML `template:` value.
+	// Name is the registry key.
 	Name() string
+
+	// UserVisible reports whether this template is exposed via the YAML
+	// `template:` field. Internal-only templates (raw, eoa) return false
+	// — they're dispatched from `kind:` directly and must not be picked
+	// by user-supplied `template:` strings. UserVisibleNames() filters by
+	// this.
+	UserVisible() bool
 
 	// ValidateParameters runs at parse time, before any Expand call, so
 	// users see parameter errors early. Implementations should reject

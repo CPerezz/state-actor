@@ -44,6 +44,9 @@ type erc20Template struct{}
 
 func (erc20Template) Name() string { return "erc20" }
 
+// UserVisible reports true: users set `template: erc20` in YAML.
+func (erc20Template) UserVisible() bool { return true }
+
 func (erc20Template) ValidateParameters(params map[string]any) error {
 	required := []string{"symbol", "name", "decimals"}
 	for _, k := range required {
@@ -141,9 +144,18 @@ func (erc20Template) Expand(ctx Context, e spec.Entity) ([]PreAllocEntity, error
 		storage = Concat(storage, balances)
 	}
 
+	// Nonce: honor the user-supplied value; floor at 1 per EIP-161
+	// (contracts have nonce>=1 after Spurious Dragon). This means users
+	// who explicitly set `nonce: 0` get nonce=1 silently — that's
+	// intentional and matches go-ethereum's genesis-alloc convention.
+	// Documented in docs/SPEC.md.
+	nonce := e.Nonce
+	if nonce == 0 {
+		nonce = 1
+	}
 	codeHash := crypto.Keccak256Hash(ERC20RuntimeBytecode)
 	acc := &types.StateAccount{
-		Nonce:    1, // contracts conventionally start at nonce=1
+		Nonce:    nonce,
 		Balance:  balance,
 		Root:     types.EmptyRootHash,
 		CodeHash: codeHash.Bytes(),

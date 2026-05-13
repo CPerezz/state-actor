@@ -176,6 +176,124 @@ func TestParseRejectsUntypedNumericBalance(t *testing.T) {
 	}
 }
 
+// TestParseBalanceRejections is a table of every shape of `balance:` value
+// the schema MUST reject. Each entry is a YAML snippet wrapping an EOA
+// with a problematic balance field. The umbrella test catches regressions
+// where one of these accidentally becomes acceptable.
+func TestParseBalanceRejections(t *testing.T) {
+	cases := []struct {
+		name string
+		val  string // raw YAML value for `balance:` (without the field name)
+	}{
+		// `balance: 1000000000000000000` — unquoted int rejected (precision risk).
+		{"unquoted-int", `1000000000000000000`},
+		// `balance: 1.5` — float, can't represent uint256.
+		{"unquoted-float", `1.5`},
+		// `balance: true` — bool, makes no sense.
+		{"unquoted-bool", `true`},
+		// `balance: "1_000_000_000_000_000_000"` — uint256.SetFromDecimal
+		// rejects underscores (the schema doesn't strip them).
+		{"underscored-decimal", `"1_000_000_000_000_000_000"`},
+		// `balance: "1e22"` — scientific notation rejected.
+		{"scientific-notation", `"1e22"`},
+		// `balance: "-1"` — negative.
+		{"negative", `"-1"`},
+		// `balance: "ABCDEF"` — letters without 0x prefix.
+		{"alpha-no-prefix", `"ABCDEF"`},
+		// `balance: ""` — empty.
+		{"empty", `""`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input := "entities:\n  - kind: eoa\n    address: \"0x1111111111111111111111111111111111111111\"\n    balance: " + tc.val + "\n"
+			if _, err := Parse(strings.NewReader(input)); err == nil {
+				t.Errorf("expected error for balance=%s, got nil", tc.val)
+			}
+		})
+	}
+}
+
+func TestParseBalanceMaxUint256(t *testing.T) {
+	// 2^256 - 1, the largest legal balance.
+	input := `entities:
+  - kind: eoa
+    address: "0x1111111111111111111111111111111111111111"
+    balance: "115792089237316195423570985008687907853269984665640564039457584007913129639935"
+`
+	s, err := Parse(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("max uint256 balance should parse: %v", err)
+	}
+	if s.Entities[0].Balance == nil || s.Entities[0].Balance.V.IsZero() {
+		t.Error("max balance parsed but value is zero")
+	}
+}
+
+func TestParseBalanceOverflowUint256(t *testing.T) {
+	// 2^256 (one too high) — must reject.
+	input := `entities:
+  - kind: eoa
+    address: "0x1111111111111111111111111111111111111111"
+    balance: "115792089237316195423570985008687907853269984665640564039457584007913129639936"
+`
+	if _, err := Parse(strings.NewReader(input)); err == nil {
+		t.Error("expected error for balance > 2^256-1, got nil")
+	}
+}
+
+func TestParseAddressEdgeCases(t *testing.T) {
+	cases := []struct {
+		name  string
+		addr  string
+		valid bool
+	}{
+		{"zero-address", `"0x0000000000000000000000000000000000000000"`, true},
+		{"max-address", `"0xffffffffffffffffffffffffffffffffffffffff"`, true},
+		{"too-long", `"0x11111111111111111111111111111111111111110"`, false},
+		{"prefix-only", `"0x"`, false},
+		{"unquoted-hex", `0x1111111111111111111111111111111111111111`, true}, // yaml resolves as !!int; value text preserved
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input := "entities:\n  - kind: eoa\n    address: " + tc.addr + "\n"
+			_, err := Parse(strings.NewReader(input))
+			if tc.valid && err != nil {
+				t.Errorf("expected pass, got %v", err)
+			}
+			if !tc.valid && err == nil {
+				t.Errorf("expected fail, got nil")
+			}
+		})
+	}
+}
+
+func TestParseCodeEdgeCases(t *testing.T) {
+	cases := []struct {
+		name  string
+		code  string
+		valid bool
+	}{
+		{"empty-quoted", `""`, true},      // empty string → nil HexBytes
+		{"zero-bytes-prefix-only", `"0x"`, true}, // 0x with no body → empty slice
+		{"single-byte", `"0x00"`, true},
+		{"23-byte-7702-marker", `"0xef0100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"`, true},
+		{"odd-length", `"0x1"`, false},
+		{"non-hex-char", `"0xZZ"`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input := "entities:\n  - kind: contract\n    name: x\n    code: " + tc.code + "\n"
+			_, err := Parse(strings.NewReader(input))
+			if tc.valid && err != nil {
+				t.Errorf("expected pass, got %v", err)
+			}
+			if !tc.valid && err == nil {
+				t.Errorf("expected fail, got nil")
+			}
+		})
+	}
+}
+
 func TestParseFileMissing(t *testing.T) {
 	if _, err := ParseFile("testdata/this-file-does-not-exist.yaml"); err == nil {
 		t.Fatal("expected error for missing file, got nil")

@@ -10,9 +10,12 @@
   first; the synthetic-fill loop then runs on top until `--target-size`
   is reached. See [`docs/SPEC.md`](docs/SPEC.md) for the schema. Closes
   the customizable-state-generation feature plan.
-- Cross-client deterministic invariant: same `--spec` + same `--seed`
-  produces identical state root on all four MPT clients
-  (geth/besu/nethermind/reth).
+- **Deterministic invariant**: same `--spec` + same `--seed` produces
+  byte-identical state on the same client. Pinned at unit level
+  (address derivation, storage synthesis, end-to-end PreAlloc) and at
+  CI level via `client/geth/e2e_test.go:TestE2ESuiteSpec` (geth boot +
+  spamoor + golden-hash). Cross-client byte-equal state root across
+  geth/besu/nethermind/reth lands in v1.5 (see limitations).
 - New packages: `internal/spec/` (YAML parser + schema), `internal/templates/`
   (template registry: `erc20`, `raw`, `eoa`), `internal/specbuild/`
   (Spec→entities translator with 3-mode address resolution),
@@ -52,6 +55,25 @@
   Config.PreAlloc → writer.
 - `TestMainInjectAccountsFlagRemoved`: confirms the removed flag exits
   non-zero — prevents an accidental re-add.
+- **`client/geth/e2e_test.go:TestE2ESuiteSpec`** (geth-suite CI job):
+  loads `examples/spec-ci-min.yaml`, runs Populate, boots geth in --dev
+  mode, runs spamoor, captures the genesis state-root, goes through the
+  same RunSuitePhases pipeline as the synthetic-fill suite. **This is
+  the v1 CI guarantee that `--spec` works end-to-end through writer +
+  boot + spamoor.**
+- Audit-driven coverage additions:
+  - `TestValidateRejectsEIP170OversizeCode` + `TestValidateAcceptsExactlyMaxCodeSize`
+  - `TestValidateCaseSensitiveKind` + `TestValidateCaseSensitiveTemplate`
+  - `TestParseBalanceRejections` (8 sub-cases: underscored, scientific,
+    negative, float, bool, alpha-no-prefix, empty, unquoted-int)
+  - `TestParseBalanceMaxUint256` + `TestParseBalanceOverflowUint256`
+  - `TestParseAddressEdgeCases` (zero, max, too-long, prefix-only, unquoted-hex)
+  - `TestParseCodeEdgeCases` (empty, prefix-only, single-byte, 23-byte 7702 marker, odd-length, non-hex)
+  - `TestERC20BalancesSlotComputationManyHolders` (extends single-holder
+    Solidity-equivalence to 25 holders)
+  - `TestERC20NonceHonorsUserValue` (3 sub-cases pinning the EIP-161 floor + user override)
+  - `TestValidateRejectsSpecExceedingTargetSize` + `TestValidateAcceptsSpecUnderTargetSize`
+  - `TestBuildDeterminismEndToEnd`
 
 ### Limitations (tracked for v1.5)
 - `--spec` materializes `approximate_size_bytes` storage into a Go map
@@ -66,15 +88,17 @@
   bytecode lands as a one-file v1.5 swap.
 - `erc721` and `uniswapv2` templates are deferred to v1.5 (the registry
   pattern makes adding them a single-file change).
-- **Cross-client spec invariant CI (Part 7 of the plan) is deferred** —
-  the per-client `TestE2ESuiteSpec` functions and the
-  `cross-client-spec-genesis-root` aggregator job need real Docker-
-  driven client boots (besu/nethermind/reth) which the v1 PR's author
-  could not validate locally. Determinism of spec output IS already
-  pinned at unit-test level
-  (`internal/specbuild/derive_test.go:TestResolveAddressDeterministicAcrossRuns`,
-  `internal/templates/sizing_test.go:TestSynthesizeSlotsDeterministic`,
-  and the spec-driven `Config.PreAlloc` shim runs through every
-  client writer's `Config.Validate()` unchanged), so behavioral
-  correctness is exercised; cross-client *byte-equal state root*
-  verification waits for the v1.5 CI workflow.
+- **Cross-client spec-state-root invariant CI is partially landed in v1:
+  geth-only (Tier 1).** `client/geth/e2e_test.go:TestE2ESuiteSpec`
+  exercises writer → boot → spamoor → golden-hash with `--spec`. The
+  besu/nethermind/reth equivalents + a sibling
+  `cross-client-spec-genesis-root` aggregator job land in v1.5 — they
+  need Docker image builds the v1 PR's author couldn't validate
+  locally. Determinism of spec output is pinned at unit level for all
+  four clients (the same code path runs identically through every
+  `Config.Validate()` shim).
+- **ERC-20 template hardcodes nonce-floor at 1.** Per EIP-161, contracts
+  on Spurious-Dragon+ forks have nonce ≥ 1. Users who explicitly set
+  `nonce: 0` on a `template: erc20` entity get nonce=1 silently.
+  Override by setting `nonce: 1` (or higher) explicitly. v1.5 may grow
+  a `*uint64` Entity.Nonce to distinguish "unset" from "explicit 0".

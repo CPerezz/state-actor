@@ -12,6 +12,14 @@ import (
 // they probably mean MB not TB.
 const approxSizeWarnThreshold uint64 = 1 << 40 // 1 TiB
 
+// MaxCodeSize is EIP-170's contract-code ceiling (24,576 bytes). Any
+// `code:` field longer than this is rejected at parse time — a contract
+// with oversize code would be rejected by clients at execution time
+// anyway, and behavior at genesis may diverge per client (some refuse
+// to load the genesis, others accept it silently). Better to fail
+// loud here.
+const MaxCodeSize = 24576
+
 // ValidateResult carries the validator's diagnostics. Validate returns a
 // non-nil error if any hard rule is violated; warnings (non-fatal) are
 // surfaced in Warnings so the CLI can print them but still proceed.
@@ -106,6 +114,14 @@ func (s *Spec) Validate(knownTemplates []string) (ValidateResult, error) {
 			result.Warnings = append(result.Warnings,
 				fmt.Sprintf("%s: approximate_size_bytes=%d exceeds %d (1 TiB); likely a unit mistake",
 					anchor, e.ApproximateSizeBytes, approxSizeWarnThreshold))
+		}
+
+		// EIP-170 code-size check. Genesis state can technically contain
+		// oversize code on some testnets, but mainnet rules reject it and
+		// per-client behavior diverges; fail loud at spec time.
+		if len(e.Code) > MaxCodeSize {
+			return result, fmt.Errorf("%s: code length %d exceeds EIP-170 limit (%d bytes); contracts with oversize code are unmineable on mainnet-rules forks",
+				anchor, len(e.Code), MaxCodeSize)
 		}
 	}
 

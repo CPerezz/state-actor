@@ -12,7 +12,7 @@ entities:
       symbol: EXP
       decimals: 6
       name: Explicit
-    approximate_size_bytes: 100_000_000
+    approximate_size_bytes: 100_000
 
   # Template-driven contract with name-derived address.
   - kind: contract
@@ -22,7 +22,7 @@ entities:
       symbol: NMD
       decimals: 18
       name: NamedToken
-    approximate_size_bytes: 100_000_000
+    approximate_size_bytes: 100_000
 
   # Template-driven contract with position-derived address (no name, no addr).
   - kind: contract
@@ -31,13 +31,13 @@ entities:
       symbol: ANON
       decimals: 18
       name: AnonToken
-    approximate_size_bytes: 50_000_000
+    approximate_size_bytes: 50_000
 
   # Raw-bytecode contract with synthetic storage bloat.
   - kind: contract
     name: my-custom-contract
     code: "0x6080604052348015600f57600080fd5b50603f80601d6000396000f3fe6080604052600080fdfea2"
-    approximate_size_bytes: 50_000_000
+    approximate_size_bytes: 50_000
 
   # EOA with EIP-7702 delegation and storage bloat.
   - kind: eoa
@@ -45,7 +45,7 @@ entities:
     balance: "1000000000000000000"
     nonce: 10
     code: "0xef01001111111111111111111111111111111111111111"
-    approximate_size_bytes: 100_000_000
+    approximate_size_bytes: 100_000
 
   # Plain EOA with explicit address.
   - kind: eoa

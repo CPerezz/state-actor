@@ -200,7 +200,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("--spec: %v", err)
 		}
-		validateRes, err := specDoc.Validate(templates.Names())
+		validateRes, err := specDoc.Validate(templates.UserVisibleNames())
 		if err != nil {
 			log.Fatalf("--spec validate: %v", err)
 		}
