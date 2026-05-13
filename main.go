@@ -25,8 +25,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ethereum/go-ethereum/common"
-
 	"github.com/nerolation/state-actor/client/besu"
 	"github.com/nerolation/state-actor/client/geth"
 	"github.com/nerolation/state-actor/client/nethermind"
@@ -119,12 +117,6 @@ func main() {
 		trieMode = generator.TrieModeBinary
 	}
 
-	// --inject-accounts was removed in favor of --spec (see docs/SPEC.md).
-	// Existing CI/scripts using --inject-accounts will hit Go's "flag
-	// provided but not defined" error; the migration is a one-line YAML
-	// snippet documented in CHANGELOG.md.
-	var injectAddrs []common.Address
-
 	// Parse --target-size
 	var parsedTargetSize uint64
 	if *targetSize != "" {
@@ -144,21 +136,20 @@ func main() {
 	// dirSize sampling), reth (per-batch dirSize sampling).
 
 	config := generator.Config{
-		DBPath:          *dbPath,
-		NumAccounts:     *accounts,
-		NumContracts:    *contracts,
-		MaxSlots:        *maxSlots,
-		MinSlots:        *minSlots,
-		Distribution:    generator.ParseDistribution(*distribution),
-		Seed:            *seed,
-		CodeSize:        *codeSize,
-		Verbose:         *verbose,
-		TrieMode:        trieMode,
-		CommitInterval:  500_000,
-		WriteTrieNodes:  true, // Always write trie nodes — DB is unusable without them
-		InjectAddresses: injectAddrs,
-		TargetSize:      parsedTargetSize,
-		GroupDepth:      *groupDepth,
+		DBPath:         *dbPath,
+		NumAccounts:    *accounts,
+		NumContracts:   *contracts,
+		MaxSlots:       *maxSlots,
+		MinSlots:       *minSlots,
+		Distribution:   generator.ParseDistribution(*distribution),
+		Seed:           *seed,
+		CodeSize:       *codeSize,
+		Verbose:        *verbose,
+		TrieMode:       trieMode,
+		CommitInterval: 500_000,
+		WriteTrieNodes: true, // Always write trie nodes — DB is unusable without them
+		TargetSize:     parsedTargetSize,
+		GroupDepth:     *groupDepth,
 	}
 
 	// Synthesize the genesis chainspec from CLI flags. state-actor no

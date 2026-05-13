@@ -88,5 +88,5 @@
 //   - temp_sort_cgo.go: Pebble-backed temp sorter for streaming Phase 4
 //   - chainspec.go: chainspec JSON writer (built from cfg.Genesis)
 //   - header.go: genesis header construction
-//   - options.go: Options struct (reserved); buildInjectedAccount helper
+//   - options.go: Options struct (reserved); buildAllocAccounts helper
 package reth

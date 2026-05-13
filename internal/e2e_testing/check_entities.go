@@ -2,7 +2,10 @@ package e2e_testing
 
 import (
 	"bytes"
+	"sort"
 	"testing"
+
+	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/nerolation/state-actor/generator"
 	"github.com/nerolation/state-actor/internal/entitygen"
@@ -68,50 +71,37 @@ func CheckEntities(t *testing.T, rpcURL string, eoas, contracts []*entitygen.Acc
 	return passed
 }
 
-// CheckInjections verifies the writer landed the static cfg-driven
-// pre-alloc on-chain:
+// CheckInjections verifies the writer landed the cfg-driven pre-alloc
+// on-chain:
 //
-//   - every InjectAddresses entry has non-zero balance (legacy path —
-//     deprecated, kept for back-compat with tests that still wire
-//     `cfg.InjectAddresses` directly).
 //   - every GenesisAccounts entry with a non-zero Balance matches via
 //     eth_getBalance. Spec-driven entities (the spamoor sender, plain
 //     EOAs, 7702 EOAs with explicit balance) land here after the
 //     Config.Validate shim materializes PreAlloc → GenesisAccounts.
 //   - every GenesisCode entry's bytecode matches via eth_getCode.
 //     Spec-driven raw and template contracts land here.
+//   - every GenesisStorage entry's slots match via eth_getStorageAt,
+//     sampled to bound RPC round-trip cost (see sampleStorageSlots).
 //
 // Reports any mismatch via t.Errorf; returns false on any mismatch,
 // true if everything checks out.
 //
 // This catches the exact bug class that PR review C1+C2 surfaced: a
-// writer silently drops InjectAddresses or GenesisAccounts (because
-// the field is unused by that client's writer) — Phase 4 fails loudly
+// writer silently drops GenesisAccounts/Code/Storage (because the
+// field is unused by that client's writer) — Phase 4 fails loudly
 // with "expected code at addr X, got empty" instead of the regression
 // only surfacing via the cross-client genesis-root aggregator.
 //
 // Used by the per-client e2e suites at "0x0" (Phase 4: oracle re-query
 // against genesis). Pairs with CheckEntities — that one covers
 // entitygen synthetic entities; this one covers static cfg-driven
-// injections (now primarily spec-driven entries via Config.PreAlloc).
+// injections (now exclusively spec-driven entries via Config.PreAlloc).
 func CheckInjections(t *testing.T, rpcURL string, cfg *generator.Config, blockTag string) bool {
 	t.Helper()
 	if cfg == nil {
 		return true
 	}
 	passed := true
-	for _, addr := range cfg.InjectAddresses {
-		got, err := rpcprobe.EthGetBalance(rpcURL, addr, blockTag)
-		if err != nil {
-			t.Errorf("[%s] inject eth_getBalance %s: %v", blockTag, addr.Hex(), err)
-			passed = false
-			continue
-		}
-		if got.Sign() == 0 {
-			t.Errorf("[%s] inject %s: balance is zero (writer dropped InjectAddresses?)", blockTag, addr.Hex())
-			passed = false
-		}
-	}
 	for addr, acct := range cfg.GenesisAccounts {
 		if acct == nil || acct.Balance == nil || acct.Balance.IsZero() {
 			continue // No balance assertion for zero-balance entities (e.g. Prague system contracts).
@@ -143,7 +133,77 @@ func CheckInjections(t *testing.T, rpcURL string, cfg *generator.Config, blockTa
 			passed = false
 		}
 	}
+	// Storage verification: every spec entity with non-empty storage gets
+	// up to storageSampleSize slots re-queried via eth_getStorageAt and
+	// compared byte-for-byte. Sampling bounds RPC roundtrips at
+	// O(addresses × storageSampleSize); for the CI baseline fixture
+	// (~6 entities with storage, 5 slots each) that's ~30 RPC calls.
+	// This catches the bug class: ERC-20 holder balances + 7702 EOA
+	// storage-bloat slots landed in the writer but vanished by RPC time.
+	for addr, slots := range cfg.GenesisStorage {
+		if len(slots) == 0 {
+			continue
+		}
+		for _, slot := range sampleStorageSlots(slots) {
+			wantValue := slots[slot]
+			got, err := rpcprobe.EthGetStorageAt(rpcURL, addr, slot, blockTag)
+			if err != nil {
+				t.Errorf("[%s] alloc eth_getStorageAt %s slot %s: %v",
+					blockTag, addr.Hex(), slot.Hex(), err)
+				passed = false
+				continue
+			}
+			if got != wantValue {
+				t.Errorf("[%s] alloc eth_getStorageAt %s slot %s: got %s want %s — writer dropped GenesisStorage?",
+					blockTag, addr.Hex(), slot.Hex(), got.Hex(), wantValue.Hex())
+				passed = false
+			}
+		}
+	}
 	return passed
+}
+
+// storageSampleSize is the per-entity slot-sample cap for CheckInjections.
+// Picks first / last / middle + (size-4) interior slots from a sorted-by-key
+// view of the entity's storage. Bounds RPC roundtrips per Phase 4
+// invocation regardless of fixture size.
+const storageSampleSize = 5
+
+// sampleStorageSlots picks up to storageSampleSize keys deterministically
+// from a storage map. Sorts by hex key, then picks first, last, middle,
+// and additional interior keys spaced evenly. Deterministic — same input
+// → same sampled keys → reproducible test signal across runs and across
+// clients.
+//
+// Returns all keys when len(slots) <= storageSampleSize; otherwise
+// returns exactly storageSampleSize keys.
+func sampleStorageSlots(slots map[common.Hash]common.Hash) []common.Hash {
+	if len(slots) <= storageSampleSize {
+		out := make([]common.Hash, 0, len(slots))
+		for k := range slots {
+			out = append(out, k)
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i].Hex() < out[j].Hex() })
+		return out
+	}
+	keys := make([]common.Hash, 0, len(slots))
+	for k := range slots {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i].Hex() < keys[j].Hex() })
+
+	// Sample at evenly-spaced positions: 0, N-1, then the (storageSampleSize-2)
+	// middle positions spread across the interior. Integer-rounded so the
+	// pick is exactly storageSampleSize keys.
+	out := make([]common.Hash, 0, storageSampleSize)
+	n := len(keys)
+	for i := 0; i < storageSampleSize; i++ {
+		// idx = round(i * (n-1) / (storageSampleSize-1)) ; gives 0 at i=0
+		// and n-1 at i=storageSampleSize-1, evenly spaced between.
+		idx := i * (n - 1) / (storageSampleSize - 1)
+		out = append(out, keys[idx])
+	}
+	return out
 }
 
 // safePrefix returns the first n bytes of b, or all of b if len(b) < n.

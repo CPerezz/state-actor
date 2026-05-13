@@ -142,7 +142,7 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 	}
 
 	stats.StateRoot = header.Root
-	stats.AccountsCreated = cfg.NumAccounts + len(cfg.InjectAddresses)
+	stats.AccountsCreated = cfg.NumAccounts
 	stats.ContractsCreated = cfg.NumContracts
 	return stats, nil
 }

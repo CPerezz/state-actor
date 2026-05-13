@@ -42,14 +42,15 @@ var emptyMPTRoot = common.HexToHash("0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b9
 //  4. Streaming synthetic-account generation. Memory bounded by one batch
 //     (~100K accounts) plus Pebble's 64 MiB write buffer, regardless of
 //     total N. Mirrors client/nethermind/entitygen_cgo.go.
-//     a. Inject pre-funded accounts (cfg.InjectAddresses).
-//     a.5. Genesis-alloc accounts (cfg.GenesisAccounts/Code/Storage). Used
+//     a. Genesis-alloc accounts (cfg.GenesisAccounts/Code/Storage). Used
 //        by the e2e suite to deploy EIP-4788/2935/7002/7251 system
 //        contracts at their canonical addresses via
-//        oracle.AddPragueSystemContracts — required for post-Prague block
-//        processing. Routed through WriteContracts so StateAccount.Root +
-//        .CodeHash get spliced from the supplied Storage + Code before the
-//        per-account RLP is stashed in the sorter.
+//        oracle.AddPragueSystemContracts AND by the --spec YAML path
+//        (via Config.PreAlloc materialization in Config.Validate) for
+//        user-declared entities. Routed through WriteContracts so
+//        StateAccount.Root + .CodeHash get spliced from the supplied
+//        Storage + Code before the per-account RLP is stashed in the
+//        sorter.
 //     b. Synthetic EOAs in 100K batches.
 //     c. Synthetic contracts in 100K batches. WriteContracts
 //        mutates each contract's StateAccount.Root + .CodeHash IN-PLACE
@@ -57,8 +58,8 @@ var emptyMPTRoot = common.HexToHash("0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b9
 //        global state root sees the correct trie/code linkage.
 //     d. Drain the Pebble sorter (ascending addrHash order) into the
 //        streaming HashBuilder for the global state root.
-//     Empty alloc (no inject + NumAccounts=0 + NumContracts=0) yields the
-//     canonical empty-MPT hash 0x56e81f17...
+//     Empty alloc (no GenesisAccounts + NumAccounts=0 + NumContracts=0)
+//     yields the canonical empty-MPT hash 0x56e81f17...
 //  5. Persist chainspec.json (still O(N) RAM — separate follow-up plan
 //     covers the chainspec workaround).
 //  6. Build genesis header with computed state root + WriteMetadata (5 tables)
@@ -122,26 +123,6 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 	}
 
 	const batchSize = defaultStreamBatchSize
-
-	// Phase 4a: inject pre-funded accounts (e.g. Anvil dev account
-	// 0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266) so spamoor and other test
-	// harnesses have a known-funded sender. Each gets 999_999_999 ETH, nonce 0,
-	// no code, no storage. Address is taken verbatim from cfg.InjectAddresses.
-	if len(cfg.InjectAddresses) > 0 {
-		injected := make([]*entitygen.Account, len(cfg.InjectAddresses))
-		for i, addr := range cfg.InjectAddresses {
-			injected[i] = buildInjectedAccount(addr)
-		}
-		if err := WriteEOAs(envs, injected, 0, stats); err != nil {
-			return nil, fmt.Errorf("RunCgo: WriteEOAs(injected): %w", err)
-		}
-		for _, acc := range injected {
-			if err := putAccountRLP(acc); err != nil {
-				return nil, fmt.Errorf("RunCgo: putAccountRLP(injected): %w", err)
-			}
-		}
-		accountsCreated += len(cfg.InjectAddresses)
-	}
 
 	// Phase 4a.5: genesis-alloc accounts (cfg.GenesisAccounts/Code/Storage).
 	// The e2e suite uses these to deploy EIP-4788/2935/7002/7251 system

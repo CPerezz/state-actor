@@ -113,51 +113,23 @@ func writeStateAndCollectRoot(
 		}
 	}
 
-	// Inject explicitly-requested addresses (e.g. Anvil default) as EOAs with
-	// 999_999_999 ETH, nonce=0, no code/storage. Mirrors generator.Generator's
-	// InjectAddresses handling.
-	injectBalance := new(uint256.Int).Mul(uint256.NewInt(999_999_999), uint256.NewInt(1_000_000_000_000_000_000))
-	seenInjected := make(map[common.Address]struct{}, len(cfg.InjectAddresses))
-	for _, addr := range cfg.InjectAddresses {
-		if err := ctx.Err(); err != nil {
-			pdb.Close()
-			return common.Hash{}, nil, nil, err
-		}
-		if _, dup := seenInjected[addr]; dup {
-			continue
-		}
-		seenInjected[addr] = struct{}{}
-		addrHash := crypto.Keccak256Hash(addr[:])
-		// Inject as an EOA with the canonical large balance.
-		blob := encodeEntityEOA(0, injectBalance)
-		if err := batch.Set(addrHash[:], blob, nil); err != nil {
-			pdb.Close()
-			return common.Hash{}, nil, nil, err
-		}
-		pendingBytes += 32 + len(blob)
-		if pendingBytes >= phase1FlushBytes {
-			if err := flush(); err != nil {
-				pdb.Close()
-				return common.Hash{}, nil, nil, err
-			}
-		}
-	}
-
 	// Genesis-alloc accounts (cfg.GenesisAccounts/GenesisCode/GenesisStorage):
 	// the e2e test path uses these to deploy EIP-4788/7002/7251/2935 system
 	// contracts at their canonical addresses (otherwise besu's
 	// CancunPreExecutionProcessor + PraguePreExecutionProcessor reject every
-	// block with "Invalid system call address"). Geth + nethermind already
-	// read these fields in their writers; this brings besu to parity.
+	// block with "Invalid system call address"). The --spec YAML path also
+	// flows here via Config.Validate's PreAlloc materialization. Geth +
+	// nethermind already read these fields in their writers; besu mirrors.
+	seenAlloc := make(map[common.Address]struct{}, len(cfg.GenesisAccounts))
 	for addr, acc := range cfg.GenesisAccounts {
 		if err := ctx.Err(); err != nil {
 			pdb.Close()
 			return common.Hash{}, nil, nil, err
 		}
-		if _, dup := seenInjected[addr]; dup {
-			continue // InjectAddresses takes precedence (preserves the canonical EOA balance)
+		if _, dup := seenAlloc[addr]; dup {
+			continue
 		}
-		seenInjected[addr] = struct{}{}
+		seenAlloc[addr] = struct{}{}
 		addrHash := crypto.Keccak256Hash(addr[:])
 		balance := acc.Balance
 		if balance == nil {

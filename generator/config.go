@@ -90,10 +90,11 @@ type Config struct {
 	// state — post-Merge EIP system contracts (deployed via
 	// oracle.AddPragueSystemContracts in e2e suites) and any other
 	// alloc entries tests need. All 4 client writers consume these
-	// fields (geth/nethermind/besu/reth) — Config.Validate() enforces
-	// that no address appears in both InjectAddresses and GenesisAccounts,
-	// and that GenesisStorage/GenesisCode have no orphan entries.
-	// Production CLI doesn't set these directly; the oracle helper does.
+	// fields (geth/nethermind/besu/reth). Config.Validate() enforces
+	// that GenesisStorage/GenesisCode have no orphan entries.
+	// Production CLI populates these via the --spec YAML path (the
+	// PreAlloc field, below, materializes into these maps at Validate
+	// time).
 	GenesisAccounts map[common.Address]*types.StateAccount
 	GenesisStorage  map[common.Address]map[common.Hash]common.Hash
 	GenesisCode     map[common.Address][]byte
@@ -109,11 +110,6 @@ type Config struct {
 	// database during Phase 2 hash computation, making the database usable
 	// by geth's PathDB. Automatically set when --genesis is provided.
 	WriteTrieNodes bool
-
-	// InjectAddresses is a list of additional addresses to inject into the
-	// generated state with a large balance (999999999 ETH). This is useful
-	// for pre-funding test accounts (e.g. Anvil's default account).
-	InjectAddresses []common.Address
 
 	// TargetSize is the target total database size on disk in bytes.
 	// When set (> 0), this is the GOVERNING constraint: contracts are
@@ -141,9 +137,7 @@ type Config struct {
 
 // Validate rejects malformed Config combinations at command start, before
 // any DB write happens. Centralized so all 4 client writers enforce the
-// same invariants — silently picking one side of an ambiguity used to
-// silently corrupt state (e.g. besu writes InjectAddresses first, geth
-// writes GenesisAccounts first; same cfg → different outcomes).
+// same invariants.
 //
 // Validate also materializes PreAlloc entries (from the --spec YAML
 // translator) into the legacy GenesisAccounts/Code/Storage maps so v1
@@ -152,11 +146,11 @@ type Config struct {
 // non-trivial step.
 //
 // Rejects:
-//   - InjectAddresses ∩ GenesisAccounts ≠ ∅ — ambiguous precedence.
-//   - PreAlloc addresses collide with GenesisAccounts/InjectAddresses
-//     (caught after materialization).
+//   - PreAlloc addresses collide with programmatic GenesisAccounts entries
+//     (e.g. oracle.AddPragueSystemContracts).
 //   - GenesisCode address not in GenesisAccounts — orphan code.
 //   - GenesisStorage address not in GenesisAccounts — orphan storage.
+//   - Spec storage estimate exceeds --target-size.
 //
 // Called by client writers as the first non-trivial step of
 // Run() / Populate() / runImpl().
@@ -168,21 +162,6 @@ func (c *Config) Validate() error {
 		return err
 	}
 
-	if len(c.InjectAddresses) > 0 && len(c.GenesisAccounts) > 0 {
-		injectSet := make(map[common.Address]struct{}, len(c.InjectAddresses))
-		for _, a := range c.InjectAddresses {
-			injectSet[a] = struct{}{}
-		}
-		var collisions []common.Address
-		for a := range c.GenesisAccounts {
-			if _, dup := injectSet[a]; dup {
-				collisions = append(collisions, a)
-			}
-		}
-		if len(collisions) > 0 {
-			return fmt.Errorf("Config: addresses appear in both InjectAddresses and GenesisAccounts (ambiguous precedence): %v", collisions)
-		}
-	}
 	for a := range c.GenesisCode {
 		if _, ok := c.GenesisAccounts[a]; !ok {
 			return fmt.Errorf("Config: GenesisCode[%s] has no corresponding GenesisAccounts entry (orphan code)", a.Hex())
