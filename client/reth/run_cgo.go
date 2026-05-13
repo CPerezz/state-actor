@@ -47,10 +47,12 @@ var emptyMPTRoot = common.HexToHash("0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b9
 //        contracts at their canonical addresses via
 //        oracle.AddPragueSystemContracts AND by the --spec YAML path
 //        (via Config.PreAlloc materialization in Config.Validate) for
-//        user-declared entities. Routed through WriteContracts so
-//        StateAccount.Root + .CodeHash get spliced from the supplied
-//        Storage + Code before the per-account RLP is stashed in the
-//        sorter.
+//        user-declared entities. Dispatched by shape: plain alloc
+//        accounts (empty Code AND empty Storage) go through WriteEOAs
+//        with BytecodeHash=nil; everything else goes through
+//        WriteContracts, which splices StateAccount.Root + .CodeHash
+//        from the supplied Storage + Code before the per-account RLP
+//        is stashed in the sorter.
 //     b. Synthetic EOAs in 100K batches.
 //     c. Synthetic contracts in 100K batches. WriteContracts
 //        mutates each contract's StateAccount.Root + .CodeHash IN-PLACE
@@ -129,14 +131,42 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 	// contracts at their canonical addresses via oracle.AddPragueSystemContracts
 	// — without them, post-Prague block processing fails system calls.
 	// Geth + besu + nethermind already weave these in; this brings reth to
-	// parity. WriteContracts recomputes StateAccount.Root + .CodeHash from
-	// the Storage + Code we supply, so the per-account RLP-encode below
+	// parity.
+	//
+	// Dispatch is by shape: plain alloc accounts (empty Code AND empty
+	// Storage — e.g. the spamoor sender, name-derived EOAs) go to
+	// WriteEOAs so reth's compact Account encoding gets BytecodeHash=nil.
+	// Routing them through WriteContracts would set BytecodeHash to a
+	// non-nil pointer (to EmptyCodeHash bytes) and reth's RPC would
+	// report eth_getCode as a contract — breaking spamoor's "sender is
+	// an EOA" pre-flight check. Contracts and EIP-7702 EOAs (with a
+	// 23-byte 0xef0100<addr> delegation marker, i.e. non-empty Code) go
+	// to WriteContracts, which splices StateAccount.Root + .CodeHash
+	// from the supplied Storage + Code so the per-account RLP-encode
 	// captures the correct global-state-trie values.
 	if len(cfg.GenesisAccounts) > 0 {
 		allocAccounts := buildAllocAccounts(cfg)
-		if err := WriteContracts(envs, allocAccounts, 0, stats); err != nil {
-			return nil, fmt.Errorf("RunCgo: WriteContracts(alloc): %w", err)
+		var allocEOAs, allocContracts []*entitygen.Account
+		for _, acc := range allocAccounts {
+			if len(acc.Code) == 0 && len(acc.Storage) == 0 {
+				allocEOAs = append(allocEOAs, acc)
+			} else {
+				allocContracts = append(allocContracts, acc)
+			}
 		}
+		if len(allocEOAs) > 0 {
+			if err := WriteEOAs(envs, allocEOAs, 0, stats); err != nil {
+				return nil, fmt.Errorf("RunCgo: WriteEOAs(alloc): %w", err)
+			}
+		}
+		if len(allocContracts) > 0 {
+			if err := WriteContracts(envs, allocContracts, 0, stats); err != nil {
+				return nil, fmt.Errorf("RunCgo: WriteContracts(alloc): %w", err)
+			}
+		}
+		// putAccountRLP runs after both writers — WriteContracts mutates
+		// StateAccount.Root + .CodeHash in-place, WriteEOAs leaves them
+		// at template-set defaults (EmptyRootHash + EmptyCodeHash).
 		for _, acc := range allocAccounts {
 			if err := putAccountRLP(acc); err != nil {
 				return nil, fmt.Errorf("RunCgo: putAccountRLP(alloc): %w", err)
