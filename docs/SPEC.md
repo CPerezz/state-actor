@@ -110,20 +110,20 @@ Same YAML + same `--seed` produces:
 - Identical end-to-end `PreAlloc` slice after parse → validate → build.
   Pinned by `internal/specbuild/build_test.go:TestBuildDeterminismEndToEnd`.
 
-**v1 CI coverage**: the geth end-to-end suite
-(`client/geth/e2e_test.go:TestE2ESuiteSpec`) loads
-`examples/spec-ci-min.yaml`, runs Populate, boots geth, runs spamoor,
-and goes through the same RPC re-query phases as the synthetic-fill
-suite. This pins that `--spec` actually produces bootable, RPC-queryable
-state.
+**v1 CI coverage**: every per-client end-to-end suite — geth, besu,
+nethermind, reth — drives its `Config.PreAlloc` from
+`examples/spec-ci-baseline.yaml` via the shared helper
+`internal/e2e_testing.LoadCISpecPreAlloc`. The same YAML on all four
+clients produces identical state via `sizecal.NewFixed(64)`
+(neutralizing per-client calibration divergence). The existing
+`cross-client-genesis-root` aggregator job thus *automatically*
+verifies the spec-driven invariant: same YAML + same `--seed` →
+identical state root on all four MPT clients. No new CI job needed.
 
-**v1.5 follow-up**: cross-client byte-equal state root verification
-across geth/besu/nethermind/reth needs Docker-driven boots of the three
-cgo clients (besu/nethermind/reth) — those land alongside the
-`cross-client-spec-genesis-root` aggregator job in a follow-up PR. To
-keep the cross-client invariant robust against per-client storage
-calibration drift, that suite passes `sizecal.NewFixed(N)` (a fixed
-bytes-per-slot factor) rather than the per-client `sizecal.Default()`.
+Every entity in the spec fixture is RPC-verified post-boot:
+`CheckInjections` (`internal/e2e_testing/check_entities.go`) walks
+`cfg.GenesisAccounts` for balances and `cfg.GenesisCode` for bytecode,
+asserting RPC-returned values match the spec's intent.
 
 ## Removed flag
 

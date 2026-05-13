@@ -68,10 +68,21 @@ func CheckEntities(t *testing.T, rpcURL string, eoas, contracts []*entitygen.Acc
 	return passed
 }
 
-// CheckInjections verifies that every address in cfg.InjectAddresses has
-// a non-zero balance and every address in cfg.GenesisAccounts has the
-// correct code via eth_getCode. Reports any mismatch via t.Errorf;
-// returns false on any mismatch, true if everything checks out.
+// CheckInjections verifies the writer landed the static cfg-driven
+// pre-alloc on-chain:
+//
+//   - every InjectAddresses entry has non-zero balance (legacy path —
+//     deprecated, kept for back-compat with tests that still wire
+//     `cfg.InjectAddresses` directly).
+//   - every GenesisAccounts entry with a non-zero Balance matches via
+//     eth_getBalance. Spec-driven entities (the spamoor sender, plain
+//     EOAs, 7702 EOAs with explicit balance) land here after the
+//     Config.Validate shim materializes PreAlloc → GenesisAccounts.
+//   - every GenesisCode entry's bytecode matches via eth_getCode.
+//     Spec-driven raw and template contracts land here.
+//
+// Reports any mismatch via t.Errorf; returns false on any mismatch,
+// true if everything checks out.
 //
 // This catches the exact bug class that PR review C1+C2 surfaced: a
 // writer silently drops InjectAddresses or GenesisAccounts (because
@@ -82,7 +93,7 @@ func CheckEntities(t *testing.T, rpcURL string, eoas, contracts []*entitygen.Acc
 // Used by the per-client e2e suites at "0x0" (Phase 4: oracle re-query
 // against genesis). Pairs with CheckEntities — that one covers
 // entitygen synthetic entities; this one covers static cfg-driven
-// injections.
+// injections (now primarily spec-driven entries via Config.PreAlloc).
 func CheckInjections(t *testing.T, rpcURL string, cfg *generator.Config, blockTag string) bool {
 	t.Helper()
 	if cfg == nil {
@@ -98,6 +109,23 @@ func CheckInjections(t *testing.T, rpcURL string, cfg *generator.Config, blockTa
 		}
 		if got.Sign() == 0 {
 			t.Errorf("[%s] inject %s: balance is zero (writer dropped InjectAddresses?)", blockTag, addr.Hex())
+			passed = false
+		}
+	}
+	for addr, acct := range cfg.GenesisAccounts {
+		if acct == nil || acct.Balance == nil || acct.Balance.IsZero() {
+			continue // No balance assertion for zero-balance entities (e.g. Prague system contracts).
+		}
+		got, err := rpcprobe.EthGetBalance(rpcURL, addr, blockTag)
+		if err != nil {
+			t.Errorf("[%s] alloc eth_getBalance %s: %v", blockTag, addr.Hex(), err)
+			passed = false
+			continue
+		}
+		want := acct.Balance.ToBig()
+		if got.Cmp(want) != 0 {
+			t.Errorf("[%s] alloc eth_getBalance %s: got %s want %s — writer dropped GenesisAccounts balance?",
+				blockTag, addr.Hex(), got.String(), want.String())
 			passed = false
 		}
 	}
