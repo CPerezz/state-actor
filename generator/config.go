@@ -122,16 +122,12 @@ type Config struct {
 	GroupDepth int
 
 	// PreAlloc carries entities produced by the --spec flag's YAML
-	// translator (internal/specbuild/). It is the v1.5+ unified replacement
-	// for GenesisAccounts/Code/Storage; in v1 the back-compat shim in
-	// Validate() folds PreAlloc into the three legacy maps so every writer
-	// keeps its existing code path. Eventually writers will consume
-	// PreAlloc natively (enabling streaming storage iteration for multi-GB
-	// per-entity specs) and the legacy maps will be removed.
+	// translator (internal/specbuild/). Validate() materializes PreAlloc
+	// entries into the GenesisAccounts/Code/Storage maps so every client
+	// writer consumes a single unified shape.
 	//
 	// Validate() must be called before any writer consumes Config — that
-	// is where the materialization happens. Writers should treat reading
-	// PreAlloc directly as an error until v1.5.
+	// is where the materialization happens.
 	PreAlloc []templates.PreAllocEntity
 }
 
@@ -139,11 +135,9 @@ type Config struct {
 // any DB write happens. Centralized so all 4 client writers enforce the
 // same invariants.
 //
-// Validate also materializes PreAlloc entries (from the --spec YAML
-// translator) into the legacy GenesisAccounts/Code/Storage maps so v1
-// writers don't need to change. This is the back-compat shim — see the
-// PreAlloc field comment. Writers should call Validate as their first
-// non-trivial step.
+// Validate also materializes PreAlloc entries into the
+// GenesisAccounts/Code/Storage maps. Writers should call Validate as
+// their first non-trivial step.
 //
 // Rejects:
 //   - PreAlloc addresses collide with programmatic GenesisAccounts entries
@@ -155,9 +149,8 @@ type Config struct {
 // Called by client writers as the first non-trivial step of
 // Run() / Populate() / runImpl().
 func (c *Config) Validate() error {
-	// Step 1: materialize PreAlloc → legacy maps. After this point the
-	// existing checks treat both YAML-spec entries and programmatic
-	// alloc entries uniformly.
+	// Step 1: materialize PreAlloc. After this point the checks treat
+	// both YAML-spec entries and programmatic alloc entries uniformly.
 	if err := c.materializePreAlloc(); err != nil {
 		return err
 	}
@@ -178,7 +171,7 @@ func (c *Config) Validate() error {
 	// — the heaviest of the per-client calibration factors in
 	// internal/sizecal/factors.json) means we under-report and never
 	// false-reject; users can always raise --target-size if the warning
-	// fires spuriously. docs/SPEC.md promises this check.
+	// fires spuriously.
 	if c.TargetSize > 0 {
 		const bytesPerSlot uint64 = 80
 		var totalSlots uint64
@@ -197,13 +190,11 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// materializePreAlloc folds Config.PreAlloc into the legacy
+// materializePreAlloc folds Config.PreAlloc into the
 // GenesisAccounts/Code/Storage maps. Each PreAllocEntity becomes one
 // GenesisAccounts entry plus optional GenesisCode/GenesisStorage entries.
 // Storage iter.Seq2 is drained into a map — RAM is proportional to the
-// total slot count across all entities. Multi-GB spec entries should not
-// use this v1 path (a streaming-writer follow-up will avoid the
-// materialization).
+// total slot count across all entities.
 //
 // After PreAlloc is materialized, the field is left as-is so callers can
 // still inspect it (e.g. for diagnostics) but writers should not iterate

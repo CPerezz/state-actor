@@ -27,12 +27,12 @@ type ValidateResult struct {
 	Warnings []string
 }
 
-// Validate applies the v1 schema rules to s. knownTemplates is the set of
+// Validate applies the schema rules to s. knownTemplates is the set of
 // template names the templates package has registered; an unknown template
 // reference fails validation. Pass an empty slice to disable the registered-
 // template check (useful in tests that don't exercise the templates path).
 //
-// Rules enforced (matches the v1 schema documented in docs/SPEC.md):
+// Rules enforced (matches the schema documented in docs/SPEC.md):
 //   - kind ∈ {contract, eoa}.
 //   - kind=contract: exactly one of `template` or `code` must be set.
 //   - kind=eoa: must NOT set `template` or `parameters`; may set `code`.

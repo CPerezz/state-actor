@@ -1,5 +1,5 @@
 {
-  "_comment": "Empirical bytes-per-slot factor per client. Tuned by internal/sizecal/calibrate_test.go (build tag: calibration). v1 values are hand-set initial guesses.",
+  "_comment": "Empirical bytes-per-slot factor per client.",
   "geth": 64,
   "besu": 64,
   "nethermind": 80,

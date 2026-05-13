@@ -40,8 +40,8 @@ func TestKeccakConstants_DerivedFromSpec(t *testing.T) {
 }
 
 // TestByteLiterals pins EmptyTrieNode, RlpEmptyList, and LeafTerminator as
-// single-byte values. These are referenced by the trie builder (Part 2) and
-// must never silently change.
+// single-byte values. These are referenced by the trie builder and must
+// never silently change.
 func TestByteLiterals(t *testing.T) {
 	if len(EmptyTrieNode) != 1 || EmptyTrieNode[0] != 0x80 {
 		t.Fatalf("EmptyTrieNode: got %x, want [0x80]", EmptyTrieNode)

@@ -6,7 +6,7 @@ import (
 )
 
 func TestParseValidStory1(t *testing.T) {
-	s, err := ParseFile("testdata/valid-story1.yaml")
+	s, err := ParseFile("../../examples/spec-erc20-mixed-sizes.yaml")
 	if err != nil {
 		t.Fatalf("ParseFile: %v", err)
 	}
@@ -34,7 +34,7 @@ func TestParseValidStory1(t *testing.T) {
 }
 
 func TestParseValidStory2(t *testing.T) {
-	s, err := ParseFile("testdata/valid-story2.yaml")
+	s, err := ParseFile("../../examples/spec-eoa-bloat.yaml")
 	if err != nil {
 		t.Fatalf("ParseFile: %v", err)
 	}

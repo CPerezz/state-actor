@@ -173,11 +173,11 @@ func TestMainSpecFlagSmoke(t *testing.T) {
 	}
 }
 
-// TestMainInjectAccountsFlagRemoved confirms the legacy --inject-accounts
-// flag is no longer accepted. Users who pass it should hit Go's "flag
-// provided but not defined" error rather than the flag being silently
-// ignored. Pinpoints the removal at CLI level so a future PR can't
-// accidentally re-add the flag.
+// TestMainInjectAccountsFlagRemoved confirms the --inject-accounts flag
+// is not accepted. Users who pass it should hit Go's "flag provided but
+// not defined" error rather than the flag being silently ignored.
+// Pinpoints the absence at CLI level so a future PR can't accidentally
+// add it back.
 func TestMainInjectAccountsFlagRemoved(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping --inject-accounts removal test in short mode")

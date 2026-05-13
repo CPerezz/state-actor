@@ -2,9 +2,9 @@ package templates
 
 import "testing"
 
-// TestRegistryHasV1Templates pins the v1 template set. New v1 templates land
-// here; v2+ additions update this list when they ship.
-func TestRegistryHasV1Templates(t *testing.T) {
+// TestRegistryHasExpectedTemplates pins the registered template set.
+// New templates land here when they ship.
+func TestRegistryHasExpectedTemplates(t *testing.T) {
 	want := []string{"eoa", "erc20", "raw"} // sorted
 	got := Names()
 	if len(got) != len(want) {

@@ -12,8 +12,7 @@ import (
 )
 
 // fixedSizer is a SizeApproximator stub for tests. The real one lives in
-// internal/sizecal/ (Part 5), but specbuild tests deliberately don't depend
-// on it.
+// internal/sizecal/, but specbuild tests deliberately don't depend on it.
 type fixedSizer struct{ bytesPerSlot uint64 }
 
 func (s fixedSizer) SlotsForBytes(client string, bytes uint64) int {
@@ -40,7 +39,7 @@ func parseSpec(t *testing.T, src string) *spec.Spec {
 
 func TestBuildStory1(t *testing.T) {
 	// Story 1: three ERC-20s of decreasing size + five 7702 EOAs.
-	s, err := spec.ParseFile("../spec/testdata/valid-story1.yaml")
+	s, err := spec.ParseFile("../../examples/spec-erc20-mixed-sizes.yaml")
 	if err != nil {
 		t.Fatalf("load story 1: %v", err)
 	}
@@ -56,7 +55,7 @@ func TestBuildStory1(t *testing.T) {
 		t.Fatalf("entity count: got %d, want %d", got, want)
 	}
 	// First three are ERC-20s — should carry non-empty Code (the runtime
-	// bytecode stub) and a non-nil Storage iterator.
+	// bytecode) and a non-nil Storage iterator.
 	for i := 0; i < 3; i++ {
 		if len(pre[i].Code) == 0 {
 			t.Errorf("entity[%d] (erc20): Code is empty", i)
@@ -75,7 +74,7 @@ func TestBuildStory1(t *testing.T) {
 
 func TestBuildStory2(t *testing.T) {
 	// Story 2: three bloated 7702 EOAs.
-	s, err := spec.ParseFile("../spec/testdata/valid-story2.yaml")
+	s, err := spec.ParseFile("../../examples/spec-eoa-bloat.yaml")
 	if err != nil {
 		t.Fatalf("load story 2: %v", err)
 	}
@@ -98,7 +97,7 @@ func TestBuildStory2(t *testing.T) {
 }
 
 func TestBuildAllFeatures(t *testing.T) {
-	// Mixed-spec fixture exercising every v1 feature.
+	// Mixed-spec fixture exercising every schema feature.
 	s, err := spec.ParseFile("../spec/testdata/valid-all-features.yaml")
 	if err != nil {
 		t.Fatalf("load: %v", err)

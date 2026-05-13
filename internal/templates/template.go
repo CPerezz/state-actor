@@ -9,11 +9,10 @@ import (
 	"github.com/nerolation/state-actor/internal/spec"
 )
 
-// PreAllocEntity is the unified post-expansion record every writer consumes.
-// It replaces the three parallel maps Config.GenesisAccounts/Code/Storage —
-// see plan Part 4. Each PreAllocEntity carries everything one address needs:
-// the account header (nonce/balance/codeHash/root), the deployed code (nil
-// for plain EOAs), and the storage map.
+// PreAllocEntity is the unified post-expansion record every writer
+// consumes. Each carries one address's account header (nonce/balance/
+// codeHash/root), the deployed code (nil for plain EOAs), and the
+// storage map.
 //
 // Storage iteration order is the responsibility of the consumer. For
 // state-root determinism, writers iterate by sorted key. Templates are not

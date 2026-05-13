@@ -213,7 +213,7 @@ func TestERC20BalancesSlotComputationManyHolders(t *testing.T) {
 	}
 }
 
-// TestERC20NonceHonorsUserValue pins the v1 contract about nonce:
+// TestERC20NonceHonorsUserValue pins the contract about nonce:
 // user-supplied nonce wins, but nonce=0 (the unset YAML default) floors
 // to nonce=1 per EIP-161.
 func TestERC20NonceHonorsUserValue(t *testing.T) {
@@ -251,12 +251,12 @@ func TestERC20NonceHonorsUserValue(t *testing.T) {
 }
 
 func TestERC20RuntimeBytecodePinned(t *testing.T) {
-	// v1 ships a stub. When the bytecode is swapped to real OZ v5, this
-	// test's expected hash will change — that's intentional, the swap is
-	// a known event.
-	want := "bc36789e7a1e281436464229828f817d6612f7b477d66591ff96a9e064bcc98a" // keccak256(0x00) — v1 stub
+	// Guards against unintentional bytecode changes. When the bytecode
+	// is intentionally updated, the expected hash below must be updated
+	// too.
+	want := "bc36789e7a1e281436464229828f817d6612f7b477d66591ff96a9e064bcc98a" // keccak256(0x00)
 	got := hex.EncodeToString(crypto.Keccak256(ERC20RuntimeBytecode))
 	if got != want {
-		t.Errorf("ERC20RuntimeBytecode keccak256 changed:\n got  %s\n want %s\n(intentional bytecode swap? update this test)", got, want)
+		t.Errorf("ERC20RuntimeBytecode keccak256 changed:\n got  %s\n want %s\n(intentional bytecode change? update this test)", got, want)
 	}
 }

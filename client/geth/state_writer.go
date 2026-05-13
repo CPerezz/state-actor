@@ -30,8 +30,8 @@ import (
 // without exploding RAM.
 const phase1FlushBytes = 64 * 1024 * 1024
 
-// parallelKeccakThreshold matches the legacy MPT path: ≥ 64 storage
-// slots in one contract triggers parallel keccak hashing for keys.
+// parallelKeccakThreshold: contracts with ≥ 64 storage slots trigger
+// parallel keccak hashing for keys.
 const parallelKeccakThreshold = 64
 
 // writeStateAndCollectRoot drives the two-phase MPT pipeline for the
@@ -428,7 +428,7 @@ type sortedSlot struct {
 // be installed (nerolation/state-actor#42).
 //
 // For ≥ parallelKeccakThreshold slots, keccak hashing is parallelised
-// across cores — same threshold as the legacy MPT path.
+// across cores.
 func buildStorageTrie(
 	w *Writer,
 	accountHash common.Hash,

@@ -1,9 +1,8 @@
 # Canonical CI fixture for the --spec feature.
 #
 # Drives every per-client TestE2ESuite (geth/besu/nethermind/reth). The
-# existing cross-client-genesis-root aggregator job becomes the spec-driven
-# invariant for free: same YAML + same --seed → identical state root on
-# all four MPT clients.
+# cross-client-genesis-root aggregator job verifies the spec invariant:
+# same YAML + same --seed → identical state root on all four MPT clients.
 #
 # **DO NOT USE THIS FIXTURE LOCALLY without `sizecal.NewFixed(64)`.** Each
 # client's calibration factor (geth=64, besu=64, nethermind=80, reth=60)
@@ -13,16 +12,15 @@
 # NewFixed(64) so all clients agree.
 #
 # Spamoor sender (entity 1 below) lives at oracle.SpamoorSenderAddr —
-# `internal/oracle/devkeys.go:15`. This replaces the previous
-# `--inject-accounts` / `cfg.InjectAddresses` mechanism. If the constant
-# changes, `internal/e2e_testing/spec_setup_test.go:TestCISpecMatchesSpamoorSender`
+# `internal/oracle/devkeys.go:15`. If the constant changes,
+# `internal/e2e_testing/spec_setup_test.go:TestCISpecMatchesSpamoorSender`
 # fails loud so the YAML and the constant stay in sync.
 #
 # Total on-disk footprint: ~700 KB (12 entities × ~50 KB synthesized
 # storage each, plus the ERC-20 _balances mappings). Per-leg CI runtime
 # is <1 s for the spec layer.
 entities:
-  # ── 1. Spamoor sender (was --inject-accounts) ────────────────────────
+  # ── 1. Spamoor sender ────────────────────────────────────────────────
   # Funded with 999_999_999 ETH. spamoor signs txs with the matching
   # private key (oracle.SpamoorSenderPrivKey).
   - kind: eoa

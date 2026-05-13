@@ -21,8 +21,8 @@ import (
 // This is byte-identical to go-ethereum's types.StateAccount RLP because both
 // implement the canonical Ethereum account encoding (Yellow Paper §4.1). The
 // function accepts fields separately rather than a *types.StateAccount so
-// callers (Part 3 adapter) can construct the encoding without allocating an
-// intermediate geth struct.
+// callers can construct the encoding without allocating an intermediate
+// geth struct.
 //
 //   - nonce       — account transaction count (0 encodes as 0x80).
 //   - balance     — account balance in wei (nil treated as zero).
