@@ -26,8 +26,8 @@
 // # Pinned target
 //
 // internal/neth/'s RLP shapes and HalfPath layouts mirror Nethermind
-// upstream/master at SHA 09bd5a2d (2026-04-26). End-to-end smoke and the
-// Tier 2 differential oracle run against the released image
+// upstream/master at SHA 09bd5a2d (2026-04-26). End-to-end smoke and
+// the differential oracle run against the released image
 // nethermind/nethermind:1.37.0 — the boot contract Nethermind enforces
 // (WasProcessed=true gate, key formats, 8-byte blockNumbers values) is
 // stable across the released line, so the released image is what the

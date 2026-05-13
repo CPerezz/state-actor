@@ -95,13 +95,11 @@ func TestE2ESuite(t *testing.T) {
 		Verbose:      true,
 		TrieMode:     generator.TrieModeMPT,
 		Genesis:      g,
-		// Spec-driven pre-alloc replaces the previous
-		// `InjectAddresses: []common.Address{oracle.SpamoorSenderAddr}`.
-		// The spamoor sender lives in examples/spec-ci-baseline.yaml
-		// alongside ~12 other entities exercising every schema variant.
+		// Spec-driven pre-alloc via examples/spec-ci-baseline.yaml
+		// exercises every schema variant (including the spamoor sender).
 		// LoadCISpecPreAlloc uses sizecal.NewFixed so all 4 clients get
-		// byte-identical PreAlloc → cross-client-genesis-root invariant
-		// holds with the same YAML.
+		// byte-identical PreAlloc, preserving the cross-client
+		// genesis-root invariant.
 		PreAlloc: e2e.LoadCISpecPreAlloc(t, "../../examples/spec-ci-baseline.yaml", "geth"),
 	}
 	// Deploy EIP-4788/2935/7002/7251 system contracts at their canonical

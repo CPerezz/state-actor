@@ -13,8 +13,8 @@ import (
 )
 
 // TestPreAllocShimMaterializes verifies Validate() folds Config.PreAlloc
-// entries into the legacy GenesisAccounts/Code/Storage maps so v1 client
-// writers can consume them without changing.
+// entries into the GenesisAccounts/Code/Storage maps so client writers
+// can consume them uniformly.
 func TestPreAllocShimMaterializes(t *testing.T) {
 	addr := common.HexToAddress("0x000000000000000000000000000000000000aaaa")
 
@@ -123,7 +123,7 @@ func TestValidateAcceptsSpecUnderTargetSize(t *testing.T) {
 }
 
 func TestPreAllocShimEmpty(t *testing.T) {
-	// Empty Config — no PreAlloc, no legacy maps — must pass.
+	// Empty Config — no PreAlloc, no materialized maps — must pass.
 	cfg := &Config{}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)

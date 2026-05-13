@@ -1,6 +1,5 @@
-# Exercises every v1 schema feature in one file. This shape is the candidate
-# for examples/spec-ci-baseline.yaml — the CI YAML that the cross-client spec
-# state-root invariant runs against.
+# Exercises every schema feature in one file. Used by the parser,
+# validator, and build tests to confirm full-feature round-trips work.
 entities:
   # Template-driven contract with explicit address.
   - kind: contract

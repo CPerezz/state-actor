@@ -28,11 +28,10 @@ const FixedBytesPerSlot uint64 = 64
 // and returns the resulting PreAlloc slice for assignment to
 // generator.Config.PreAlloc.
 //
-// Used by every per-client TestE2ESuite to replace the previous
-// cfg.InjectAddresses-based pre-funding of the spamoor sender. The
-// spamoor sender is now entity #1 in the fixture YAML; if its address
-// drifts from oracle.SpamoorSenderAddr, TestCISpecMatchesSpamoorSender
-// (in spec_setup_test.go) fails.
+// Used by every per-client TestE2ESuite to pre-fund the spamoor sender
+// plus the suite's flavor entities. The spamoor sender is entity #1 in
+// the fixture YAML; if its address drifts from oracle.SpamoorSenderAddr,
+// TestCISpecMatchesSpamoorSender (in spec_setup_test.go) fails.
 //
 // yamlPath is relative to the calling test's cwd — typically
 // "../../examples/spec-ci-baseline.yaml" since per-client tests run

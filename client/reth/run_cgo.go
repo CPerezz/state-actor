@@ -62,8 +62,7 @@ var emptyMPTRoot = common.HexToHash("0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b9
 //        streaming HashBuilder for the global state root.
 //     Empty alloc (no GenesisAccounts + NumAccounts=0 + NumContracts=0)
 //     yields the canonical empty-MPT hash 0x56e81f17...
-//  5. Persist chainspec.json (still O(N) RAM — separate follow-up plan
-//     covers the chainspec workaround).
+//  5. Persist chainspec.json.
 //  6. Build genesis header with computed state root + WriteMetadata (5 tables)
 //  7. WriteStaticFiles (block-0 segment files)
 //  8. Return Stats (Close deferred)
@@ -193,9 +192,9 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 		// strictly safer (stops earlier rather than overshooting).
 		targetReached := false
 
-		// Phase 4b: synthetic EOAs in batches of batchSize. The RNG is
-		// drawn from in the same order as the legacy single-shot loop, so
-		// state-root determinism is preserved (locked in by
+		// Phase 4b: synthetic EOAs in batches of batchSize. The RNG draw
+		// order matches the canonical single-shot order so state-root
+		// determinism is preserved (locked in by
 		// TestStreaming_GoldenEqualsLegacy).
 		remaining := cfg.NumAccounts
 		for remaining > 0 && !targetReached {

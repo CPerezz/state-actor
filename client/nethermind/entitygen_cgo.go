@@ -107,13 +107,9 @@ func writeSyntheticAccounts(
 	// Genesis-alloc accounts go to the temp DB AND the code DB AND
 	// (for storage-bearing accounts) into the per-account storage-trie
 	// path that produces account.Root before the account RLP is queued.
-	//
-	// Storage handling closes the nethermind half of issue #22: storage
-	// slots supplied via the legacy GenesisStorage map (or materialized
-	// from Config.PreAlloc by Validate's shim) are now written exactly
-	// like writeGenesisAllocAccounts does it — keccak(slotKey)-sorted
-	// slots driven through builder.AddStorageSlot, then FinalizeStorageRoot
-	// stamping account.Root.
+	// Storage slots flow through the standard storage-trie path:
+	// keccak(slotKey)-sorted slots driven through builder.AddStorageSlot,
+	// then FinalizeStorageRoot stamps account.Root.
 	for addr, acc := range genesisAccounts {
 		if code, ok := genesisCodes[addr]; ok && len(code) > 0 {
 			ch := crypto.Keccak256Hash(code)

@@ -21,12 +21,12 @@ import (
 	"github.com/nerolation/state-actor/internal/testhex"
 )
 
-// TestDifferentialOracle is the Tier 2 differential oracle: state-actor's
-// genesis-block hash for each of the three vendored Parity chainspec
-// fixtures (from Nethermind.Blockchain.Test.GenesisBuilderTests at upstream
-// SHA 09bd5a2d) MUST byte-equal the golden hash Nethermind itself
-// computes. This pins the encoding/HalfPath/StackTrie pipeline against an
-// external reference and guards against silent drift.
+// TestDifferentialOracle pins state-actor's genesis-block hash for each
+// of the three vendored Parity chainspec fixtures (from
+// Nethermind.Blockchain.Test.GenesisBuilderTests at upstream SHA
+// 09bd5a2d) byte-for-byte against the golden hash Nethermind itself
+// computes. This pins the encoding/HalfPath/StackTrie pipeline against
+// an external reference and guards against silent drift.
 //
 // Citation: src/Nethermind/Nethermind.Blockchain.Test/GenesisBuilderTests.cs
 // at SHA 09bd5a2d, lines 26-34. The test class loads each fixture via

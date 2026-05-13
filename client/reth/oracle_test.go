@@ -203,8 +203,7 @@ func TestRethNodeBootEmptyAlloc(t *testing.T) {
 //   - DinD via the `oracle` build tag.
 //   - Pinned image: paradigmxyz/reth digest-pinned via
 //     internal/reth.PinnedRethRelease (post-#23919, supports
-//     --debug.skip-genesis-validation; previously the CPerezz/reth fork
-//     before the upstream merge on 2026-05-06).
+//     --debug.skip-genesis-validation).
 //   - --dev mode auto-mines on tx, so spamoor advances the chain without
 //     an external CL.
 //
@@ -242,10 +241,8 @@ func TestE2ESuite(t *testing.T) {
 		Seed:         seed,
 		Verbose:      true,
 		Genesis:      g,
-		// Spec-driven pre-alloc replaces the previous
-		// `InjectAddresses: []common.Address{oracle.SpamoorSenderAddr}`.
-		// Spamoor sender lives in examples/spec-ci-baseline.yaml with
-		// ~12 other entities exercising every schema variant.
+		// Spec-driven pre-alloc via examples/spec-ci-baseline.yaml
+		// exercises every schema variant (including the spamoor sender).
 		PreAlloc: e2e.LoadCISpecPreAlloc(t, "../../examples/spec-ci-baseline.yaml", "reth"),
 	}
 	// Deploy EIP-4788/2935/7002/7251 system contracts at their canonical

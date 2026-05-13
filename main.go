@@ -76,7 +76,7 @@ var (
 
 	// Client selection (multi-client support). Each client uses its own
 	// self-contained machinery inside client/<name>/; only the CLI is shared.
-	client = flag.String("client", "geth", "Target Ethereum client: 'geth' (default), 'nethermind', 'besu', or 'reth'. Other clients (erigon) are planned in follow-up PRs.")
+	client = flag.String("client", "geth", "Target Ethereum client: 'geth' (default), 'nethermind', 'besu', or 'reth'.")
 )
 
 func main() {
@@ -184,8 +184,8 @@ func main() {
 
 	// --spec: load YAML state spec, translate to PreAlloc. The
 	// per-writer Validate() (called inside each client's Run/Populate/
-	// runImpl) folds PreAlloc into the existing GenesisAccounts/Code/
-	// Storage maps via the back-compat shim — writers don't change.
+	// runImpl) materializes PreAlloc into GenesisAccounts/Code/Storage;
+	// the writers consume those.
 	if *specFile != "" {
 		specDoc, err := spec.ParseFile(*specFile)
 		if err != nil {
@@ -246,17 +246,14 @@ func main() {
 	var stats *generator.Stats
 	switch *client {
 	case "geth":
-		// MPT mode goes through the new direct-Pebble pipeline in
+		// MPT mode goes through the direct-Pebble pipeline in
 		// client/geth/ (entitygen → temp Pebble → keccak-sorted writes
-		// to production). Binary-trie mode still routes through the
-		// legacy generator.New().Generate() path because
-		// generator/binary_stack_trie.go is intentionally untouched per
-		// the design doc.
+		// to production). Binary-trie mode routes through
+		// generator.New().Generate() (generator/binary_stack_trie.go).
 		//
-		// Both paths read the synthesized genesisConfig — main.go's
-		// BuildSynthetic call always populates it, replacing the old
-		// --genesis JSON flow. config.Genesis is the canonical surface;
-		// Populate reads it directly, and the binary path threads
+		// Both paths read the synthesized genesisConfig populated by
+		// main.go's BuildSynthetic call. config.Genesis is the canonical
+		// surface; Populate reads it directly, and the binary path threads
 		// genesisConfig into WriteGenesisBlock explicitly.
 		if config.TrieMode == generator.TrieModeMPT {
 			var err error

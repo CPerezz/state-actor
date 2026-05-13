@@ -129,9 +129,9 @@ func (erc20Template) Expand(ctx Context, e spec.Entity) ([]PreAllocEntity, error
 	explicit[uint64SlotKey(erc20SlotName)] = packShortString(name)
 	explicit[uint64SlotKey(erc20SlotSymbol)] = packShortString(symbol)
 
-	// _totalSupply = holderCount × per-holder balance (1 token unit, scaled
-	// later if needed). For v1 we set 1 unit per holder; users wanting a
-	// specific total-supply distribution can use the `raw` template.
+	// _totalSupply = holderCount × per-holder balance. Each holder gets
+	// 1 token unit; users wanting a specific total-supply distribution
+	// can use the `raw` template.
 	totalSupply := new(uint256.Int).SetUint64(uint64(holderCount))
 	if holderCount > 0 {
 		explicit[uint64SlotKey(erc20SlotTotalSupply)] = totalSupply.Bytes32()
@@ -232,20 +232,15 @@ func packShortString(s string) common.Hash {
 }
 
 // ERC20RuntimeBytecode is the deployed bytecode for ERC-20 template
-// instances. This is a v1 STUB: the bytes form a non-reverting STOP
-// opcode so genesis state-root computation succeeds and JSON-RPC
-// eth_call to the contract returns empty bytes (which decode to zero for
-// any uint256/bool return type — so balanceOf and totalSupply return 0
-// regardless of stored values).
+// instances. The bytes form a non-reverting STOP opcode so genesis
+// state-root computation succeeds and JSON-RPC eth_call to the contract
+// returns empty bytes (which decode to zero for any uint256/bool return
+// type — so balanceOf and totalSupply return 0 regardless of stored
+// values).
 //
-// **v1 limitation**: this bytecode does NOT implement the ERC-20
-// interface. The storage layout (_balances mapping at slot 0,
-// _totalSupply at slot 2, _name/_symbol at slots 3/4 in short-string
-// format) IS correct — Story 1's "10 GB ERC-20" produces real 10 GB of
-// on-disk state-trie data, but the contract is not callable via RPC.
-//
-// **v1.5 follow-up**: replace these bytes with audited OpenZeppelin v5
-// ERC20.sol runtime bytecode, compiled with solc 0.8.20 and
-// --optimize-runs=200. The slot layout above is intentionally aligned
-// with OZ v5 to make this a single-file swap with no test rewrites.
+// The storage layout (_balances mapping at slot 0, _totalSupply at
+// slot 2, _name/_symbol at slots 3/4 in short-string format) matches
+// OpenZeppelin v5 ERC20.sol — Story 1's "10 GB ERC-20" produces real
+// 10 GB of on-disk state-trie data even though the runtime stub is not
+// callable via RPC.
 var ERC20RuntimeBytecode = []byte{0x00}

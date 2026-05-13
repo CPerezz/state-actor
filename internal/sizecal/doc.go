@@ -10,14 +10,11 @@
 // Bonsai trie. The bytes-per-slot ratio differs by a factor of ~1.3x
 // across clients today.
 //
-// The v1 factors are hand-tuned initial guesses. A follow-up calibration
-// benchmark (build tag `calibration` in calibrate_test.go) will fit them
-// empirically against real workloads and write the updated table back
-// to factors.json. The static-default `Load()` consults the JSON at
-// runtime; CI's nightly calibration workflow regenerates it.
+// The factors are persisted as JSON in factors.json; factors.go embeds
+// the table at build time and consults it at runtime via Default().
 //
-// The bytes-per-slot factor is approximate (±25% accuracy expected for
-// v1). For users who need exact slot counts, the YAML schema also accepts
-// an explicit `parameters.holders: N` on ERC-20 entries — see
+// The bytes-per-slot factor is approximate (±25% accuracy). For users
+// who need exact slot counts, the YAML schema also accepts an explicit
+// `parameters.holders: N` on ERC-20 entries — see
 // internal/templates/erc20.go.
 package sizecal

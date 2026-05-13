@@ -77,10 +77,8 @@ func TestE2ESuite(t *testing.T) {
 		Verbose:      true,
 		TrieMode:     generator.TrieModeMPT,
 		Genesis:      g,
-		// Spec-driven pre-alloc replaces the previous
-		// `InjectAddresses: []common.Address{oracle.SpamoorSenderAddr}`.
-		// Spamoor sender lives in examples/spec-ci-baseline.yaml with
-		// ~12 other entities exercising every schema variant.
+		// Spec-driven pre-alloc via examples/spec-ci-baseline.yaml
+		// exercises every schema variant (including the spamoor sender).
 		PreAlloc: e2e.LoadCISpecPreAlloc(t, "../../examples/spec-ci-baseline.yaml", "besu"),
 	}
 	// Deploy EIP-4788/7002/7251/2935 system contracts at their canonical

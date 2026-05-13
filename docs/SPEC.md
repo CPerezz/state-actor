@@ -67,18 +67,16 @@ synthetic slot count via a per-client calibration factor
 (see `internal/sizecal/factors.json`). Slots are populated with
 deterministic `(key, value)` pairs derived from `(seed, address)`.
 
-- **v1 limit**: total spec storage materializes into a Go map before
-  writers consume it. Practical limit ~1 GB per entity on a 16 GB machine.
-  Multi-GB per-entity workloads will gain a streaming writer integration
-  in v1.5 (no schema change).
-- **Accuracy**: ±25%. The factor is hand-tuned for v1; an empirical
-  calibration nightly job will replace it (see plan Task 30).
+- **Limit**: total spec storage materializes into a Go map before writers
+  consume it. Practical per-entity bound ~1 GB on a 16 GB machine.
+- **Accuracy**: ±25% via per-client calibration factors
+  (`internal/sizecal/factors.json`).
 
 ## Templates
 
 | Template | Required parameters | Optional | Notes |
 |---|---|---|---|
-| `erc20`  | `symbol`, `name`, `decimals` | `holders` | OpenZeppelin v5 storage layout. `_balances` mapping synthesized per holder. **v1**: stub runtime bytecode — storage is correct but RPC calls return zero. Real OZ v5 bytecode is a one-file v1.5 swap. |
+| `erc20`  | `symbol`, `name`, `decimals` | `holders` | OpenZeppelin v5 storage layout. `_balances` mapping synthesized per holder. Runtime bytecode is a STOP-only stub; storage is correct but RPC calls return zero. |
 
 Built-in non-template handlers (no `template:` field needed):
 
@@ -110,7 +108,7 @@ Same YAML + same `--seed` produces:
 - Identical end-to-end `PreAlloc` slice after parse → validate → build.
   Pinned by `internal/specbuild/build_test.go:TestBuildDeterminismEndToEnd`.
 
-**v1 CI coverage**: every per-client end-to-end suite — geth, besu,
+**CI coverage**: every per-client end-to-end suite — geth, besu,
 nethermind, reth — drives its `Config.PreAlloc` from
 `examples/spec-ci-baseline.yaml` via the shared helper
 `internal/e2e_testing.LoadCISpecPreAlloc`. The same YAML on all four
@@ -127,10 +125,10 @@ asserting RPC-returned values match the spec's intent.
 
 ## Examples
 
-- `examples/spec-erc20-mixed-sizes.yaml` — Story 1: three ERC-20s of
-  different sizes + five 7702 EOAs.
-- `examples/spec-eoa-bloat.yaml` — Story 2: three EIP-7702 EOAs with
-  bloated storage (2 GB / 5 GB / 10 GB target).
-- `examples/spec-7702.yaml` — focused EIP-7702 delegation showcase.
+- `examples/spec-erc20-mixed-sizes.yaml` — three ERC-20s of different
+  sizes + five 7702 EOAs.
+- `examples/spec-eoa-bloat.yaml` — three EIP-7702 EOAs with bloated
+  storage (2 GB / 5 GB / 10 GB target).
 - `examples/spec-ci-baseline.yaml` — canonical CI fixture exercising
-  every schema feature. Used by `cross-client-spec-genesis-root`.
+  every schema feature. Loaded by each per-client `TestE2ESuite` and
+  validated by the `cross-client-genesis-root` aggregator.

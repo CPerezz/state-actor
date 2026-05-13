@@ -95,10 +95,6 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 	stats := &generator.Stats{}
 	switch {
 	case cfg.NumAccounts > 0 || cfg.NumContracts > 0:
-		// Issue #22 is fixed: writeSyntheticAccounts now threads
-		// allocStorages through the per-account storage-trie path so
-		// alloc storage AND synthetic state coexist correctly. Closes
-		// https://github.com/nerolation/state-actor/issues/22.
 		stateRoot, err = writeSyntheticAccounts(dbs, cfg, allocAccounts, allocCodes, allocStorages, stats)
 		if err != nil {
 			return nil, fmt.Errorf("write synthetic accounts: %w", err)

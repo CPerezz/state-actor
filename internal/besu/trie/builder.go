@@ -30,8 +30,8 @@ type NodeSink interface {
 	//   - TRIE_BRANCH_STORAGE["worldRoot"]    = rootHash
 	//   - TRIE_BRANCH_STORAGE["worldBlockHash"] = blockHash
 	//
-	// Note: Builder does NOT invoke SaveWorldState — the caller (Part 3)
-	// invokes it after computing the genesis block hash from the rootHash
+	// Note: Builder does NOT invoke SaveWorldState — the caller invokes
+	// it after computing the genesis block hash from the rootHash
 	// returned by Commit.
 	SaveWorldState(blockHash common.Hash, rootHash common.Hash, rootRLP []byte) error
 }

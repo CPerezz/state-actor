@@ -71,31 +71,21 @@ func CheckEntities(t *testing.T, rpcURL string, eoas, contracts []*entitygen.Acc
 	return passed
 }
 
-// CheckInjections verifies the writer landed the cfg-driven pre-alloc
-// on-chain:
+// CheckInjections verifies the writer landed cfg-driven pre-alloc on-chain:
 //
 //   - every GenesisAccounts entry with a non-zero Balance matches via
-//     eth_getBalance. Spec-driven entities (the spamoor sender, plain
-//     EOAs, 7702 EOAs with explicit balance) land here after the
-//     Config.Validate shim materializes PreAlloc → GenesisAccounts.
+//     eth_getBalance.
 //   - every GenesisCode entry's bytecode matches via eth_getCode.
-//     Spec-driven raw and template contracts land here.
 //   - every GenesisStorage entry's slots match via eth_getStorageAt,
 //     sampled to bound RPC round-trip cost (see sampleStorageSlots).
 //
 // Reports any mismatch via t.Errorf; returns false on any mismatch,
 // true if everything checks out.
 //
-// This catches the exact bug class that PR review C1+C2 surfaced: a
-// writer silently drops GenesisAccounts/Code/Storage (because the
-// field is unused by that client's writer) — Phase 4 fails loudly
-// with "expected code at addr X, got empty" instead of the regression
-// only surfacing via the cross-client genesis-root aggregator.
-//
 // Used by the per-client e2e suites at "0x0" (Phase 4: oracle re-query
 // against genesis). Pairs with CheckEntities — that one covers
-// entitygen synthetic entities; this one covers static cfg-driven
-// injections (now exclusively spec-driven entries via Config.PreAlloc).
+// entitygen synthetic entities; this one covers cfg-driven entries
+// (spec entities via Config.PreAlloc).
 func CheckInjections(t *testing.T, rpcURL string, cfg *generator.Config, blockTag string) bool {
 	t.Helper()
 	if cfg == nil {

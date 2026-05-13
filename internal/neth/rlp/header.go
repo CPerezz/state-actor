@@ -22,12 +22,12 @@ import (
 //   - Post-Electra fields Nethermind-master adds beyond go-ethereum
 //     (BlockAccessListHash, SlotNumber) are not currently representable.
 //     state-actor's genesis writer does not activate those forks at
-//     block 0, so this is not a blocker for B5; if it becomes one, this
-//     encoder grows a Nethermind-specific extended Header type.
+//     block 0; if that changes, this encoder grows a Nethermind-
+//     specific extended Header type.
 //
-// Pinned bytes are caught by tests further down the pipeline (B6's Tier 2
-// differential oracle), not here — this encoder's correctness is
-// equivalent to the geth path's, which is already exercised in CI.
+// Pinned bytes are caught by the differential oracle further down the
+// pipeline, not here — this encoder's correctness is equivalent to the
+// geth path's, which is already exercised in CI.
 func EncodeHeader(h *types.Header) ([]byte, error) {
 	return gethrlp.EncodeToBytes(h)
 }

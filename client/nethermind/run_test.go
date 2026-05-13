@@ -17,7 +17,7 @@ import (
 // nil, or silently no-op.
 //
 // Skipped when built with -tags cgo_neth — that path is exercised by
-// B6's Tier 2 differential-oracle test inside the Docker context.
+// the differential-oracle test inside the Docker context.
 func TestRun_StubReturnsNotImplemented(t *testing.T) {
 	stats, err := Run(context.Background(), generator.Config{}, Options{})
 	if err == nil {
