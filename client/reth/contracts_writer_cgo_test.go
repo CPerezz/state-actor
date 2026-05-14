@@ -4,10 +4,14 @@ package reth
 
 import (
 	"math/rand"
+	"strings"
 	"testing"
 
 	"github.com/erigontech/mdbx-go/mdbx"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/holiman/uint256"
 
 	"github.com/nerolation/state-actor/generator"
 	"github.com/nerolation/state-actor/internal/entitygen"
@@ -130,5 +134,42 @@ func TestWriteContractsDedupesCodeBytes(t *testing.T) {
 	if stats.CodeBytes != wantCodeBytes {
 		t.Errorf("stats.CodeBytes = %d, want %d (duplicate code must dedupe and count once)",
 			stats.CodeBytes, wantCodeBytes)
+	}
+}
+
+// TestWriteContractsRejectsZeroRoot is the C3 regression guard. With
+// empty Storage, WriteContracts now preserves StateAccount.Root (added
+// for the streamSpecStorage Phase 0 hand-off). Passing a zero-Hash
+// Root through would produce a malformed state-account leaf —
+// undecodable in besu/geth and corrupt archive RPCs in reth — silently.
+// Reject explicitly so the bug surfaces at the caller.
+func TestWriteContractsRejectsZeroRoot(t *testing.T) {
+	tmp := t.TempDir()
+	envs, err := OpenEnvs(tmp, true)
+	if err != nil {
+		t.Fatalf("OpenEnvs: %v", err)
+	}
+	defer envs.Close()
+
+	addr := common.HexToAddress("0x000000000000000000000000000000000000bbbb")
+	bad := &entitygen.Account{
+		Address:  addr,
+		AddrHash: crypto.Keccak256Hash(addr[:]),
+		StateAccount: &types.StateAccount{
+			Nonce:    1,
+			Balance:  uint256.NewInt(0),
+			Root:     common.Hash{}, // zero-Hash — the bug condition
+			CodeHash: types.EmptyCodeHash[:],
+		},
+		Storage: nil, // empty Storage triggers the preserve-Root branch
+		Code:    nil,
+	}
+
+	err = WriteContracts(envs, []*entitygen.Account{bad}, 0, nil)
+	if err == nil {
+		t.Fatal("WriteContracts: expected error for empty Storage + zero Root, got nil")
+	}
+	if !strings.Contains(err.Error(), "zero StateAccount.Root") {
+		t.Errorf("WriteContracts: error doesn't mention zero Root: %v", err)
 	}
 }

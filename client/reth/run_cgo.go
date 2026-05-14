@@ -44,23 +44,23 @@ var emptyMPTRoot = common.HexToHash("0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b9
 //     (~100K accounts) plus Pebble's 64 MiB write buffer, regardless of
 //     total N. Mirrors client/nethermind/entitygen_cgo.go.
 //     a. Genesis-alloc accounts (cfg.GenesisAccounts/Code/Storage). Used
-//        by the e2e suite to deploy EIP-4788/2935/7002/7251 system
-//        contracts at their canonical addresses via
-//        oracle.AddPragueSystemContracts AND by the --spec YAML path
-//        (via Config.PreAlloc materialization in Config.Validate) for
-//        user-declared entities. Dispatched by shape: plain alloc
-//        accounts (empty Code AND empty Storage) go through WriteEOAs
-//        with BytecodeHash=nil; everything else goes through
-//        WriteContracts, which splices StateAccount.Root + .CodeHash
-//        from the supplied Storage + Code before the per-account RLP
-//        is stashed in the sorter.
+//     by the e2e suite to deploy EIP-4788/2935/7002/7251 system
+//     contracts at their canonical addresses via
+//     oracle.AddPragueSystemContracts AND by the --spec YAML path
+//     (via Config.PreAlloc materialization in Config.Validate) for
+//     user-declared entities. Dispatched by shape: plain alloc
+//     accounts (empty Code AND empty Storage) go through WriteEOAs
+//     with BytecodeHash=nil; everything else goes through
+//     WriteContracts, which splices StateAccount.Root + .CodeHash
+//     from the supplied Storage + Code before the per-account RLP
+//     is stashed in the sorter.
 //     b. Synthetic EOAs in 100K batches.
 //     c. Synthetic contracts in 100K batches. WriteContracts
-//        mutates each contract's StateAccount.Root + .CodeHash IN-PLACE
-//        before the per-account RLP is written into the sorter, so the
-//        global state root sees the correct trie/code linkage.
+//     mutates each contract's StateAccount.Root + .CodeHash IN-PLACE
+//     before the per-account RLP is written into the sorter, so the
+//     global state root sees the correct trie/code linkage.
 //     d. Drain the Pebble sorter (ascending addrHash order) into the
-//        streaming HashBuilder for the global state root.
+//     streaming HashBuilder for the global state root.
 //     Empty alloc (no GenesisAccounts + NumAccounts=0 + NumContracts=0)
 //     yields the canonical empty-MPT hash 0x56e81f17...
 //  5. Persist chainspec.json.
@@ -136,7 +136,7 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 	// WriteContracts has been updated to preserve them when Storage is
 	// empty (which it is, post-materializePreAlloc removal of the
 	// Storage drain).
-	if err := streamSpecStorage(envs, &cfg, stats); err != nil {
+	if err := streamSpecStorage(ctx, envs, &cfg, stats); err != nil {
 		return nil, fmt.Errorf("RunCgo: streamSpecStorage: %w", err)
 	}
 
