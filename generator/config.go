@@ -166,43 +166,34 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	// Target-size budget enforcement: if --target-size is set, the spec
-	// alone must not exceed it. Conservative per-slot estimate (80 B/slot
-	// — the heaviest of the per-client calibration factors in
-	// internal/sizecal/factors.json) means we under-report and never
-	// false-reject; users can always raise --target-size if the warning
-	// fires spuriously.
-	if c.TargetSize > 0 {
-		const bytesPerSlot uint64 = 80
-		var totalSlots uint64
-		for _, slots := range c.GenesisStorage {
-			totalSlots += uint64(len(slots))
-		}
-		estimated := totalSlots * bytesPerSlot
-		if estimated > c.TargetSize {
-			return fmt.Errorf(
-				"Config: spec entities require an estimated %d bytes (%d slots × %d B/slot conservative estimate) "+
-					"which exceeds --target-size=%d. Raise --target-size or reduce approximate_size_bytes on spec entities.",
-				estimated, totalSlots, bytesPerSlot, c.TargetSize,
-			)
-		}
-	}
+	// The pre-Validate target-size estimate for spec entities was removed
+	// when spec storage moved to streaming (internal/streamingtrie):
+	// slot counts are no longer known without iterating each entity's
+	// lazy Storage iter, which would defeat the bounded-RAM property
+	// we just gained. Target-size enforcement happens at write time
+	// instead — each per-client writer samples its on-disk datadir size
+	// between batches and stops emission once cfg.TargetSize is reached.
 	return nil
 }
 
-// materializePreAlloc folds Config.PreAlloc into the
-// GenesisAccounts/Code/Storage maps. Each PreAllocEntity becomes one
-// GenesisAccounts entry plus optional GenesisCode/GenesisStorage entries.
-// Storage iter.Seq2 is drained into a map — RAM is proportional to the
-// total slot count across all entities.
+// materializePreAlloc folds Config.PreAlloc account headers + bytecodes
+// into the GenesisAccounts/Code maps so the existing per-client writers
+// pick them up uniformly with programmatically-added entries (e.g.
+// oracle.AddPragueSystemContracts).
 //
-// After PreAlloc is materialized, the field is left as-is so callers can
-// still inspect it (e.g. for diagnostics) but writers should not iterate
-// it directly.
+// Storage is NOT drained into GenesisStorage. Each PreAlloc entity's
+// Storage iter.Seq2 stays intact on c.PreAlloc and is consumed lazily
+// by the per-client streaming spec-storage Phase via
+// internal/streamingtrie — bounded RAM regardless of slot count, so
+// multi-GB ERC-20 fixtures stay within budget. Writers that need the
+// computed storage root read it back from
+// c.GenesisAccounts[addr].Root after the streaming Phase splices it
+// in.
 //
-// Idempotent: calling Validate twice does not double-materialize because
-// the function refuses to overwrite an existing key in GenesisAccounts
-// (returns an error instead, surfacing the collision).
+// PreAlloc is preserved (not cleared) so the per-client streaming Phase
+// can iterate it. Re-calling Validate stays idempotent because the
+// duplicate-address check below treats `existing == pe.Account` (same
+// pointer from a previous materialise) as a no-op rather than an error.
 func (c *Config) materializePreAlloc() error {
 	if len(c.PreAlloc) == 0 {
 		return nil
@@ -213,32 +204,24 @@ func (c *Config) materializePreAlloc() error {
 	if c.GenesisCode == nil {
 		c.GenesisCode = make(map[common.Address][]byte)
 	}
-	if c.GenesisStorage == nil {
-		c.GenesisStorage = make(map[common.Address]map[common.Hash]common.Hash)
-	}
 
 	for i, pe := range c.PreAlloc {
-		if _, dup := c.GenesisAccounts[pe.Address]; dup {
+		if existing, dup := c.GenesisAccounts[pe.Address]; dup {
+			// Idempotent re-call: same PreAllocEntity, same pointer in
+			// GenesisAccounts → skip (we already materialised this on a
+			// previous Validate). Distinct entries colliding on address
+			// is the real error.
+			if existing == pe.Account {
+				continue
+			}
 			return fmt.Errorf("Config.PreAlloc[%d]: address %s already present in GenesisAccounts (programmatic-alloc + spec-alloc collision)", i, pe.Address.Hex())
 		}
 		c.GenesisAccounts[pe.Address] = pe.Account
 		if len(pe.Code) > 0 {
 			c.GenesisCode[pe.Address] = pe.Code
 		}
-		if pe.Storage != nil {
-			storage := make(map[common.Hash]common.Hash)
-			pe.Storage(func(k, v common.Hash) bool {
-				storage[k] = v
-				return true
-			})
-			if len(storage) > 0 {
-				c.GenesisStorage[pe.Address] = storage
-			}
-		}
+		// pe.Storage is intentionally NOT drained — see function doc.
 	}
-	// PreAlloc has been consumed; clearing it makes Validate idempotent
-	// across multiple calls (some test harnesses validate twice).
-	c.PreAlloc = nil
 	return nil
 }
 

@@ -2,7 +2,6 @@ package generator
 
 import (
 	"iter"
-	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -13,8 +12,11 @@ import (
 )
 
 // TestPreAllocShimMaterializes verifies Validate() folds Config.PreAlloc
-// entries into the GenesisAccounts/Code/Storage maps so client writers
-// can consume them uniformly.
+// account headers + bytecodes into the GenesisAccounts/Code maps so
+// client writers can consume them uniformly. Storage is intentionally
+// NOT drained — it stays on c.PreAlloc and is consumed lazily by each
+// client's streaming spec-storage Phase via internal/streamingtrie
+// (bounds RAM regardless of slot count).
 func TestPreAllocShimMaterializes(t *testing.T) {
 	addr := common.HexToAddress("0x000000000000000000000000000000000000aaaa")
 
@@ -45,14 +47,18 @@ func TestPreAllocShimMaterializes(t *testing.T) {
 	if got := cfg.GenesisCode[addr]; len(got) != 2 {
 		t.Errorf("shim did not materialize code: got %v", got)
 	}
-	if got := cfg.GenesisStorage[addr]; len(got) != 2 {
-		t.Errorf("shim did not materialize storage: got %v entries, want 2", len(got))
+	// Storage is NOT drained into GenesisStorage anymore; the iter stays
+	// on c.PreAlloc for the per-client streaming Phase to consume.
+	if got := cfg.GenesisStorage[addr]; len(got) != 0 {
+		t.Errorf("shim should NOT drain storage; got %v entries", len(got))
 	}
 
-	// PreAlloc must be cleared so a second Validate() call is idempotent.
-	if cfg.PreAlloc != nil {
-		t.Errorf("Validate should clear PreAlloc; got %d entries left", len(cfg.PreAlloc))
+	// PreAlloc must be preserved (writers iterate it for streaming).
+	if len(cfg.PreAlloc) != 1 {
+		t.Errorf("Validate should preserve PreAlloc; got %d entries", len(cfg.PreAlloc))
 	}
+	// Second Validate must succeed (idempotent — same pointers, no
+	// collision).
 	if err := cfg.Validate(); err != nil {
 		t.Errorf("second Validate must succeed (idempotent): %v", err)
 	}
@@ -74,12 +80,15 @@ func TestPreAllocShimRejectsCollisionWithGenesisAccounts(t *testing.T) {
 	}
 }
 
-// TestValidateRejectsSpecExceedingTargetSize pins the SPEC.md promise that
-// Config.Validate fails when spec storage exceeds --target-size. Pre-fix
-// this check was silently absent — users would get truncated state.
-func TestValidateRejectsSpecExceedingTargetSize(t *testing.T) {
+// TestValidateAcceptsSpecRegardlessOfStorageSize confirms the pre-
+// Validate target-size estimate was removed when storage moved to
+// streaming (internal/streamingtrie). The check is now enforced at
+// write time by each per-client writer's dirSize sampling — Validate
+// can't see slot counts without iterating the (potentially huge) lazy
+// iter, which would defeat the bounded-RAM property.
+func TestValidateAcceptsSpecRegardlessOfStorageSize(t *testing.T) {
 	addr := common.HexToAddress("0x000000000000000000000000000000000000dddd")
-	// 1000 slots × 80 B/slot estimate = 80_000 bytes.
+	// 1000 slots — under the old 80 B/slot × 1000 = 80_000 B estimate.
 	bigStorage := make(map[common.Hash]common.Hash, 1000)
 	for i := 0; i < 1000; i++ {
 		var k common.Hash
@@ -88,19 +97,15 @@ func TestValidateRejectsSpecExceedingTargetSize(t *testing.T) {
 	}
 
 	cfg := &Config{
-		TargetSize: 1000, // way below the 80_000 B estimate
+		TargetSize: 1000, // way below what the old check would have rejected
 		PreAlloc: []templates.PreAllocEntity{{
 			Address: addr,
 			Account: &types.StateAccount{Nonce: 1, Balance: uint256.NewInt(0), Root: types.EmptyRootHash, CodeHash: types.EmptyCodeHash[:]},
 			Storage: storageMap(bigStorage),
 		}},
 	}
-	err := cfg.Validate()
-	if err == nil {
-		t.Fatal("expected target-size violation, got nil")
-	}
-	if !strings.Contains(err.Error(), "--target-size") {
-		t.Errorf("expected '--target-size' in error, got %q", err.Error())
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate should not reject on storage size (write-time cap handles it): %v", err)
 	}
 }
 

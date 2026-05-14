@@ -67,8 +67,14 @@ synthetic slot count via a per-client calibration factor
 (see `internal/sizecal/factors.json`). Slots are populated with
 deterministic `(key, value)` pairs derived from `(seed, address)`.
 
-- **Limit**: total spec storage materializes into a Go map before writers
-  consume it. Practical per-entity bound ~1 GB on a 16 GB machine.
+- **RAM**: spec storage flows through a per-entity streaming pipeline
+  (`internal/streamingtrie` + `internal/streamsort`). Total writer RAM
+  stays at ~2 GB peak (a tuned Pebble MemTable per active entity)
+  regardless of slot count, so 50 GB ERC-20s and 50 KB ones share the
+  same code path.
+- **Disk**: per-entity bound is the temp-sort working set (`slot_count
+  × 96 B` in Pebble) colocated with the output datadir; freed when the
+  entity finishes writing.
 - **Accuracy**: ±25% via per-client calibration factors
   (`internal/sizecal/factors.json`).
 

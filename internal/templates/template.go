@@ -37,14 +37,20 @@ type PreAllocEntity struct {
 
 	// Storage yields (key, value) pairs for this entity. iter.Seq2 (Go 1.23+
 	// range-over-function) so synthesized storage doesn't need to be
-	// materialized up front — a 10 GB ERC-20 spec produces a closure that
-	// computes slots on demand rather than a 10 GB Go-heap map. nil when
-	// the entity has no storage. Iteration order is NOT keccak-sorted;
-	// writers that need sorted insertion must materialize and sort
-	// themselves (the storage write path uses a small per-entity buffer).
+	// materialised up front — a 50 GB ERC-20 spec produces a closure that
+	// computes slots on demand rather than a 50 GB Go-heap map. nil when
+	// the entity has no storage.
 	//
-	// Pure-function iterators may be re-iterated; callers should not
-	// assume single-shot semantics.
+	// Consumed by the per-client streaming spec-storage Phase via
+	// internal/streamingtrie.StorageRoot, which drains the iter into a
+	// per-entity sorted spill store (internal/streamsort) → walks it
+	// sorted to feed both the per-client MPT HashBuilder and the
+	// per-slot DB-row Sink in lockstep. Iteration order from this iter
+	// itself is NOT keccak-sorted; the helper handles sorting.
+	//
+	// Pure-function iterators may be re-iterated; templates emit those
+	// (deterministic synthesis) so callers can call the iter more than
+	// once and get the same yield sequence.
 	Storage iter.Seq2[common.Hash, common.Hash]
 }
 
