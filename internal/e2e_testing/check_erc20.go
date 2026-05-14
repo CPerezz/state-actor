@@ -15,31 +15,16 @@ import (
 )
 
 // erc20OracleSampleCap caps the per-entity sample of synthesized
-// owners/allowances re-queried via eth_call. Bounds RPC round-trips at
-// O(entities × (4 + cap×2)) regardless of total_owners /
-// total_allowances magnitude.
+// owners/allowances re-queried via eth_call.
 const erc20OracleSampleCap = 5
 
-// CheckERC20Templates verifies, for every spec entity with
-// `template: erc20`, that the planted state is reachable via JSON-RPC:
-//
-//   - eth_getCode(tokenAddr) byte-equals the vendored OZ v5 runtime;
-//   - eth_call name() / symbol() / decimals() match the spec parameters;
-//   - eth_call totalSupply() equals Σ explicit balances + Σ random balances;
-//   - eth_call balanceOf(addr) matches every explicit owner;
-//   - eth_call balanceOf(addr) matches a deterministic sample of
-//     synthesized owner addresses (first/last/middle, cap %d);
-//   - eth_call allowance(owner, spender) matches every explicit
-//     allowance plus a sampled subset of the synthesized random ones.
-//
-// Reports mismatches via t.Errorf; returns false on any mismatch.
-//
-// seed is the CI build seed (CISpecSeed) — must match what
-// specbuild.Build used so the random-fill values re-derive identically.
-//
-// Used by per-client e2e suites at "0x0" (Phase 4 — alongside
-// CheckInjections). Pairs with CheckInjections (general balance/code
-// verification) and CheckEntities (synthetic entitygen entities).
+// CheckERC20Templates verifies, for each spec entity with `template:
+// erc20`, that the planted state round-trips via JSON-RPC:
+// eth_getCode, name/symbol/decimals, totalSupply, every explicit
+// balanceOf + a deterministic sample of random owners, and every
+// explicit allowance + a sample of synthesized ones. seed must match
+// what specbuild.Build used so random-fill values re-derive identically.
+// Returns false on any mismatch.
 func CheckERC20Templates(t *testing.T, rpcURL string, specDoc *spec.Spec, seed int64, blockTag string) bool {
 	t.Helper()
 	if specDoc == nil {
@@ -73,8 +58,6 @@ func CheckERC20Templates(t *testing.T, rpcURL string, specDoc *spec.Spec, seed i
 	return passed
 }
 
-// checkERC20Bytecode verifies eth_getCode matches the vendored OZ v5
-// runtime bytecode.
 func checkERC20Bytecode(t *testing.T, rpcURL, anchor string, tokenAddr common.Address, blockTag string) bool {
 	t.Helper()
 	gotCode, err := rpcprobe.EthGetCode(rpcURL, tokenAddr, blockTag)
@@ -91,7 +74,6 @@ func checkERC20Bytecode(t *testing.T, rpcURL, anchor string, tokenAddr common.Ad
 	return true
 }
 
-// checkERC20Metadata verifies name(), symbol(), decimals() via eth_call.
 func checkERC20Metadata(t *testing.T, rpcURL, anchor string, tokenAddr common.Address, ent spec.Entity, blockTag string) bool {
 	t.Helper()
 	passed := true
@@ -128,16 +110,11 @@ func checkERC20Metadata(t *testing.T, rpcURL, anchor string, tokenAddr common.Ad
 	return passed
 }
 
-// checkERC20Balances verifies totalSupply, explicit balanceOf for every
-// explicit owner, and sampled balanceOf for synthesized random owners.
-// Random owner addresses are re-derived from (seed, tokenAddr, index)
-// using the same recipe the writer used.
 func checkERC20Balances(t *testing.T, rpcURL, anchor string, tokenAddr common.Address, ent spec.Entity, seed int64, blockTag string) bool {
 	t.Helper()
 	passed := true
 
-	// Re-parse the explicit owners from params. Validate has already
-	// run so this can't fail; ignore the error here for test ergonomics.
+	// Validate has already run so re-parse can't fail.
 	owners, _ := templates.ParseExplicitOwners(ent.Parameters["owners"])
 	totalOwners := len(owners)
 	if v, has := ent.Parameters["total_owners"]; has {
@@ -146,7 +123,6 @@ func checkERC20Balances(t *testing.T, rpcURL, anchor string, tokenAddr common.Ad
 	}
 	randomCount := totalOwners - len(owners)
 
-	// Expected totalSupply = Σ explicit + Σ random.
 	wantTotal := new(uint256.Int)
 	for _, o := range owners {
 		wantTotal.Add(wantTotal, o.Balance)
@@ -164,7 +140,6 @@ func checkERC20Balances(t *testing.T, rpcURL, anchor string, tokenAddr common.Ad
 		passed = false
 	}
 
-	// Verify every explicit owner.
 	for _, o := range owners {
 		got, err := rpcprobe.EthCallERC20BalanceOf(rpcURL, tokenAddr, o.Address, blockTag)
 		if err != nil {
@@ -179,7 +154,6 @@ func checkERC20Balances(t *testing.T, rpcURL, anchor string, tokenAddr common.Ad
 		}
 	}
 
-	// Sample random owners (first/last/middle, cap erc20OracleSampleCap).
 	for _, idx := range sampleIndices(randomCount, erc20OracleSampleCap) {
 		holder := templates.DeterministicRandomOwnerAddress(seed, tokenAddr, idx)
 		wantVal := templates.DeterministicRandomBalance(seed, tokenAddr, idx)
@@ -199,8 +173,6 @@ func checkERC20Balances(t *testing.T, rpcURL, anchor string, tokenAddr common.Ad
 	return passed
 }
 
-// checkERC20Allowances verifies explicit allowance() for every entry +
-// a sampled subset of synthesized random allowance triples.
 func checkERC20Allowances(t *testing.T, rpcURL, anchor string, tokenAddr common.Address, ent spec.Entity, seed int64, blockTag string) bool {
 	t.Helper()
 	passed := true
@@ -213,7 +185,6 @@ func checkERC20Allowances(t *testing.T, rpcURL, anchor string, tokenAddr common.
 	}
 	randomCount := totalAllowances - len(allowances)
 
-	// Verify every explicit allowance.
 	for _, a := range allowances {
 		got, err := rpcprobe.EthCallERC20Allowance(rpcURL, tokenAddr, a.Owner, a.Spender, blockTag)
 		if err != nil {
@@ -228,7 +199,6 @@ func checkERC20Allowances(t *testing.T, rpcURL, anchor string, tokenAddr common.
 		}
 	}
 
-	// Sample random allowances.
 	for _, idx := range sampleIndices(randomCount, erc20OracleSampleCap) {
 		owner := templates.DeterministicRandomAlwOwnerAddress(seed, tokenAddr, idx)
 		spender := templates.DeterministicRandomAlwSpenderAddress(seed, tokenAddr, idx)
@@ -250,10 +220,9 @@ func checkERC20Allowances(t *testing.T, rpcURL, anchor string, tokenAddr common.
 	return passed
 }
 
-// sampleIndices returns a deterministic sample of up to cap indices from
-// [0, count). For count <= cap, returns every index. For count > cap,
-// returns first + last + middle slots so a regression at any boundary
-// surfaces.
+// sampleIndices returns a deterministic sample of up to cap indices
+// from [0, count). For count > cap, picks first + last + evenly-spaced
+// middle so regressions at boundaries surface.
 func sampleIndices(count, cap int) []int {
 	if count <= 0 {
 		return nil
@@ -266,7 +235,6 @@ func sampleIndices(count, cap int) []int {
 		return out
 	}
 	out := []int{0, count - 1}
-	// Fill the middle with evenly-spaced indices.
 	step := count / (cap - 1)
 	for i := 1; i < cap-1; i++ {
 		out = append(out, i*step)

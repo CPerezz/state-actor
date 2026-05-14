@@ -15,17 +15,14 @@ type Spec struct {
 	Entities []Entity `yaml:"entities"`
 }
 
-// Kind discriminates entity types. Stringly-typed at the YAML layer to keep
-// schema diagnostics readable ("unknown kind: contracst" beats "value out of
-// range").
 const (
 	KindContract = "contract"
 	KindEOA      = "eoa"
 )
 
-// Entity is one declared entity in the spec. A single struct discriminated by
-// Kind keeps the YAML decode straight-line; per-kind field rules (e.g. "eoa
-// must not set template") are enforced by Validate, not by separate Go types.
+// Entity is one declared entity in the spec; Kind discriminates.
+// Per-kind field rules (e.g. "eoa must not set template") are enforced
+// by Validate.
 type Entity struct {
 	Kind                 string         `yaml:"kind"`
 	Name                 string         `yaml:"name,omitempty"`
@@ -38,10 +35,9 @@ type Entity struct {
 	ApproximateSizeBytes uint64         `yaml:"approximate_size_bytes,omitempty"`
 }
 
-// scalarText returns the raw source text of a YAML scalar node. yaml.v3 may
-// resolve `0x...` syntax as an integer (`!!int`) rather than a string — but
-// node.Value preserves the verbatim text either way, so for hex-prefixed
-// fields the type tag doesn't matter; we validate against the raw text.
+// scalarText returns the raw source text of a YAML scalar. Hex-prefixed
+// fields validate against this rather than the tag because yaml.v3 may
+// resolve `0x...` as an integer.
 func scalarText(node *yaml.Node, fieldDesc string) (string, error) {
 	if node.Kind != yaml.ScalarNode {
 		return "", fmt.Errorf("%s must be a scalar (got node kind %d at line %d)", fieldDesc, node.Kind, node.Line)
@@ -49,10 +45,9 @@ func scalarText(node *yaml.Node, fieldDesc string) (string, error) {
 	return strings.TrimSpace(node.Value), nil
 }
 
-// requireStringTag asserts that a YAML scalar was written as a quoted string,
-// not an unquoted integer/float/boolean. Used for fields where the schema
-// requires user intent to be explicit — primarily `balance`, where unquoted
-// large numbers risk silent precision loss via int64/float64 coercion.
+// requireStringTag rejects unquoted scalars. Used for fields like
+// `balance` where unquoted large numbers risk int64/float64 precision
+// loss.
 func requireStringTag(node *yaml.Node, fieldDesc string) error {
 	if node.Kind != yaml.ScalarNode {
 		return fmt.Errorf("%s must be a scalar (got node kind %d at line %d)", fieldDesc, node.Kind, node.Line)
@@ -64,10 +59,8 @@ func requireStringTag(node *yaml.Node, fieldDesc string) error {
 	return nil
 }
 
-// HexBytes is `[]byte` decoded from a `0x`-prefixed hex scalar in YAML.
-// Empty strings decode to nil. Both quoted (`code: "0x6080"`) and unquoted
-// (`code: 0x6080`) forms are accepted — yaml.v3 resolves the latter as an
-// integer, but node.Value preserves the source text.
+// HexBytes is []byte decoded from a 0x-prefixed hex scalar. Empty
+// strings decode to nil. Both quoted and unquoted 0x forms work.
 type HexBytes []byte
 
 func (b *HexBytes) UnmarshalYAML(node *yaml.Node) error {
@@ -90,9 +83,8 @@ func (b *HexBytes) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
-// HexAddress is `common.Address` decoded from a `0x...` 20-byte hex scalar.
-// The 0x prefix is required; checksum case is not enforced. Both quoted and
-// unquoted `0x` forms are accepted.
+// HexAddress is common.Address decoded from a 0x-prefixed 20-byte hex
+// scalar. Checksum case is not enforced.
 type HexAddress common.Address
 
 func (a *HexAddress) UnmarshalYAML(node *yaml.Node) error {
@@ -115,13 +107,11 @@ func (a *HexAddress) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
-// Address returns the common.Address representation.
 func (a HexAddress) Address() common.Address { return common.Address(a) }
 
-// BigIntDecimal wraps a *uint256.Int with a string-only YAML decode. Untyped
-// numeric YAML scalars are rejected because `1e22` would decode as a float64
-// and lose precision past 2^53; large balances overflow int64 entirely. The
-// schema requires balances to be quoted strings.
+// BigIntDecimal is a *uint256.Int decoded from a quoted YAML string.
+// Unquoted numerics are rejected because 1e22 would lose precision via
+// float64 and large balances overflow int64.
 type BigIntDecimal struct {
 	V *uint256.Int
 }
@@ -142,14 +132,8 @@ func (b *BigIntDecimal) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
-// ParseUint256 accepts decimal (e.g. "1000000000000000000") or 0x-hex
-// (e.g. "0xde0b6b3a7640000") representations and returns a *uint256.Int.
-// Underscores are not accepted (YAML strings don't strip them).
-//
-// Exported so the templates package can reuse the same parsing rules
-// for nested-object fields (e.g. erc20 owners' balance, allowances'
-// amount) — those decode through map[string]any and don't get our
-// custom UnmarshalYAML hooks.
+// ParseUint256 accepts a decimal or 0x-hex string and returns a
+// *uint256.Int. Underscores are not accepted.
 func ParseUint256(s string) (*uint256.Int, error) {
 	v := new(uint256.Int)
 	if strings.HasPrefix(s, "0x") || strings.HasPrefix(s, "0X") {

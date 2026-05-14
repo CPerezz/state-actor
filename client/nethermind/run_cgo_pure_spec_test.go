@@ -18,19 +18,11 @@ import (
 	"github.com/nerolation/state-actor/internal/templates"
 )
 
-// TestPureSpecDispatchUsesStreamingPath is a regression guard for the
-// nethermind dispatch fix. Pre-fix, a Config with NumAccounts==0 and
-// NumContracts==0 but non-empty PreAlloc would route to a now-removed
-// writeGenesisAllocAccounts handler that read cfg.GenesisStorage —
-// which materializePreAlloc no longer populates for spec entities. The
-// spec entity's Account.Root stayed at EmptyRootHash, the storage CF
-// got no rows, and the state root was wrong (invisible to existing
-// CI because every e2e suite passes --accounts > 0, hitting a
-// different dispatch branch).
-//
-// Post-fix, every non-empty input routes through writeSyntheticAccounts,
-// whose Phase 0 streams the spec-Storage iter through streamingtrie
-// and splices the resulting root into Account.Root.
+// TestPureSpecDispatchUsesStreamingPath pins that a Config with no
+// synthetic accounts/contracts and a non-empty PreAlloc routes through
+// writeSyntheticAccounts (which has Phase 0 spec-storage streaming),
+// so the spec entity's Account.Root is spliced rather than left at
+// EmptyRootHash.
 func TestPureSpecDispatchUsesStreamingPath(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping cgo dispatch test in -short mode")
@@ -72,28 +64,18 @@ func TestPureSpecDispatchUsesStreamingPath(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	// Phase 0 must have spliced the storage root into the spec entity.
 	if specAccount.Root == types.EmptyRootHash {
-		t.Fatalf("spec entity Root is still EmptyRootHash — Phase 0 spec-storage streaming did not run; "+
+		t.Fatalf("spec entity Root is still EmptyRootHash — Phase 0 did not run; "+
 			"got Root=%s (cfg.StateRoot=%s)", specAccount.Root.Hex(), stats.StateRoot.Hex())
 	}
-
-	// Outer state root is non-zero (the account itself is in state).
 	if stats.StateRoot == (common.Hash{}) {
-		t.Fatalf("state root is zero hash — dispatch produced no state")
+		t.Fatalf("state root is zero hash")
 	}
-
-	// Per-spec-entity storage drove the streaming Phase 0; AccountBytes
-	// counts the materialised alloc account itself.
 	if stats.AccountBytes == 0 {
-		t.Errorf("stats.AccountBytes == 0 — alloc account not encoded into state DB")
+		t.Errorf("stats.AccountBytes == 0")
 	}
 }
 
-// storageIterFromMap wraps a map in iter.Seq2[common.Hash, common.Hash]
-// for use as PreAllocEntity.Storage in tests. Mirrors the helper in
-// generator/prealloc_test.go (intentionally duplicated; cross-package
-// import would create a test-only dependency cycle).
 func storageIterFromMap(m map[common.Hash]common.Hash) iter.Seq2[common.Hash, common.Hash] {
 	if len(m) == 0 {
 		return nil

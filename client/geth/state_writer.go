@@ -27,39 +27,24 @@ import (
 	"github.com/nerolation/state-actor/internal/streamsort"
 )
 
-// phase1FlushBytes mirrors client/besu/state_writer_cgo.go: 64 MiB temp
-// Pebble batch flush threshold, large enough to amortise commit overhead
-// without exploding RAM.
 const phase1FlushBytes = 64 * 1024 * 1024
 
-// parallelKeccakThreshold: contracts with ≥ 64 storage slots trigger
-// parallel keccak hashing for keys.
+// parallelKeccakThreshold is the slot count above which a contract's
+// keccak hashing is parallelised across cores.
 const parallelKeccakThreshold = 64
 
-// writeStateAndCollectRoot drives the two-phase MPT pipeline for the
-// geth client.
+// writeStateAndCollectRoot drives the two-phase MPT pipeline.
 //
-// Phase 1 streams entitygen output (genesis-alloc accounts, inject
-// addresses, synthetic EOAs, synthetic contracts) into a temp Pebble DB
-// keyed by addrHash; Pebble's LSM auto-sorts on key, so Phase 2 reads in
-// keccak order without an explicit sort step. WAL is disabled on the
-// temp DB — Phase 2 starts from a deterministic seed if Phase 1 crashes.
+// Phase 0 streams each spec-PreAlloc entity's storage iter through
+// streamingtrie, persisting per-slot snapshot rows + storage-trie nodes
+// and splicing the computed root into cfg.GenesisAccounts[addr].Root.
 //
-// Phase 2 forward-iterates the compacted scratch and writes the
-// production geth Pebble in keccak order. For each entity it builds the
-// per-account storage trie via trie.StackTrie, splices the storage root
-// into the account, writes the snapshot entries, writes contract code
-// (deduped by codeHash), and feeds (addrHash, full StateAccount RLP)
-// into the outer account trie. trie.StackTrie's OnTrieNode callback
-// emits trie nodes which we route to PathScheme keys
-// (TrieNodeAccountPrefix / TrieNodeStoragePrefix) on the production DB.
+// Phase 1 streams entitygen output (genesis-alloc, synthetic EOAs +
+// contracts) into a streamsort.Store keyed by addrHash for Phase 2 to
+// consume sorted. Phase 2 builds per-account storage tries, writes the
+// production Pebble in keccak order, and feeds the outer account trie.
 //
-// Returns the final state root and a populated *generator.Stats.
-//
-// Memory is bounded by O(max storage slots in any single contract): no
-// goroutine accumulates the full account set, and the temp DB streams
-// off disk. Sequential writes to the production DB give Pebble the
-// best-case LSM workload — append-mostly, no compaction storm.
+// Memory is bounded by O(max storage slots in any single contract).
 func writeStateAndCollectRoot(
 	ctx context.Context,
 	cfg generator.Config,
@@ -68,30 +53,19 @@ func writeStateAndCollectRoot(
 	stats := &generator.Stats{}
 	start := time.Now()
 
-	// --- Phase 1: stream entitygen → streamsort.Store. ---
-
 	sorter, err := streamsort.New("")
 	if err != nil {
 		return common.Hash{}, nil, fmt.Errorf("geth: streamsort.New: %w", err)
 	}
 	defer sorter.Close()
 
-	// Reverse map for Phase 2: addrHash → original Address, so we can
-	// look up cfg.GenesisAccounts[addr].Root (set by the Phase 0 streaming
-	// spec-storage pass below) when encoding spec-entity account leaves.
+	// hashToAddr lets Phase 2 look up cfg.GenesisAccounts[addr].Root
+	// (set by Phase 0) when encoding spec-entity account leaves.
 	hashToAddr := make(map[common.Hash]common.Address, len(cfg.GenesisAccounts))
 	for addr := range cfg.GenesisAccounts {
 		hashToAddr[crypto.Keccak256Hash(addr[:])] = addr
 	}
 
-	// --- Phase 0: stream per-spec-entity storage. ---
-	//
-	// For each PreAlloc entity with non-nil Storage, drain the iter
-	// through streamingtrie.StorageRoot: the HashBuilder wraps a per-
-	// account go-ethereum trie.StackTrie, and the Sink writes each
-	// snapshot-Pebble storage row via w.WriteStorageRLP. The returned
-	// root is spliced into cfg.GenesisAccounts[addr].Root so Phase 2
-	// picks it up via hashToAddr.
 	for i, pe := range cfg.PreAlloc {
 		if pe.Storage == nil {
 			continue
@@ -120,17 +94,10 @@ func writeStateAndCollectRoot(
 
 	rng := mrand.New(mrand.NewSource(int64(cfg.Seed)))
 
-	// Phase 1 raw-byte safety cap for --target-size. Phase 1 doesn't
-	// write to the production DB (all prod writes happen in Phase 2 in
-	// keccak order), so dirSize sampling here would be misleading. As
-	// a coarse upper bound we stop entity emission once raw entity
-	// bytes reach 5× cfg.TargetSize — that's enough headroom to let
-	// Phase 2's accurate dirSize stop trigger before we waste work on
-	// entities that will never get written to the production DB. The
-	// 5× factor is empirical: MPT trie node overhead + storage tries
-	// can push final DB size to ~3-4× raw entity bytes at high storage
-	// density, so 5× ensures Phase 2 has enough material to hit the
-	// target dirSize.
+	// Phase 1 writes to the temp Pebble only, so dirSize sampling is
+	// misleading here. Cap raw entity bytes at 5× cfg.TargetSize as a
+	// safety net; Phase 2's accurate dirSize stop is the real bound.
+	// 5× headroom covers MPT + storage trie overhead (~3-4× empirical).
 	totalRawBytes := uint64(0)
 	targetReached := false
 	const phase1Phase1RawSafetyMultiplier = 5
@@ -147,9 +114,8 @@ func writeStateAndCollectRoot(
 		return false
 	}
 
-	// genesisAddrs prevents synthetic-RNG addresses from colliding with
-	// pre-allocated genesis addresses. Random-random collisions across
-	// 2^160 addresses are not modelled — astronomical.
+	// genesisAddrs prevents synthetic RNG addresses from colliding with
+	// pre-allocated genesis addresses.
 	genesisAddrs := make(map[common.Address]struct{}, len(cfg.GenesisAccounts))
 
 	writeBlob := func(addrHash common.Hash, blob []byte) error {
@@ -160,7 +126,6 @@ func writeStateAndCollectRoot(
 		return nil
 	}
 
-	// 1a. Genesis-alloc accounts.
 	for addr, acc := range cfg.GenesisAccounts {
 		genesisAddrs[addr] = struct{}{}
 		addrHash := crypto.Keccak256Hash(addr[:])
@@ -191,7 +156,6 @@ func writeStateAndCollectRoot(
 		}
 	}
 
-	// 1c. Synthetic EOAs.
 	for i := 0; i < cfg.NumAccounts && !targetReached; i++ {
 		if err := ctx.Err(); err != nil {
 			return common.Hash{}, nil, err
@@ -211,7 +175,6 @@ func writeStateAndCollectRoot(
 		}
 	}
 
-	// 1d. Synthetic contracts.
 	codeSize := cfg.CodeSize
 	if codeSize <= 0 {
 		codeSize = 1024
@@ -220,17 +183,13 @@ func writeStateAndCollectRoot(
 		if err := ctx.Err(); err != nil {
 			return common.Hash{}, nil, err
 		}
-		// Canonical (slot-count, contract) draw order — single source of
-		// truth in entitygen so every writer + every reproduction-side
-		// test stays RNG-aligned.
 		contract := entitygen.GenerateContractRoll(rng, cfg.Distribution, codeSize, cfg.MinSlots, cfg.MaxSlots)
 		for _, dup := genesisAddrs[contract.Address]; dup; {
 			contract = entitygen.GenerateContractRoll(rng, cfg.Distribution, codeSize, cfg.MinSlots, cfg.MaxSlots)
 			_, dup = genesisAddrs[contract.Address]
 		}
 
-		// entitygen.Account.Storage is sorted by raw Key; copy into the
-		// blob's slice so Phase 2 can re-sort by keccak(Key) later.
+		// contract.Storage is sorted by raw Key; Phase 2 re-sorts by keccak(Key).
 		slots := make([]entityBlobSlot, len(contract.Storage))
 		for j, s := range contract.Storage {
 			slots[j] = entityBlobSlot{Key: s.Key, Value: s.Value}
@@ -258,29 +217,18 @@ func writeStateAndCollectRoot(
 			stats.StorageSlotsCreated, stats.GenerationTime.Round(time.Millisecond))
 	}
 
-	// --- Phase 2: forward iterate temp Pebble → write production DB. ---
-
 	phase2Start := time.Now()
 
-	// Outer account trie. OnTrieNode emits each completed branch/extension
-	// node; we persist under PathScheme TrieNodeAccountPrefix. Always
-	// installed — without these writes the DB is unbootable by geth: PathDB
-	// at boot computes the trie root via keccak256(rawdb.ReadAccountTrieNode(
-	// db, nil)). A missing root node short-circuits to types.EmptyRootHash
-	// (0x56e81f..63b421), which mismatches the recorded SnapshotRoot and
-	// triggers `State snapshot is not consistent` → `Genesis state is
-	// missing` → every state RPC fails. See nerolation/state-actor#42.
-	//
-	// The callback captures the first PutTrieNode error in accountTrieErr;
-	// the outer error-return after sorter.Iterate surfaces it. Aborting
-	// via log.Fatalf here would bypass sorter.Close and other defers.
+	// Outer account trie nodes are persisted under TrieNodeAccountPrefix.
+	// Geth's PathDB boot derives the trie root via
+	// keccak256(rawdb.ReadAccountTrieNode(db, nil)); a missing root node
+	// short-circuits to EmptyRootHash and fails snapshot consistency.
 	var accountTrieErr error
 	accountCb := func(path []byte, hash common.Hash, blob []byte) {
 		if accountTrieErr != nil {
 			return
 		}
-		// StackTrie warns the path/blob slices are volatile across calls;
-		// copy before queuing into the writer's batch.
+		// StackTrie's path/blob slices are volatile — copy before queuing.
 		p := append([]byte(nil), path...)
 		b := append([]byte(nil), blob...)
 		key := append([]byte{}, rawdb.TrieNodeAccountPrefix...)
@@ -291,9 +239,6 @@ func writeStateAndCollectRoot(
 	}
 	accountTrie := trie.NewStackTrie(accountCb)
 
-	// Code dedup: same hash means same bytes (collision-resistant), so
-	// once we've written a particular code blob we don't need to write
-	// it again. Bounded by total unique contracts.
 	codeSeen := make(map[common.Hash]struct{}, cfg.NumContracts)
 
 	count := 0
@@ -310,11 +255,9 @@ func writeStateAndCollectRoot(
 			return fmt.Errorf("phase2 decode at #%d: %w", count, err)
 		}
 
-		// Build storage trie + collect (sortedSlotHash, encodedValue) for
-		// snapshot writes in keccak order. For spec entities whose
-		// storage was streamed in Phase 0, ent.slots is empty (because
-		// materializePreAlloc no longer populates cfg.GenesisStorage for
-		// them) — use the pre-computed root from cfg.GenesisAccounts.
+		// Spec entities stream their storage in Phase 0 (ent.slots is
+		// empty for them); pick up the pre-computed Root from
+		// cfg.GenesisAccounts instead of recomputing.
 		storageRoot, sortedSlotEntries, err := buildStorageTrie(w, addrHash, ent.slots)
 		if err != nil {
 			return fmt.Errorf("phase2 storage trie at #%d: %w", count, err)
@@ -328,8 +271,6 @@ func writeStateAndCollectRoot(
 			}
 		}
 
-		// Snapshot-side flat state writes (sequential by addrHash, and
-		// per-account the slot writes are sequential by slotHash).
 		acc := types.StateAccount{
 			Nonce:    ent.nonce,
 			Balance:  ent.balance,
@@ -358,10 +299,8 @@ func writeStateAndCollectRoot(
 			}
 		}
 
-		// Outer account trie input MUST be the FULL StateAccount RLP, not
-		// SlimAccountRLP — geth's trie reader decodes leaf values as
-		// StateAccount with a fixed 32-byte Root field; SlimAccountRLP
-		// elides Root for EOAs and crashes on decode.
+		// MUST be full StateAccount RLP (not SlimAccountRLP) — geth's
+		// trie reader expects a fixed 32-byte Root field.
 		fullRLP, err := rlp.EncodeToBytes(&acc)
 		if err != nil {
 			return fmt.Errorf("phase2 encode account RLP at #%d: %w", count, err)
@@ -372,13 +311,7 @@ func writeStateAndCollectRoot(
 
 		count++
 
-		// Phase 2 target-size precise stop: every N entities, flush the
-		// writer's batch so all queued bytes are on disk, then sample
-		// the chaindata directory size. When it reaches cfg.TargetSize
-		// we stop iteration with a partial state root that reflects only
-		// the entities written so far. The 1024-entity cadence balances
-		// sample frequency vs. flush+walkfs overhead — at ~600 B/entity
-		// a 1024-batch is ~600 KiB, well below typical target tolerances.
+		// Sample dirSize every 1024 entities (~600 KiB at ~600 B/entity).
 		if cfg.TargetSize > 0 && count%1024 == 0 {
 			if err := w.FlushBatch(); err != nil {
 				return fmt.Errorf("phase2 target-size flush: %w", err)
@@ -401,9 +334,8 @@ func writeStateAndCollectRoot(
 	}
 
 	stateRoot := accountTrie.Hash()
+	// accountTrie.Hash() may emit final nodes through the callback.
 	if accountTrieErr != nil {
-		// accountTrie.Hash() can flush remaining nodes through the
-		// callback; surface a failure from those final writes too.
 		return common.Hash{}, nil, accountTrieErr
 	}
 	stats.StateRoot = stateRoot
@@ -422,12 +354,8 @@ func writeStateAndCollectRoot(
 	return stateRoot, stats, nil
 }
 
-// dirSize returns the total bytes used by all regular files under path.
-// Used by Phase 2's --target-size sampling: we read the on-disk size of
-// the production geth chaindata directory after each batch flush and
-// stop iteration once it reaches the requested target. Returns 0 + nil
-// if path doesn't exist yet (Pebble may not have created files in the
-// first ~ms of operation).
+// dirSize returns the total bytes used by all regular files under
+// path. Returns 0 + nil if path doesn't exist yet.
 func dirSize(path string) (uint64, error) {
 	var total uint64
 	err := filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
@@ -445,23 +373,17 @@ func dirSize(path string) (uint64, error) {
 	return total, err
 }
 
-// sortedSlot pairs a slot's keccak hash with its RLP-encoded value, used
-// by Phase 2 to write storage snapshot entries in keccak order.
+// sortedSlot is a (keccak(slotKey), RLP value) pair sorted by slotHash.
 type sortedSlot struct {
 	slotHash common.Hash
 	valueRLP []byte
 }
 
-// buildStorageTrie hashes + sorts a contract's storage slots, builds the
-// per-account storage StackTrie (always emitting trie nodes via the
-// writer — geth's PathDB needs them at boot to walk the trie), and
-// returns (root, sortedEntries) so the caller can write the snapshot in
-// keccak order. See the same rationale on the account-trie callback in
-// writeStateAndCollectRoot for why the OnTrieNode callback must always
-// be installed (nerolation/state-actor#42).
-//
-// For ≥ parallelKeccakThreshold slots, keccak hashing is parallelised
-// across cores.
+// buildStorageTrie hashes + sorts the slots, builds the per-account
+// storage StackTrie (always emitting trie nodes via w.PutTrieNode —
+// geth's PathDB requires them at boot), and returns (root, sortedEntries)
+// for the caller to write the snapshot in keccak order. For ≥
+// parallelKeccakThreshold slots, keccak hashing is parallelised.
 func buildStorageTrie(
 	w *Writer,
 	accountHash common.Hash,
@@ -551,21 +473,11 @@ func buildStorageTrie(
 	return root, out, nil
 }
 
-// gethStorageHashBuilder adapts go-ethereum's trie.StackTrie to the
-// streamingtrie.HashBuilder contract for spec-entity Phase 0.
-//
-// Each StackTrie node-completion callback writes the trie blob to the
-// production Pebble under TrieNodeStoragePrefix + addrHash + path —
-// the same key shape Phase 2's buildStorageTrie uses for synthetic
-// contracts. Without these writes, geth's PathDB has no way to walk
-// the storage trie at boot (eth_getProof, snapshot regeneration,
-// archive reads all fail for spec entities even though snapshot
-// flat-state rows are present).
-//
-// PutTrieNode failures are captured in err (sticky: first non-nil
-// wins) so the caller's outer error path surfaces them — aborting
-// inside the callback via log.Fatalf would bypass sorter.Close and
-// other defers.
+// gethStorageHashBuilder adapts trie.StackTrie to
+// streamingtrie.HashBuilder. The StackTrie callback persists each
+// storage-trie node under TrieNodeStoragePrefix + addrHash + path
+// (required by geth's PathDB). PutTrieNode failures are captured in
+// err (sticky) and surfaced via AddLeaf / Root.
 type gethStorageHashBuilder struct {
 	t        *trie.StackTrie
 	w        *Writer

@@ -11,12 +11,9 @@ import (
 	"github.com/nerolation/state-actor/internal/templates"
 )
 
-// TestPreAllocShimMaterializes verifies Validate() folds Config.PreAlloc
-// account headers + bytecodes into the GenesisAccounts/Code maps so
-// client writers can consume them uniformly. Storage is intentionally
-// NOT drained — it stays on c.PreAlloc and is consumed lazily by each
-// client's streaming spec-storage Phase via internal/streamingtrie
-// (bounds RAM regardless of slot count).
+// TestPreAllocShimMaterializes verifies Validate() folds PreAlloc
+// account headers + code into GenesisAccounts/Code. Storage is NOT
+// drained — it stays as iter.Seq2 on c.PreAlloc for streaming consumers.
 func TestPreAllocShimMaterializes(t *testing.T) {
 	addr := common.HexToAddress("0x000000000000000000000000000000000000aaaa")
 
@@ -47,18 +44,12 @@ func TestPreAllocShimMaterializes(t *testing.T) {
 	if got := cfg.GenesisCode[addr]; len(got) != 2 {
 		t.Errorf("shim did not materialize code: got %v", got)
 	}
-	// Storage is NOT drained into GenesisStorage anymore; the iter stays
-	// on c.PreAlloc for the per-client streaming Phase to consume.
 	if got := cfg.GenesisStorage[addr]; len(got) != 0 {
 		t.Errorf("shim should NOT drain storage; got %v entries", len(got))
 	}
-
-	// PreAlloc must be preserved (writers iterate it for streaming).
 	if len(cfg.PreAlloc) != 1 {
 		t.Errorf("Validate should preserve PreAlloc; got %d entries", len(cfg.PreAlloc))
 	}
-	// Second Validate must succeed (idempotent — same pointers, no
-	// collision).
 	if err := cfg.Validate(); err != nil {
 		t.Errorf("second Validate must succeed (idempotent): %v", err)
 	}
@@ -80,15 +71,11 @@ func TestPreAllocShimRejectsCollisionWithGenesisAccounts(t *testing.T) {
 	}
 }
 
-// TestValidateAcceptsSpecRegardlessOfStorageSize confirms the pre-
-// Validate target-size estimate was removed when storage moved to
-// streaming (internal/streamingtrie). The check is now enforced at
-// write time by each per-client writer's dirSize sampling — Validate
-// can't see slot counts without iterating the (potentially huge) lazy
-// iter, which would defeat the bounded-RAM property.
+// TestValidateAcceptsSpecRegardlessOfStorageSize confirms Validate
+// doesn't reject specs based on slot count — target-size enforcement
+// lives in each writer's dirSize sampling.
 func TestValidateAcceptsSpecRegardlessOfStorageSize(t *testing.T) {
 	addr := common.HexToAddress("0x000000000000000000000000000000000000dddd")
-	// 1000 slots — under the old 80 B/slot × 1000 = 80_000 B estimate.
 	bigStorage := make(map[common.Hash]common.Hash, 1000)
 	for i := 0; i < 1000; i++ {
 		var k common.Hash
@@ -97,7 +84,7 @@ func TestValidateAcceptsSpecRegardlessOfStorageSize(t *testing.T) {
 	}
 
 	cfg := &Config{
-		TargetSize: 1000, // way below what the old check would have rejected
+		TargetSize: 1000,
 		PreAlloc: []templates.PreAllocEntity{{
 			Address: addr,
 			Account: &types.StateAccount{Nonce: 1, Balance: uint256.NewInt(0), Root: types.EmptyRootHash, CodeHash: types.EmptyCodeHash[:]},
@@ -105,7 +92,7 @@ func TestValidateAcceptsSpecRegardlessOfStorageSize(t *testing.T) {
 		}},
 	}
 	if err := cfg.Validate(); err != nil {
-		t.Fatalf("Validate should not reject on storage size (write-time cap handles it): %v", err)
+		t.Fatalf("Validate should not reject on storage size: %v", err)
 	}
 }
 
@@ -115,7 +102,7 @@ func TestValidateAcceptsSpecUnderTargetSize(t *testing.T) {
 		common.HexToHash("0x01"): common.HexToHash("0xaa"),
 	}
 	cfg := &Config{
-		TargetSize: 1_000_000, // way above 1 slot × 80 B
+		TargetSize: 1_000_000,
 		PreAlloc: []templates.PreAllocEntity{{
 			Address: addr,
 			Account: &types.StateAccount{Nonce: 1, Balance: uint256.NewInt(0), Root: types.EmptyRootHash, CodeHash: types.EmptyCodeHash[:]},
@@ -128,16 +115,12 @@ func TestValidateAcceptsSpecUnderTargetSize(t *testing.T) {
 }
 
 func TestPreAllocShimEmpty(t *testing.T) {
-	// Empty Config — no PreAlloc, no materialized maps — must pass.
 	cfg := &Config{}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
 }
 
-// storageMap is a small test helper that wraps a map[common.Hash]common.Hash
-// in the iter.Seq2 form PreAllocEntity.Storage expects. Mirrors the
-// templates.MapToSeq helper to avoid an awkward cross-package dep.
 func storageMap(m map[common.Hash]common.Hash) iter.Seq2[common.Hash, common.Hash] {
 	if len(m) == 0 {
 		return nil

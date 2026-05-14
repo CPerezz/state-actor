@@ -10,21 +10,12 @@ import (
 	"github.com/nerolation/state-actor/internal/spec"
 )
 
-// ResolveAddress picks an address for a spec entity using three deterministic
-// modes:
+// ResolveAddress picks an address for a spec entity via:
+//  1. Explicit e.Address;
+//  2. Name-derived: keccak256(seed||name)[12:];
+//  3. Position-derived: keccak256(seed||"anon-N")[12:].
 //
-//  1. Explicit: e.Address != nil → return that.
-//  2. Name-derived: e.Address == nil, e.Name != "" → keccak256(seed||name)[12:].
-//  3. Position-derived: both empty → keccak256(seed||"anon-N")[12:] where N
-//     is the entity's 0-based position in the spec.
-//
-// All three modes are pure functions of (seed, spec). Same inputs always
-// produce the same address — critical for the cross-client state-root
-// invariant in CI.
-//
-// Note about mode 3: reordering entities in the YAML changes their derived
-// addresses (because the index changes). Modes 1 and 2 are stable across
-// reorderings. The user documentation calls this out.
+// Modes 1 and 2 are stable across YAML reorderings; mode 3 is not.
 func ResolveAddress(seed int64, e spec.Entity, index int) common.Address {
 	if e.Address != nil {
 		return e.Address.Address()

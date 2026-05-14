@@ -14,28 +14,20 @@ import (
 	iReth "github.com/nerolation/state-actor/internal/reth"
 )
 
-// WriteContracts writes all data tables for a slice of contract accounts:
-// Bytecodes (deduped), PlainAccountState, HashedAccounts, AccountChangeSets,
+// WriteContracts writes the 9 reth tables for each contract: Bytecodes
+// (deduped), PlainAccountState, HashedAccounts, AccountChangeSets,
 // AccountsHistory, PlainStorageState, HashedStorages, StorageChangeSets,
 // StoragesHistory.
 //
-// SIDE EFFECT: each contract's StateAccount is mutated to have:
-//   - StateAccount.Root = storage root (computed from contract.Storage)
-//   - StateAccount.CodeHash = bytecode hash (computed from contract.Code)
+// SIDE EFFECT: each contract's StateAccount.Root and .CodeHash are
+// mutated in place from the supplied Storage + Code. With empty Storage
+// the existing Root is preserved (the spec-storage streaming Phase sets
+// it ahead of time); a zero Root in that case is rejected.
 //
-// This makes ComputeStateRoot work correctly afterward — it RLP-encodes
-// StateAccount as-is, so Root/CodeHash must already be populated.
-//
-// blockNum is the block at which these contracts came into existence
-// (0 for genesis).
-//
-// stats (optional) accumulates AccountBytes (compact-Account encoding),
-// CodeBytes (raw bytecode length, only counted when BytecodeWriter actually
-// writes — duplicate code is skipped at the LRU/DB layer and does not
-// inflate the count), and StorageBytes (sum of PlainStorageState compact-
-// encoded entries — mirrors nethermind's value-bytes semantics). Pass nil
-// to skip accounting. Increments are applied to stats only after the MDBX
-// transaction commits; a write that rolls back leaves stats untouched.
+// stats (optional) accumulates AccountBytes, CodeBytes (deduped — only
+// counts code that actually got written), and StorageBytes (sum of
+// PlainStorageState compact-encoded entries). Increments are applied
+// only after the MDBX transaction commits.
 func WriteContracts(envs *Envs, contracts []*entitygen.Account, blockNum uint64, stats *generator.Stats) error {
 	var (
 		localAccountBytes uint64
@@ -53,16 +45,6 @@ func WriteContracts(envs *Envs, contracts []*entitygen.Account, blockNum uint64,
 				return fmt.Errorf("WriteContracts: contract %s has nil StateAccount", contract.Address.Hex())
 			}
 
-			// Step 1: compute per-contract storage root.
-			//
-			// Preserve a pre-set StateAccount.Root when Storage is empty:
-			// the streaming spec-storage Phase (streamSpecStorage) handles
-			// PreAlloc entities with large slot counts and sets Root via
-			// the canonical streaming MPT builder before the alloc handler
-			// runs. For those entities, Storage is left empty on the
-			// materialised Account so we don't double-write the storage
-			// tables here. Recomputing would clobber Root with
-			// EmptyRootHash and silently corrupt the global state trie.
 			var storageRoot common.Hash
 			if len(contract.Storage) > 0 {
 				var err error
@@ -73,20 +55,12 @@ func WriteContracts(envs *Envs, contracts []*entitygen.Account, blockNum uint64,
 			} else {
 				storageRoot = contract.StateAccount.Root
 				if storageRoot == (common.Hash{}) {
-					// Defensive: callers MUST set Root (e.g. to
-					// types.EmptyRootHash) before WriteContracts. Passing a
-					// zero-Hash through would produce a malformed state-
-					// account leaf — undecodable in besu/geth and corrupt
-					// archive RPCs in reth — silently.
 					return fmt.Errorf("WriteContracts: contract %s has empty Storage AND zero StateAccount.Root — "+
 						"caller must set Root (e.g. types.EmptyRootHash) before calling WriteContracts",
 						contract.Address.Hex())
 				}
 			}
 
-			// Step 2: write bytecode and get the code hash. `wrote` is false on
-			// dedup hits (LRU or DB) — gate the byte count so duplicate code
-			// doesn't inflate stats.CodeBytes beyond what's persisted.
 			codeHash, wrote, err := bw.Write(contract.Code)
 			if err != nil {
 				return fmt.Errorf("WriteContracts: bytecode write %s: %w", contract.Address.Hex(), err)
@@ -95,11 +69,9 @@ func WriteContracts(envs *Envs, contracts []*entitygen.Account, blockNum uint64,
 				localCodeBytes += uint64(len(contract.Code))
 			}
 
-			// Step 3: splice storage root and code hash into StateAccount.
 			contract.StateAccount.Root = storageRoot
 			contract.StateAccount.CodeHash = codeHash.Bytes()
 
-			// Step 4: encode and write the 4 account-state tables.
 			ethAccount := iReth.Account{
 				Nonce:        contract.StateAccount.Nonce,
 				Balance:      contract.StateAccount.Balance,
@@ -109,25 +81,22 @@ func WriteContracts(envs *Envs, contracts []*entitygen.Account, blockNum uint64,
 			ethAccount.EncodeCompact(&accBuf)
 			accountBytes := accBuf.Bytes()
 
-			// PlainAccountState — raw addr → Account
+			// PlainAccountState: raw addr → Account
 			if err := txn.Put(envs.MdbxDBIs["PlainAccountState"], contract.Address[:], accountBytes, 0); err != nil {
 				return fmt.Errorf("PlainAccountState %s: %w", contract.Address.Hex(), err)
 			}
-
-			// HashedAccounts — keccak(addr) → Account
+			// HashedAccounts: keccak(addr) → Account
 			if err := txn.Put(envs.MdbxDBIs["HashedAccounts"], contract.AddrHash[:], accountBytes, 0); err != nil {
 				return fmt.Errorf("HashedAccounts %s: %w", contract.Address.Hex(), err)
 			}
-
-			// AccountChangeSets — DupSort: BE_u64(block) → AccountBeforeTx{addr, nil}
+			// AccountChangeSets: DupSort BE_u64(block) → AccountBeforeTx{addr, nil}
 			abt := iReth.AccountBeforeTx{Address: contract.Address, Info: nil}
 			var abtBuf bytes.Buffer
 			abt.EncodeCompact(&abtBuf)
 			if err := txn.Put(envs.MdbxDBIs["AccountChangeSets"], blockKey[:], abtBuf.Bytes(), 0); err != nil {
 				return fmt.Errorf("AccountChangeSets %s: %w", contract.Address.Hex(), err)
 			}
-
-			// AccountsHistory — ShardedKey(addr, u64::MAX) → IntegerList([blockNum])
+			// AccountsHistory: ShardedKey(addr, u64::MAX) → IntegerList([blockNum])
 			shardedKey := iReth.ShardedKeyAddress{Address: contract.Address, BlockNumber: ^uint64(0)}
 			var keyBuf bytes.Buffer
 			shardedKey.EncodeKey(&keyBuf)
@@ -137,17 +106,11 @@ func WriteContracts(envs *Envs, contracts []*entitygen.Account, blockNum uint64,
 				return fmt.Errorf("AccountsHistory %s: %w", contract.Address.Hex(), err)
 			}
 
-			// Step 5: write the 4 storage tables via WriteContractStorage. The
-			// returned uint64 is the sum of PlainStorageState entry sizes — see
-			// WriteContractStorage's docstring for the byte semantics.
 			storBytes, err := WriteContractStorage(txn, envs.MdbxDBIs, contract, blockNum)
 			if err != nil {
 				return fmt.Errorf("WriteContracts: WriteContractStorage %s: %w", contract.Address.Hex(), err)
 			}
 
-			// All Puts for this contract succeeded — bank into the local
-			// accumulators. Transferred to the user's stats only if the
-			// enclosing Update commits.
 			localAccountBytes += uint64(len(accountBytes))
 			localStorageBytes += storBytes
 		}

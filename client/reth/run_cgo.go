@@ -19,58 +19,21 @@ import (
 	"github.com/nerolation/state-actor/internal/streamsort"
 )
 
-// defaultStreamBatchSize is the per-iteration generation batch.
-// Sized so one batch of pointers ≈ 20 MiB (100_000 × ~200 B) —
-// comfortably below the 64 MiB Pebble flush threshold so even
-// worst-case allocator slack stays in budget.
 const defaultStreamBatchSize = 100_000
 
-// runCgoNotAvailableError is nil under -tags cgo_reth. Kept as a symbol so
-// TestRunCgoStubBuildPath compiles in both build modes.
+// runCgoNotAvailableError is nil under -tags cgo_reth (kept as a symbol
+// so TestRunCgoStubBuildPath compiles in both build modes).
 var runCgoNotAvailableError error = nil
 
-// emptyMPTRoot is the canonical Merkle-Patricia trie root of the empty trie:
-// keccak256(rlp([])) = 0x56e81f17...
+// emptyMPTRoot is keccak256(rlp([])) — the canonical empty MPT root.
 var emptyMPTRoot = common.HexToHash("0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421")
 
-// RunCgo is the cgo direct-write entry point for --client=reth. Builds a
-// reth-compatible datadir end-to-end without spawning the reth binary.
+// RunCgo is the cgo direct-write entry point for --client=reth. Builds
+// a reth-compatible datadir end-to-end without spawning the reth binary.
 //
-// Phases:
-//  1. Pre-flight: DBPath required, mkdir, freshDir precondition (via OpenEnvs)
-//  2. OpenEnvs (MDBX env + RocksDB CFs)
-//  3. WriteDatabaseVersion sidecar
-//  4. Streaming synthetic-account generation. Memory bounded by one batch
-//     (~100K accounts) plus Pebble's 64 MiB write buffer, regardless of
-//     total N. Mirrors client/nethermind/entitygen_cgo.go.
-//     a. Genesis-alloc accounts (cfg.GenesisAccounts/Code/Storage). Used
-//     by the e2e suite to deploy EIP-4788/2935/7002/7251 system
-//     contracts at their canonical addresses via
-//     oracle.AddPragueSystemContracts AND by the --spec YAML path
-//     (via Config.PreAlloc materialization in Config.Validate) for
-//     user-declared entities. Dispatched by shape: plain alloc
-//     accounts (empty Code AND empty Storage) go through WriteEOAs
-//     with BytecodeHash=nil; everything else goes through
-//     WriteContracts, which splices StateAccount.Root + .CodeHash
-//     from the supplied Storage + Code before the per-account RLP
-//     is stashed in the sorter.
-//     b. Synthetic EOAs in 100K batches.
-//     c. Synthetic contracts in 100K batches. WriteContracts
-//     mutates each contract's StateAccount.Root + .CodeHash IN-PLACE
-//     before the per-account RLP is written into the sorter, so the
-//     global state root sees the correct trie/code linkage.
-//     d. Drain the Pebble sorter (ascending addrHash order) into the
-//     streaming HashBuilder for the global state root.
-//     Empty alloc (no GenesisAccounts + NumAccounts=0 + NumContracts=0)
-//     yields the canonical empty-MPT hash 0x56e81f17...
-//  5. Persist chainspec.json.
-//  6. Build genesis header with computed state root + WriteMetadata (5 tables)
-//  7. WriteStaticFiles (block-0 segment files)
-//  8. Return Stats (Close deferred)
-//
-// On error, partially written files in cfg.DBPath are NOT cleaned up; the
-// freshDir precondition will reject the next invocation until the caller
-// manually removes the directory.
+// On error, partially written files in cfg.DBPath are NOT cleaned up;
+// the freshDir precondition rejects the next invocation until the
+// caller manually removes the directory.
 func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator.Stats, error) {
 	if cfg.DBPath == "" {
 		return nil, fmt.Errorf("RunCgo: cfg.DBPath required")
@@ -82,40 +45,28 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 		return nil, fmt.Errorf("RunCgo: mkdir datadir: %w", err)
 	}
 
-	// Phase 2: open MDBX + RocksDB.
 	envs, err := OpenEnvs(cfg.DBPath, true)
 	if err != nil {
 		return nil, fmt.Errorf("RunCgo: OpenEnvs: %w", err)
 	}
 	defer envs.Close()
 
-	// Phase 3: write <dbDir>/database.version sidecar.
 	if err := WriteDatabaseVersion(filepath.Join(cfg.DBPath, "db")); err != nil {
 		return nil, fmt.Errorf("RunCgo: WriteDatabaseVersion: %w", err)
 	}
 
-	// Phase 4: streaming synthetic-account generation.
 	stateRoot := emptyMPTRoot
 	accountsCreated := 0
 	contractsCreated := 0
 	stats := &generator.Stats{}
 
-	// Pebble-backed sorter colocated with the datadir. The temp dir lives
-	// under cfg.DBPath/reth-sort-* so it shares disk budget with the (often
-	// large) datadir rather than competing with /tmp. Defer-Close runs on
-	// every return path; the explicit Close before Phase 5 frees the disk
-	// before chainspec/static-file writes (and is a no-op on the deferred
-	// call due to idempotency).
+	// Sorter is colocated with the datadir so its disk budget is shared.
 	sorter, err := streamsort.New(cfg.DBPath)
 	if err != nil {
 		return nil, fmt.Errorf("RunCgo: streamsort.New: %w", err)
 	}
 	defer sorter.Close()
 
-	// putAccountRLP encodes an account's StateAccount and writes it to the
-	// sorter keyed by AddrHash. Used by all three sub-phases below. The
-	// HashBuilder requires sorted-by-key input; Pebble's LSM auto-sorts on
-	// iterate, so we can Put in any order here.
 	putAccountRLP := func(acc *entitygen.Account) error {
 		rlpBytes, err := rlp.EncodeToBytes(acc.StateAccount)
 		if err != nil {
@@ -126,38 +77,13 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 
 	const batchSize = defaultStreamBatchSize
 
-	// Phase 4a.4: stream per-spec-entity storage via internal/streamingtrie.
-	// Each PreAlloc entity with non-nil Storage flows through a per-entity
-	// streamsort.Store: drain (slotKey, slotValue) iter → sorted iterate →
-	// write 4 storage tables + compute MPT root → splice root into
-	// cfg.GenesisAccounts[addr].Root. RAM is bounded at streamsort's
-	// memTableSize regardless of slot count, so 50 GB ERC-20 fixtures
-	// stay within budget. Phase 4a.5 (below) sees pre-set Roots and
-	// WriteContracts has been updated to preserve them when Storage is
-	// empty (which it is, post-materializePreAlloc removal of the
-	// Storage drain).
 	if err := streamSpecStorage(ctx, envs, &cfg, stats); err != nil {
 		return nil, fmt.Errorf("RunCgo: streamSpecStorage: %w", err)
 	}
 
-	// Phase 4a.5: genesis-alloc accounts (cfg.GenesisAccounts/Code/Storage).
-	// The e2e suite uses these to deploy EIP-4788/2935/7002/7251 system
-	// contracts at their canonical addresses via oracle.AddPragueSystemContracts
-	// — without them, post-Prague block processing fails system calls.
-	// Geth + besu + nethermind already weave these in; this brings reth to
-	// parity.
-	//
-	// Dispatch is by shape: plain alloc accounts (empty Code AND empty
-	// Storage — e.g. the spamoor sender, name-derived EOAs) go to
-	// WriteEOAs so reth's compact Account encoding gets BytecodeHash=nil.
-	// Routing them through WriteContracts would set BytecodeHash to a
-	// non-nil pointer (to EmptyCodeHash bytes) and reth's RPC would
-	// report eth_getCode as a contract — breaking spamoor's "sender is
-	// an EOA" pre-flight check. Contracts and EIP-7702 EOAs (with a
-	// 23-byte 0xef0100<addr> delegation marker, i.e. non-empty Code) go
-	// to WriteContracts, which splices StateAccount.Root + .CodeHash
-	// from the supplied Storage + Code so the per-account RLP-encode
-	// captures the correct global-state-trie values.
+	// Alloc dispatch by shape: plain EOAs (empty Code AND Storage) go to
+	// WriteEOAs (BytecodeHash=nil); contracts and 7702-delegating EOAs
+	// (with 23-byte 0xef0100<addr> code) go to WriteContracts.
 	if len(cfg.GenesisAccounts) > 0 {
 		allocAccounts := buildAllocAccounts(cfg)
 		var allocEOAs, allocContracts []*entitygen.Account
@@ -178,9 +104,6 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 				return nil, fmt.Errorf("RunCgo: WriteContracts(alloc): %w", err)
 			}
 		}
-		// putAccountRLP runs after both writers — WriteContracts mutates
-		// StateAccount.Root + .CodeHash in-place, WriteEOAs leaves them
-		// at template-set defaults (EmptyRootHash + EmptyCodeHash).
 		for _, acc := range allocAccounts {
 			if err := putAccountRLP(acc); err != nil {
 				return nil, fmt.Errorf("RunCgo: putAccountRLP(alloc): %w", err)
@@ -192,25 +115,10 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 	if cfg.NumAccounts > 0 || cfg.NumContracts > 0 {
 		rng := mrand.New(mrand.NewSource(cfg.Seed))
 
-		// targetReached short-circuits both batch loops below when the
-		// production datadir reaches cfg.TargetSize. Reth's writer is
-		// streaming (no Phase 1 temp DB), so each batch flushes its bytes
-		// directly to MDBX / RocksDB — per-batch dirSize sampling is the
-		// natural shape. Genesis-alloc + inject loops above are NOT capped
-		// (they're bounded inputs that must satisfy cfg.Validate, mirroring
-		// the besu/geth/nethermind convention).
-		//
-		// Note: cfg.DBPath also contains the temp Pebble sorter
-		// (reth-sort-*/), which grows with entity count but is freed in
-		// Phase 4d before chainspec/static-files writes. Including it
-		// here over-estimates current production-DB size, which is
-		// strictly safer (stops earlier rather than overshooting).
+		// dirSize sample includes the temp Pebble sorter (reth-sort-*/) —
+		// over-estimates production size, safer (stops earlier).
 		targetReached := false
 
-		// Phase 4b: synthetic EOAs in batches of batchSize. The RNG draw
-		// order matches the canonical single-shot order so state-root
-		// determinism is preserved (locked in by
-		// TestStreaming_GoldenEqualsLegacy).
 		remaining := cfg.NumAccounts
 		for remaining > 0 && !targetReached {
 			b := batchSize
@@ -242,11 +150,6 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 			}
 		}
 
-		// Phase 4c: synthetic contracts in batches of batchSize. Slot count
-		// is drawn per-contract via entitygen.GenerateSlotCount so the RNG
-		// draw sequence matches besu/nethermind/geth — same --seed →
-		// identical canonical entitygen MPT root across MPT clients
-		// (locked in by client/reth/golden_test.go).
 		if cfg.NumContracts > 0 && !targetReached {
 			codeSize := cfg.CodeSize
 			if codeSize <= 0 {
@@ -263,9 +166,8 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 					batch[i] = entitygen.GenerateContractRoll(rng, cfg.Distribution, codeSize, cfg.MinSlots, cfg.MaxSlots)
 				}
 				// WriteContracts mutates each contract's StateAccount.Root
-				// (storage trie root) and .CodeHash in-place BEFORE
-				// returning, so the per-account RLP-encode below captures
-				// the correct values for the global state trie.
+				// + .CodeHash in place; putAccountRLP below captures the
+				// updated values.
 				if err := WriteContracts(envs, batch, 0, stats); err != nil {
 					return nil, fmt.Errorf("RunCgo: WriteContracts: %w", err)
 				}
@@ -289,7 +191,6 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 		}
 	}
 
-	// Phase 4d: drain sorter (ascending addrHash) into the HashBuilder.
 	if accountsCreated+contractsCreated > 0 {
 		root, err := ComputeStateRootStreaming(sorter.Iterate)
 		if err != nil {
@@ -298,16 +199,11 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 		stateRoot = root
 	}
 
-	// Free the sorter (and its temp Pebble files) before Phase 5 so disk
-	// budget is reclaimed for chainspec.json + static-files writes.
+	// Free the sorter's temp files before the chainspec/static-files writes.
 	if err := sorter.Close(); err != nil {
 		return nil, fmt.Errorf("RunCgo: sorter.Close: %w", err)
 	}
 
-	// Phase 5a: resolve genesis + chainID, persist chainspec.json. The
-	// chainspec is now alloc-free (just config + header bits) — reth boots
-	// with --debug.skip-genesis-validation and trusts the DB-resident
-	// genesis state. File size is constant in N, no longer the OOM ceiling.
 	gen := genesis.OrDefault(cfg.Genesis)
 	chainID := gen.Config.ChainID.Int64()
 
@@ -316,24 +212,20 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 		return nil, fmt.Errorf("RunCgo: writeChainSpec: %w", err)
 	}
 
-	// Phase 5b: build genesis header (block 0) + write MDBX metadata tables.
 	header, err := buildBlock0Header(gen)
 	if err != nil {
 		return nil, fmt.Errorf("RunCgo: buildBlock0Header: %w", err)
 	}
-	// Use the computed state root (empty-MPT for no alloc, or trie root for accounts).
 	header.Root = stateRoot
 
 	if err := WriteMetadata(envs, header, uint64(chainID)); err != nil {
 		return nil, fmt.Errorf("RunCgo: WriteMetadata: %w", err)
 	}
 
-	// Phase 6: write block-0 static-files segments.
 	if err := WriteStaticFiles(cfg.DBPath, header); err != nil {
 		return nil, fmt.Errorf("RunCgo: WriteStaticFiles: %w", err)
 	}
 
-	// Phase 7: return stats (envs.Close is deferred above).
 	stats.StateRoot = stateRoot
 	stats.AccountsCreated = accountsCreated
 	stats.ContractsCreated = contractsCreated
@@ -342,22 +234,10 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 }
 
 // dirSize returns the total disk-allocated bytes used by all regular
-// files under path, recursively. Used by Phase 4b/4c's --target-size
-// sampling: we walk cfg.DBPath after each batch flush and stop
-// generation once it reaches the requested target.
-//
-// Critical detail: reth's mdbx.dat is preallocated as a sparse file
-// (mdbxGrowthStep = 4 GiB on first growth — see dbs_cgo.go). os.FileInfo.
-// Size() reports the logical size, which would trip the cap immediately
-// regardless of actual data written. Instead we read the block count
-// from syscall.Stat_t (Linux + macOS both expose it) so dirSize tracks
-// actual disk usage. Windows falls back to logical size — reth is Linux/
-// Docker-only in practice, so this is fine.
-//
-// Mirrors the helper in client/geth/state_writer.go + client/nethermind/
-// entitygen_cgo.go in shape, but uses apparent size to handle MDBX's
-// sparse preallocation (geth + nethermind use Pebble + grocksdb which
-// don't preallocate aggressively).
+// files under path. reth's mdbx.dat is sparse-preallocated (4 GiB
+// growth steps), so dirSize reads block count via syscall.Stat_t for
+// actual disk usage rather than os.FileInfo.Size() (which reports the
+// logical size). Windows falls back to logical size.
 func dirSize(path string) (uint64, error) {
 	var total uint64
 	err := filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {

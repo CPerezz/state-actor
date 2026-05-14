@@ -27,41 +27,18 @@ const (
 	erc20SlotSymbol      = 4 // string (short-string layout when ≤31 bytes)
 )
 
-// erc20FixedDecimals is the only value accepted for the `decimals`
-// parameter. OZ v5's base ERC20 hardcodes `decimals()` to return 18 from
-// a pure function; planting a different value in storage doesn't change
-// the RPC return. Users wanting non-18 tokens use the `raw` template.
+// erc20FixedDecimals is the only accepted value for the `decimals`
+// parameter. OZ v5's `decimals()` is a pure function returning 18;
+// planting a different value in storage has no effect at the RPC. Users
+// who want non-18 tokens use the `raw` template.
 const erc20FixedDecimals = 18
 
-// erc20Template handles `kind: contract, template: erc20`.
-//
-// Required parameters:
-//   - symbol (string, ≤31 bytes)
-//   - name   (string, ≤31 bytes)
-//   - decimals (int) — must equal 18 (OZ v5 base default).
-//
-// Optional parameters:
-//   - owners: list of `{address, balance}` entries. Each entry plants
-//     `_balances[address] = balance` in storage; balances are quoted
-//     strings (decimal or 0x-hex). Duplicate addresses are rejected.
-//   - allowances: list of `{owner, spender, allowance}` entries. Each
-//     entry plants `_allowances[owner][spender] = allowance`. Duplicate
-//     `(owner, spender)` pairs are rejected; an allowance owner need
-//     not have a balance entry (standard ERC-20 semantics).
-//   - total_owners: target total holder count. `total_owners - len(owners)`
-//     additional random holders are synthesized with deterministic
-//     varied balances in `[1, 10^18]` wei. Must satisfy
-//     `total_owners >= len(owners)`.
-//   - total_allowances: same shape, applied to the allowances mapping.
-//
-// `_totalSupply` is auto-summed from all planted balances (explicit +
-// synthesized random). Users cannot override it — the ERC-20
-// conservation invariant is preserved by construction.
+// erc20Template handles `kind: contract, template: erc20`. See
+// docs/SPEC.md for the parameter schema. _totalSupply is auto-summed
+// from explicit + random balances; users cannot override it.
 type erc20Template struct{}
 
-func (erc20Template) Name() string { return "erc20" }
-
-// UserVisible reports true: users set `template: erc20` in YAML.
+func (erc20Template) Name() string      { return "erc20" }
 func (erc20Template) UserVisible() bool { return true }
 
 func (erc20Template) ValidateParameters(params map[string]any) error {
@@ -76,9 +53,7 @@ func (erc20Template) ValidateParameters(params map[string]any) error {
 		}
 	}
 
-	// `holders` was renamed to `total_owners`. Catch the old key
-	// explicitly so users get a clear migration message instead of
-	// "unknown parameter".
+	// Surface the `holders` → `total_owners` rename with a migration hint.
 	if _, has := params["holders"]; has {
 		return fmt.Errorf("erc20: `holders` was renamed to `total_owners` " +
 			"(also accepts an `owners` list for granular entries). " +
@@ -92,8 +67,6 @@ func (erc20Template) ValidateParameters(params map[string]any) error {
 		return fmt.Errorf("erc20: name %q exceeds 31 bytes (OZ v5 short-string limit)", s)
 	}
 
-	// decimals must equal 18 (OZ v5 base ERC20 returns 18 from a pure
-	// function). Loud rejection beats silent ignore.
 	var dec int
 	switch d := params["decimals"].(type) {
 	case int:
@@ -109,7 +82,6 @@ func (erc20Template) ValidateParameters(params map[string]any) error {
 			erc20FixedDecimals, erc20FixedDecimals, dec)
 	}
 
-	// Reject unknown parameter keys so typos like "symbool" surface loudly.
 	for k := range params {
 		switch k {
 		case "symbol", "name", "decimals",
@@ -119,8 +91,6 @@ func (erc20Template) ValidateParameters(params map[string]any) error {
 		}
 	}
 
-	// Structural validation of the optional list parameters. Reuses the
-	// same parsers Expand uses so validation and expansion stay in sync.
 	owners, err := ParseExplicitOwners(params["owners"])
 	if err != nil {
 		return err
@@ -196,15 +166,10 @@ func (erc20Template) Expand(ctx Context, e spec.Entity) ([]PreAllocEntity, error
 	randomOwnerCount := totalOwners - len(owners)
 	randomAllowanceCount := totalAllowances - len(allowances)
 
-	// Build the explicit slot map up-front: name, symbol, explicit
-	// balances, explicit allowances. _totalSupply is added below after
-	// the random-balance sum is computed.
 	explicit := map[common.Hash]common.Hash{}
-
 	explicit[uint64SlotKey(erc20SlotName)] = packShortString(name)
 	explicit[uint64SlotKey(erc20SlotSymbol)] = packShortString(symbol)
 
-	// Auto-summed _totalSupply: explicit balances + random balances.
 	totalSupply := new(uint256.Int)
 
 	for _, o := range owners {
@@ -215,10 +180,9 @@ func (erc20Template) Expand(ctx Context, e spec.Entity) ([]PreAllocEntity, error
 		explicit[allowanceSlotKey(a.Owner, a.Spender)] = a.Amount.Bytes32()
 	}
 
-	// Sum the random-balance contribution. The random-balances iter is
-	// a pure function — we iterate it once here for the sum, and again
-	// below when composing the storage iter. Each yields the same
-	// (key, value) pairs.
+	// Sum random balances. The random iter is pure, so iterating it
+	// here for the sum and again below for the storage iter yields the
+	// same (key, value) pairs.
 	for i := 0; i < randomOwnerCount; i++ {
 		v := DeterministicRandomBalance(ctx.Seed, ctx.ResolvedAddress, i)
 		totalSupply.Add(totalSupply, new(uint256.Int).SetBytes(v[:]))
@@ -228,8 +192,6 @@ func (erc20Template) Expand(ctx Context, e spec.Entity) ([]PreAllocEntity, error
 		explicit[uint64SlotKey(erc20SlotTotalSupply)] = totalSupply.Bytes32()
 	}
 
-	// Compose the final storage iter:
-	//   explicit map -> random _balances synthesizer -> random _allowances synthesizer.
 	storage := MapToSeq(explicit)
 	if randomOwnerCount > 0 {
 		storage = Concat(storage, erc20BalancesIter(ctx.Seed, ctx.ResolvedAddress, randomOwnerCount))
@@ -238,8 +200,7 @@ func (erc20Template) Expand(ctx Context, e spec.Entity) ([]PreAllocEntity, error
 		storage = Concat(storage, erc20RandomAllowancesIter(ctx.Seed, ctx.ResolvedAddress, randomAllowanceCount))
 	}
 
-	// Nonce: honor the user-supplied value; floor at 1 per EIP-161
-	// (contracts have nonce>=1 after Spurious Dragon).
+	// Floor nonce at 1 (EIP-161: contracts have nonce ≥ 1).
 	nonce := e.Nonce
 	if nonce == 0 {
 		nonce = 1
@@ -260,23 +221,14 @@ func (erc20Template) Expand(ctx Context, e spec.Entity) ([]PreAllocEntity, error
 	}}, nil
 }
 
-// erc20BalancesIter emits a deterministic stream of synthesized
-// `_balances[holder]` storage entries for the random-fill portion of an
-// erc20 contract. The holder address is `keccak256(seed||token||index)[12:]`
-// — pure function of `(seed, tokenAddr, index)`. Balance values come from
-// DeterministicRandomBalance, also a pure function of the same inputs.
-//
-// Each slot key is computed using Solidity's mapping rule:
-//
-//	slot(_balances[h]) = keccak256(abi.encode(h, uint256(0)))
-//
-// which is keccak256(leftPad32(h) || leftPad32(0)).
-//
-// Re-iteration is safe: every call to the returned iter yields the
-// same sequence.
+// erc20BalancesIter emits synthesized `_balances[holder]` entries for
+// the random-fill portion of an erc20 contract. Holder address is
+// keccak256(seed||token||index)[12:]; balance comes from
+// DeterministicRandomBalance — both pure functions of the inputs.
+// The slot key follows Solidity's mapping rule:
+// keccak256(leftPad32(addr) || leftPad32(slot=0)).
 func erc20BalancesIter(seed int64, tokenAddr common.Address, count int) iter.Seq2[common.Hash, common.Hash] {
 	return func(yield func(common.Hash, common.Hash) bool) {
-		// Reusable buffers across iterations to avoid per-slot allocation.
 		var holderBuf [8 + common.AddressLength + 8]byte
 		binary.BigEndian.PutUint64(holderBuf[:8], uint64(seed))
 		copy(holderBuf[8:8+common.AddressLength], tokenAddr[:])
@@ -286,9 +238,6 @@ func erc20BalancesIter(seed int64, tokenAddr common.Address, count int) iter.Seq
 		for i := range count {
 			binary.BigEndian.PutUint64(holderBuf[8+common.AddressLength:], uint64(i))
 			holderHash := crypto.Keccak256(holderBuf[:])
-			// holderAddr is right-12-bytes of keccak256(...). For slot-key
-			// computation, the LEFT-padded ADDRESS lives in bytes 12..31 of
-			// the mapKey buffer's first 32 bytes.
 			copy(mapKeyBuf[12:32], holderHash[12:])
 			slotKey := crypto.Keccak256Hash(mapKeyBuf[:])
 			val := DeterministicRandomBalance(seed, tokenAddr, i)
@@ -300,18 +249,16 @@ func erc20BalancesIter(seed int64, tokenAddr common.Address, count int) iter.Seq
 }
 
 // uint64SlotKey turns a small slot index into its 32-byte big-endian
-// representation — used for top-level slots (not mappings).
+// representation (top-level slots, not mappings).
 func uint64SlotKey(slot uint64) common.Hash {
 	var h common.Hash
 	binary.BigEndian.PutUint64(h[24:32], slot)
 	return h
 }
 
-// packShortString packs a ≤31-byte string into a Solidity-format short-string
-// storage slot: [bytes left-aligned (positions 0..len-1)] [zero padding
-// (positions len..30)] [length*2 (position 31)].
-//
-// Panics for inputs > 31 bytes — ValidateParameters rejects those earlier.
+// packShortString packs a ≤31-byte string into a Solidity short-string
+// slot: [bytes 0..len-1] [zero 0..30] [length*2 at 31]. Panics on
+// over-length input — callers validate first.
 func packShortString(s string) common.Hash {
 	if len(s) > 31 {
 		panic(fmt.Sprintf("packShortString: input too long (%d bytes); callers must validate", len(s)))
@@ -321,6 +268,3 @@ func packShortString(s string) common.Hash {
 	h[31] = byte(len(s) * 2)
 	return h
 }
-
-// ERC20RuntimeBytecode is defined in erc20_bytecode.go — it embeds the
-// vendored OpenZeppelin v5.6.1 ERC20 deployed runtime bytecode.

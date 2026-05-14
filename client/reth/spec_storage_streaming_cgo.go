@@ -17,29 +17,13 @@ import (
 	"github.com/nerolation/state-actor/internal/streamingtrie"
 )
 
-// streamSpecStorage drains every PreAlloc entity's Storage iter through
-// streamingtrie.StorageRoot — bounded RAM regardless of slot count.
-// For each entity with non-empty storage it:
+// streamSpecStorage streams each PreAlloc entity's Storage iter into
+// the four reth storage tables (PlainStorageState, HashedStorages,
+// StorageChangeSets, StoragesHistory), computes the storage MPT root,
+// and splices it into cfg.GenesisAccounts[addr].Root so the subsequent
+// alloc handler encodes the correct account leaf.
 //
-//  1. Writes the per-slot rows across the four storage tables
-//     (PlainStorageState, HashedStorages, StorageChangeSets,
-//     StoragesHistory) via the Sink, in sorted-by-keccak(keyHash) order.
-//
-//  2. Computes the canonical storage MPT root.
-//
-//  3. Splices that root into cfg.GenesisAccounts[entity.Address].Root
-//     so the subsequent Phase 4a.5 alloc handler sees the correct value.
-//
-// This runs BEFORE Phase 4a.5. The alloc handler's `WriteContracts`
-// has been updated to preserve `Root` when `len(Storage) == 0`, so the
-// pre-set root carries through to the account leaf and the global
-// state trie.
-//
-// Stats are accumulated in a local variable and transferred to the
-// caller's *generator.Stats only after Mdbx.Update commits cleanly —
-// mirroring WriteContracts. A rolled-back commit therefore leaves
-// stats untouched (no phantom byte counts for writes that never
-// landed).
+// stats.StorageBytes is updated only after the MDBX transaction commits.
 func streamSpecStorage(ctx context.Context, envs *Envs, cfg *generator.Config, stats *generator.Stats) error {
 	if len(cfg.PreAlloc) == 0 {
 		return nil
@@ -61,12 +45,9 @@ func streamSpecStorage(ctx context.Context, envs *Envs, cfg *generator.Config, s
 			blockKey.EncodeKey(&blockKeyBuf)
 			blockKeyBytes := blockKeyBuf.Bytes()
 
-			// Sink writes the 4 storage tables per slot, in keccak-sorted
-			// order. Each call is exactly one slot.
 			sink := func(keyHash, rawKey, value common.Hash) error {
 				slotValueU256 := uint256.NewInt(0).SetBytes(value[:])
 
-				// 1. PlainStorageState: addr → StorageEntry{rawKey, value}
 				plainEntry := iReth.StorageEntry{Key: rawKey, Value: slotValueU256}
 				var plainBuf bytes.Buffer
 				plainEntry.EncodeCompact(&plainBuf)
@@ -75,7 +56,6 @@ func streamSpecStorage(ctx context.Context, envs *Envs, cfg *generator.Config, s
 					return fmt.Errorf("PlainStorageState %s slot %s: %w", addr.Hex(), rawKey.Hex(), err)
 				}
 
-				// 2. HashedStorages: keccak(addr) → StorageEntry{keyHash, value}
 				hashedEntry := iReth.StorageEntry{Key: keyHash, Value: slotValueU256}
 				var hashedBuf bytes.Buffer
 				hashedEntry.EncodeCompact(&hashedBuf)
@@ -83,7 +63,6 @@ func streamSpecStorage(ctx context.Context, envs *Envs, cfg *generator.Config, s
 					return fmt.Errorf("HashedStorages %s slot %s: %w", addrHash.Hex(), rawKey.Hex(), err)
 				}
 
-				// 3. StorageChangeSets: BlockNumberAddress → StorageEntry{rawKey, 0}
 				changeEntry := iReth.StorageEntry{Key: rawKey, Value: uint256.NewInt(0)}
 				var changeBuf bytes.Buffer
 				changeEntry.EncodeCompact(&changeBuf)
@@ -91,7 +70,6 @@ func streamSpecStorage(ctx context.Context, envs *Envs, cfg *generator.Config, s
 					return fmt.Errorf("StorageChangeSets %s slot %s: %w", addr.Hex(), rawKey.Hex(), err)
 				}
 
-				// 4. StoragesHistory: StorageShardedKey{addr, rawKey, MAX} → IntegerList([0])
 				ssk := iReth.StorageShardedKey{
 					Address:     addr,
 					StorageKey:  rawKey,
@@ -113,10 +91,6 @@ func streamSpecStorage(ctx context.Context, envs *Envs, cfg *generator.Config, s
 			if err != nil {
 				return fmt.Errorf("reth: stream spec storage[%d] %s: %w", i, addr.Hex(), err)
 			}
-
-			// Splice the computed root into the materialized Account so the
-			// subsequent Phase 4a.5 alloc handler writes the correct account
-			// leaf into the global state trie.
 			if acc, ok := cfg.GenesisAccounts[addr]; ok && acc != nil {
 				acc.Root = root
 			}
@@ -133,9 +107,7 @@ func streamSpecStorage(ctx context.Context, envs *Envs, cfg *generator.Config, s
 	return nil
 }
 
-// rethStorageHashBuilder adapts iReth.HashBuilder to the
-// streamingtrie.HashBuilder contract: AddLeaf(keyHash, valueRLP) →
-// unpack keyHash to nibbles, then call the underlying builder.
+// rethStorageHashBuilder adapts iReth.HashBuilder to streamingtrie.HashBuilder.
 type rethStorageHashBuilder struct {
 	hb *iReth.HashBuilder
 }
@@ -143,7 +115,7 @@ type rethStorageHashBuilder struct {
 func newRethStorageHashBuilder() *rethStorageHashBuilder {
 	return &rethStorageHashBuilder{
 		hb: iReth.NewHashBuilder(func(_ iReth.StoredNibbles, _ iReth.BranchNodeCompact) error {
-			return nil // storage-trie branch nodes aren't persisted at genesis
+			return nil
 		}),
 	}
 }
