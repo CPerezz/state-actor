@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/erigontech/mdbx-go/mdbx"
+	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/nerolation/state-actor/generator"
 	"github.com/nerolation/state-actor/internal/entitygen"
@@ -53,9 +54,24 @@ func WriteContracts(envs *Envs, contracts []*entitygen.Account, blockNum uint64,
 			}
 
 			// Step 1: compute per-contract storage root.
-			storageRoot, err := computeStorageRoot(contract.Storage)
-			if err != nil {
-				return fmt.Errorf("WriteContracts: computeStorageRoot %s: %w", contract.Address.Hex(), err)
+			//
+			// Preserve a pre-set StateAccount.Root when Storage is empty:
+			// the streaming spec-storage Phase (streamSpecStorage) handles
+			// PreAlloc entities with large slot counts and sets Root via
+			// the canonical streaming MPT builder before the alloc handler
+			// runs. For those entities, Storage is left empty on the
+			// materialised Account so we don't double-write the storage
+			// tables here. Recomputing would clobber Root with
+			// EmptyRootHash and silently corrupt the global state trie.
+			var storageRoot common.Hash
+			if len(contract.Storage) > 0 {
+				var err error
+				storageRoot, err = computeStorageRoot(contract.Storage)
+				if err != nil {
+					return fmt.Errorf("WriteContracts: computeStorageRoot %s: %w", contract.Address.Hex(), err)
+				}
+			} else {
+				storageRoot = contract.StateAccount.Root
 			}
 
 			// Step 2: write bytecode and get the code hash. `wrote` is false on
