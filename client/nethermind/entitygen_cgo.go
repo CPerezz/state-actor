@@ -26,45 +26,23 @@ import (
 	"github.com/nerolation/state-actor/internal/streamsort"
 )
 
-// writeSyntheticAccounts generates --accounts EOAs and --contracts contracts
-// via entitygen, persists their state to the State / Code DBs, and returns
-// the computed state root.
+// writeSyntheticAccounts populates the State + Code DBs from synthetic
+// EOAs/contracts, genesis-alloc entries, and spec-PreAlloc entities,
+// and returns the computed state root.
 //
-// Pipeline:
+// Phase 0 streams each spec-PreAlloc entity's storage into the builder
+// (BeginStorage→AddStorageSlot→FinalizeStorageRoot) and splices the
+// returned root into cfg.GenesisAccounts[addr].Root.
 //
-//	Phase 1 (random-order generation):
-//	  For each EOA / contract:
-//	   - Generate via entitygen (deterministic — RNG sequence pinned by
-//	     internal/entitygen golden tests).
-//	   - Contracts with storage: drive Builder.AddStorageSlot per slot,
-//	     then FinalizeStorageRoot. The builder's storage sink writes
-//	     trie nodes to the State DB at HalfPath storage keys during these
-//	     calls; the returned root is set on the contract's StateAccount.
-//	   - Contract code goes to the Code DB at keccak(code).
-//	   - The StateAccount (compact, ~80B) is written to a temp Pebble DB
-//	     keyed by addrHash. Pebble auto-sorts on read.
+// Phase 1 generates entitygen output, drives per-contract storage tries
+// against the State DB at HalfPath storage keys, and queues
+// (addrHash → StateAccount blob) into a streamsort.Store.
 //
-//	Phase 2 (addrHash-sorted state-trie build):
-//	  Iterate the temp Pebble DB:
-//	   - Decode the stashed StateAccount.
-//	   - Encode it as Nethermind RLP via internal/neth/rlp.EncodeAccount.
-//	   - Call Builder.AddAccount(addrHash, accountRLP). The builder's
-//	     account sink writes trie nodes to the State DB at HalfPath state
-//	     keys. After all accounts: FinalizeStateRoot returns the root.
+// Phase 2 iterates the streamsort.Store in addrHash order, decodes the
+// stashed StateAccount, encodes Nethermind RLP, and drives
+// Builder.AddAccount. FinalizeStateRoot returns the final root.
 //
-// Memory: O(max_slots_per_contract). Total entity count is bounded only by
-// the temp Pebble DB's disk space, which streams to /tmp.
-//
-// genesisAccounts/genesisCodes carry --genesis alloc entries: they go into
-// the same sorted account trie so the resulting state root incorporates
-// both synthetic and explicitly-named accounts.
-//
-// stats (optional) accumulates AccountBytes (per-entity RLP-encoded
-// StateAccount length), CodeBytes (raw bytecode length per contract), and
-// StorageBytes (per-slot trimmed-RLP storage value length). Pass nil to
-// skip accounting. Mirrors the reth/besu writers' "writer-emitted bytes"
-// semantics — values differ across clients because each writer encodes
-// state in its own on-disk format.
+// Memory: O(max slots per contract).
 func writeSyntheticAccounts(
 	ctx context.Context,
 	dbs *nethDBs,
@@ -87,24 +65,6 @@ func writeSyntheticAccounts(
 	codeWO := grocksdb.NewDefaultWriteOptions()
 	defer codeWO.Destroy()
 
-	// Spec-entity storage streaming. Each PreAlloc entity with non-nil
-	// Storage flows through a per-entity streamsort.Store → keccak-sorted
-	// iterate → nethermind builder.AddStorageSlot. Bounded RAM regardless
-	// of slot count, so 50 GB ERC-20 fixtures stay within budget.
-	//
-	// Order note: nethermind's Builder tracks "current account" via
-	// FinalizeStorageRoot calls between AddStorageSlot groups. The
-	// existing genesis-alloc loop below runs AddStorageSlot+Finalize in
-	// random map-iteration order too, then queues AddAccount via the
-	// temp DB sorter; the builder accepts this pattern (existing tests
-	// cover it). The new streaming Phase preserves it: per-entity Add
-	// Storage+Finalize cycle, then later AddAccount in addrHash order.
-	//
-	// After streaming sets the per-entity storage root we splice it into
-	// cfg.GenesisAccounts[addr].Root, so the genesis-alloc loop below
-	// encodes the account RLP with the correct Root (its own storage
-	// block is a no-op because materializePreAlloc no longer fills
-	// cfg.GenesisStorage for spec entities).
 	for i, pe := range cfg.PreAlloc {
 		if pe.Storage == nil {
 			continue
@@ -118,10 +78,7 @@ func writeSyntheticAccounts(
 		hb := &nethermindStorageHashBuilder{builder: builder, ah: ah}
 		var entityStorageBytes uint64
 		statSink := func(_, _, value common.Hash) error {
-			// RLP-of-trimmed-value: 1 prefix byte + len(trimmed). Matches
-			// the per-slot byte tally the genesis-alloc loop performs below
-			// for non-streaming slots, so reported StorageBytes is uniform
-			// across spec + alloc + synthetic paths.
+			// RLP-of-trimmed-value byte count (1 prefix + len(trimmed)).
 			v := value[:]
 			for len(v) > 0 && v[0] == 0 {
 				v = v[1:]
@@ -224,34 +181,18 @@ func writeSyntheticAccounts(
 		}
 	}
 
-	// Synthetic generation. Single math/rand stream — order EOAs → contracts
-	// matches the geth path's RNG draws so the state-root determinism story
-	// stays consistent across clients (modulo encoding-format differences,
-	// which the differential oracle catches).
 	rng := mrand.New(mrand.NewSource(cfg.Seed))
 
-	// targetReached short-circuits both Phase 1 loops AND Phase 2 below
-	// when the production datadir reaches cfg.TargetSize. Nethermind's
-	// Phase 1 is hybrid: account stashing goes to the temp Pebble DB, but
-	// contract storage tries write to the production State DB via
-	// builder.AddStorageSlot (line 211 below). So the bulk of production-
-	// DB growth happens inside the contract loop here — sampling dirSize
-	// only in Phase 2 (like geth does) would miss it entirely. Pattern
-	// mirrors reth's streaming per-batch dirSize check.
-	//
-	// EOAs go straight to the temp Pebble (no production DB write), so
-	// the sample fires once per EOA loop completion rather than per
-	// entity — minimizes filesystem walks for the cheap case.
+	// Phase 1 is hybrid: account stashing goes to the temp Pebble, but
+	// contract storage tries write directly to the State DB — so dirSize
+	// sampling must happen inside the contract loop, not just Phase 2.
 	targetReached := false
 	checkProductionSize := func() (uint64, bool) {
 		if cfg.TargetSize == 0 {
 			return 0, false
 		}
 		if err := sink.flush(); err != nil {
-			// flush failures are caught + surfaced when sink.close() is
-			// called at the end of the function; silently skipping the
-			// sample here is acceptable because the next iteration will
-			// retry. Logging would spam.
+			// Surfaced via sink.close() at function end; retry next sample.
 			return 0, false
 		}
 		size, err := dirSize(cfg.DBPath)
@@ -280,19 +221,12 @@ func writeSyntheticAccounts(
 		codeSize = 1024
 	}
 
-	// contractSampleEvery picks the cadence of Phase 1 dirSize sampling.
-	// At cfg.TargetSize=200 MiB with the canonical e2e config (5-50 slots
-	// per contract, ~100B per slot of trie overhead), one batch of 100
-	// contracts adds roughly 1-5 MiB of State DB nodes — fine-grained
-	// enough to land within ±20% tolerance, coarse enough that filesystem
-	// walks don't dominate.
 	const contractSampleEvery = 100
 
 	for i := 0; i < cfg.NumContracts && !targetReached; i++ {
 		contract := entitygen.GenerateContractRoll(rng, cfg.Distribution, codeSize, cfg.MinSlots, cfg.MaxSlots)
 		numSlots := len(contract.Storage)
 
-		// Write code first — keccak(code) goes into the State leaf below.
 		if err := dbs.code.Put(codeWO, contract.CodeHash[:], contract.Code); err != nil {
 			return common.Hash{}, fmt.Errorf("write contract code: %w", err)
 		}
@@ -300,9 +234,8 @@ func writeSyntheticAccounts(
 			stats.CodeBytes += uint64(len(contract.Code))
 		}
 
-		// Storage trie. AddStorageSlot expects slotKeyHash-ascending order.
-		// entitygen.GenerateContract sorts by raw Key, but the trie indexes
-		// by keccak(Key) — so we re-hash and re-sort here.
+		// AddStorageSlot requires slotKeyHash-ascending order; re-hash
+		// and re-sort since entitygen sorted by raw Key.
 		if numSlots > 0 {
 			slots := make([]hashedSlot, len(contract.Storage))
 			for j, s := range contract.Storage {
@@ -321,8 +254,6 @@ func writeSyntheticAccounts(
 					return common.Hash{}, fmt.Errorf("encode slot: %w", err)
 				}
 				if valueRLP == nil {
-					// entitygen bumps zero values to 0x..01, so a nil here
-					// is defensive only.
 					continue
 				}
 				if err := builder.AddStorageSlot([32]byte(contract.AddrHash), [32]byte(s.keyHash), valueRLP); err != nil {
@@ -349,11 +280,6 @@ func writeSyntheticAccounts(
 		if stats != nil {
 			stats.AccountBytes += uint64(len(data))
 		}
-		// Every contractSampleEvery contracts, flush the production
-		// State DB sink and walk cfg.DBPath. Stop the loop once the
-		// directory reaches cfg.TargetSize — Phase 2 below adds only
-		// the account-trie nodes on top of what we've already written,
-		// so landing slightly under target here leaves headroom.
 		if (i+1)%contractSampleEvery == 0 {
 			if size, reached := checkProductionSize(); reached {
 				if cfg.Verbose {
@@ -365,12 +291,6 @@ func writeSyntheticAccounts(
 		}
 	}
 
-	// Phase 2: addrHash-sorted iteration → AddAccount. Account-trie nodes
-	// get added to the production State DB here; storage-trie + code
-	// already landed in Phase 1, so Phase 2 only contributes a smaller
-	// delta. cfg.TargetSize already triggered the stop in Phase 1 if we
-	// were over budget — Phase 2 just finalizes the trie from whatever
-	// was emitted before the stop.
 	if err := sorter.Iterate(func(key, value []byte) error {
 		var ah [32]byte
 		copy(ah[:], key)
@@ -396,9 +316,8 @@ func writeSyntheticAccounts(
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("finalize state root: %w", err)
 	}
-	// Flush the state-trie WriteBatch before returning so the genesis-block
-	// writer (which closes the State DB shortly afterward) sees a coherent
-	// view, and so failures here surface synchronously.
+	// Flush before return so the genesis-block writer sees a coherent
+	// State DB and so failures surface synchronously.
 	if err := sink.close(); err != nil {
 		return common.Hash{}, fmt.Errorf("flush state writes: %w", err)
 	}
@@ -419,23 +338,13 @@ func encodeStorageValueNeth(value common.Hash) ([]byte, error) {
 	return gethrlp.EncodeToBytes(v)
 }
 
-// hashedSlot pairs a storage slot's keccak-hashed key with its value, used
-// as the sort key when feeding slots into the storage-trie StackTrie.
 type hashedSlot struct {
 	keyHash common.Hash
 	value   common.Hash
 }
 
-// dirSize returns the total bytes used by all regular files under path,
-// recursively. Used by Phase 1's --target-size sampling: we walk the
-// nethermind chaindata directory (which contains all 7 RocksDB subdirs
-// plus the chainspec) after each contract-batch sink flush and stop the
-// contract loop once it reaches the requested target. (Phase 2 only adds
-// the account-trie nodes on top of what Phase 1 already wrote, so Phase 1
-// is where the size budget is actually enforced.) Returns 0 + nil if path
-// doesn't exist yet (rare at this point in the writer, but defensive).
-// Mirrors the helper in client/geth/state_writer.go (intentionally
-// duplicated per-client — matches the existing project convention).
+// dirSize returns the total bytes used by all regular files under path.
+// Returns 0 + nil if path doesn't exist yet.
 func dirSize(path string) (uint64, error) {
 	var total uint64
 	err := filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
@@ -453,16 +362,10 @@ func dirSize(path string) (uint64, error) {
 	return total, err
 }
 
-// nethermindStorageHashBuilder adapts the nethermind Builder to the
-// streamingtrie.HashBuilder contract.
-//
-// AddLeaf calls builder.AddStorageSlot, which does BOTH the per-slot
-// Storage CF row write AND the in-memory storage-trie advance. So the
-// streamingtrie helper's Sink slot is left nil for nethermind — the
-// builder is the single point of truth.
-//
-// Root calls builder.FinalizeStorageRoot, which finalises the trie for
-// the bound addrHash and returns the storage root.
+// nethermindStorageHashBuilder adapts nethtrie.Builder to
+// streamingtrie.HashBuilder. AddStorageSlot writes both the per-slot
+// Storage CF row and advances the storage trie, so the streamingtrie
+// Sink slot is left nil for nethermind.
 type nethermindStorageHashBuilder struct {
 	builder *nethtrie.Builder
 	ah      [32]byte

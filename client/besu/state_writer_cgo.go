@@ -23,16 +23,14 @@ import (
 	"github.com/nerolation/state-actor/internal/streamsort"
 )
 
-// writeStateAndCollectRoot drives the two-phase streaming pipeline.
+// writeStateAndCollectRoot drives the two-phase streaming pipeline:
+// Phase 0 streams spec-PreAlloc storage into Bonsai per-account storage
+// tries and flat-state. Phase 1 streams synthetic + genesis-alloc
+// entities into a streamsort.Store keyed by addrHash. Phase 2 iterates
+// sorted, builds per-account storage tries, writes flat state and
+// code, and feeds the outer account trie.
 //
-// Phase 1 generates entities via a single-goroutine RNG (math/rand.Rand is
-// not thread-safe) and writes (addrHash → entityBlob) to a temp Pebble DB,
-// which auto-sorts by key. Phase 2 iterates the sorted DB, builds per-account
-// storage tries, writes flat state and code, and feeds (addrHash, accountRLP)
-// into the account trie builder. SaveWorldState is invoked here at the end.
-//
-// Memory bound: O(max storage slots per single contract). The full account
-// set never lives in RAM at once.
+// Memory bound: O(max storage slots in any single contract).
 func writeStateAndCollectRoot(
 	ctx context.Context,
 	cfg generator.Config,
@@ -41,28 +39,17 @@ func writeStateAndCollectRoot(
 ) (common.Hash, []byte, *generator.Stats, error) {
 	stats := &generator.Stats{}
 
-	// The account-trie builder is created up-front so the spec-storage
-	// streaming Phase below (Phase 0) can drive per-account BeginStorage
-	// sub-builders before Phase 1 even queues the account leaves.
+	// builder is created up-front so Phase 0 can drive per-account
+	// BeginStorage sub-builders before Phase 1 queues account leaves.
 	builder := besutrie.New(sink)
 
-	// Reverse map for Phase 2: addrHash → original Address, so we can
-	// look up cfg.GenesisAccounts[addr].Root (set by the streaming Phase
-	// 0) when encoding spec-entity account leaves.
+	// hashToAddr lets Phase 2 read cfg.GenesisAccounts[addr].Root (set
+	// by Phase 0) when encoding spec-entity account leaves.
 	hashToAddr := make(map[common.Hash]common.Address, len(cfg.GenesisAccounts))
 	for addr := range cfg.GenesisAccounts {
 		hashToAddr[crypto.Keccak256Hash(addr[:])] = addr
 	}
 
-	// --- Phase 0: stream per-spec-entity storage. ---
-	//
-	// For each PreAlloc entity with non-nil Storage, drain the iter
-	// through streamingtrie.StorageRoot: the HashBuilder wraps a
-	// per-account BeginStorage→AddSlot→Commit cycle on the besu builder
-	// (writes Bonsai storage-trie nodes via sink), and the Sink writes
-	// the Bonsai flat-state slot row via sink.PutFlatStorage. The
-	// returned root is spliced into cfg.GenesisAccounts[addr].Root so
-	// Phase 2 picks it up via hashToAddr.
 	for i, pe := range cfg.PreAlloc {
 		if pe.Storage == nil {
 			continue
@@ -90,8 +77,6 @@ func writeStateAndCollectRoot(
 		stats.StorageBytes += entityStorageBytes
 	}
 
-	// --- Phase 1: stream entities to a shared streamsort.Store. ---
-
 	sorter, err := streamsort.New("")
 	if err != nil {
 		return common.Hash{}, nil, nil, fmt.Errorf("besu: streamsort.New: %w", err)
@@ -100,10 +85,8 @@ func writeStateAndCollectRoot(
 
 	rng := mrand.New(mrand.NewSource(int64(cfg.Seed)))
 
-	// Phase 1 target-size cap. Tracks raw entity bytes (32B addrHash key + blob)
-	// and stops emission once cfg.TargetSize is reached. Over-estimates the
-	// final Bonsai DB size (no trie-node overhead) but lands slightly under
-	// target — preferred over going over.
+	// Phase 1 target-size: tracks raw entity bytes (over-estimates the
+	// final Bonsai DB size, lands slightly under target).
 	totalRawBytes := uint64(0)
 	targetReached := false
 	checkTarget := func(blobLen int) bool {
@@ -134,13 +117,6 @@ func writeStateAndCollectRoot(
 		}
 	}
 
-	// Genesis-alloc accounts (cfg.GenesisAccounts/GenesisCode/GenesisStorage):
-	// the e2e test path uses these to deploy EIP-4788/7002/7251/2935 system
-	// contracts at their canonical addresses (otherwise besu's
-	// CancunPreExecutionProcessor + PraguePreExecutionProcessor reject every
-	// block with "Invalid system call address"). The --spec YAML path also
-	// flows here via Config.Validate's PreAlloc materialization. Geth +
-	// nethermind already read these fields in their writers; besu mirrors.
 	seenAlloc := make(map[common.Address]struct{}, len(cfg.GenesisAccounts))
 	for addr, acc := range cfg.GenesisAccounts {
 		if err := ctx.Err(); err != nil {
@@ -175,9 +151,6 @@ func writeStateAndCollectRoot(
 		if err := ctx.Err(); err != nil {
 			return common.Hash{}, nil, nil, err
 		}
-		// Canonical (slot-count, contract) draw order — single source of
-		// truth in entitygen so every writer + every reproduction-side
-		// test stays RNG-aligned.
 		contract := entitygen.GenerateContractRoll(rng, cfg.Distribution, codeSize, cfg.MinSlots, cfg.MaxSlots)
 		slotMap := make(map[common.Hash]common.Hash, len(contract.Storage))
 		for _, s := range contract.Storage {
@@ -194,9 +167,6 @@ func writeStateAndCollectRoot(
 	}
 
 	// --- Phase 2: iterate sorted, drive Builder + flat-state writes. ---
-	// `builder` was created up-front (line ~46) so Phase 0 could pre-
-	// populate per-account storage tries for spec entities.
-
 	if err := sorter.Iterate(func(key, value []byte) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -205,11 +175,8 @@ func writeStateAndCollectRoot(
 		copy(addrHash[:], key)
 		entity := decodeEntity(value)
 
-		// Storage trie + flat slots + code.
+		// Phase 0 may have set Root on the spec entity already.
 		storageRoot := besu.EmptyTrieNodeHash
-		// If Phase 0 streamed storage for this address, use the
-		// pre-computed root from cfg.GenesisAccounts. Otherwise
-		// compute from entity.slots below.
 		if specAddr, ok := hashToAddr[addrHash]; ok {
 			if acc := cfg.GenesisAccounts[specAddr]; acc != nil &&
 				acc.Root != (common.Hash{}) && acc.Root != besu.EmptyTrieNodeHash {
@@ -220,7 +187,7 @@ func writeStateAndCollectRoot(
 		if entity.kind == entityContract {
 			if len(entity.slots) > 0 {
 				sb := builder.BeginStorage(addrHash)
-				// Sort slots by slotHash (storage trie also requires sorted insert).
+				// Storage trie requires sorted-by-slotHash insertion.
 				type kv struct {
 					slotHash common.Hash
 					value    common.Hash
@@ -236,14 +203,9 @@ func writeStateAndCollectRoot(
 					return kvs[i].slotHash.Big().Cmp(kvs[j].slotHash.Big()) < 0
 				})
 				for _, e := range kvs {
-					// Trie and flat-db use DIFFERENT encodings for the same
-					// slot value (BonsaiWorldState.java:182-183):
-					//   trie  → encodeTrieValue = RLP(trim(value))    (≤33 bytes)
-					//   flat  → raw trim(value)                       (≤32 bytes)
-					// Flat-db reads go through UInt256.fromBytes which
-					// rejects > 32 bytes, so writing the RLP-wrapped form
-					// to flat fatals at first eth_getStorageAt:
-					//   "Expected at most 32 bytes but got 33"
+					// Trie value: RLP(trim(value)) (≤33 B).
+					// Flat value: raw trim(value) (≤32 B; UInt256.fromBytes
+					// rejects RLP-wrapped values).
 					valueTrieRLP := besurlp.EncodeStorageValue(e.value)
 					valueFlat := besurlp.TrimStorageValue(e.value)
 					if err := sb.AddSlot(e.slotHash, valueTrieRLP); err != nil {
@@ -292,7 +254,6 @@ func writeStateAndCollectRoot(
 		return common.Hash{}, nil, nil, err
 	}
 
-	// Commit the account trie. NodeSink emits remaining trie nodes.
 	rootHash, rootRLP, err := builder.Commit()
 	if err != nil {
 		return common.Hash{}, nil, nil, fmt.Errorf("besu: trie commit: %w", err)
@@ -301,8 +262,6 @@ func writeStateAndCollectRoot(
 	stats.TotalBytes = stats.AccountBytes + stats.StorageBytes + stats.CodeBytes
 	return rootHash, rootRLP, stats, nil
 }
-
-// --- Entity types and encoding ---
 
 type entityKind byte
 
@@ -319,17 +278,12 @@ type entity struct {
 	slots   map[common.Hash]common.Hash
 }
 
-// --- Entity blob serialization for temp Pebble ---
+// Entity blob format:
 //
-// Format (single-byte kind tag + fields):
-//
-//   EOA:
-//     [0x01] [nonce u64 BE] [balance_len u8] [balance bytes...]
-//
-//   Contract:
-//     [0x02] [nonce u64 BE] [balance_len u8] [balance bytes...]
-//        [code_len u32 BE] [code bytes...]
-//        [slot_count u32 BE] [slot_count × ([slot_key 32B] [slot_value 32B])]
+//   EOA:      [0x01] [nonce u64 BE] [balance_len u8] [balance bytes]
+//   Contract: [0x02] [nonce u64 BE] [balance_len u8] [balance bytes]
+//             [code_len u32 BE] [code bytes]
+//             [slot_count u32 BE] [slot_count × (32B key, 32B value)]
 
 func encodeEntityEOA(nonce uint64, balance *uint256.Int) []byte {
 	balBytes := balance.ToBig().Bytes() // minimal big-endian
@@ -401,17 +355,9 @@ func decodeEntity(blob []byte) entity {
 	return e
 }
 
-// besuStorageHashBuilder adapts a per-account besutrie.StorageBuilder
-// to the streamingtrie.HashBuilder contract.
-//
-// AddLeaf calls sb.AddSlot with the streamingtrie-encoded value (trim
-// leading zeros + RLP, matching besu's PathBasedWorldView.encodeTrieValue
-// exactly). The Sink slot of streamingtrie is used separately by the
-// per-entity adapter to write the flat-state row (raw trimmed bytes,
-// per BonsaiWorldState.java:182 putStorageValueBySlotHash).
-//
-// Root calls sb.Commit which finalises the storage trie + emits non-
-// inline nodes via the bound NodeSink.
+// besuStorageHashBuilder adapts besutrie.StorageBuilder to
+// streamingtrie.HashBuilder. Root calls sb.Commit, finalising the
+// storage trie and emitting non-inline nodes via the bound NodeSink.
 type besuStorageHashBuilder struct {
 	sb *besutrie.StorageBuilder
 }

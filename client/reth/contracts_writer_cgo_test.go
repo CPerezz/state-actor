@@ -137,12 +137,9 @@ func TestWriteContractsDedupesCodeBytes(t *testing.T) {
 	}
 }
 
-// TestWriteContractsRejectsZeroRoot is the C3 regression guard. With
-// empty Storage, WriteContracts now preserves StateAccount.Root (added
-// for the streamSpecStorage Phase 0 hand-off). Passing a zero-Hash
-// Root through would produce a malformed state-account leaf —
-// undecodable in besu/geth and corrupt archive RPCs in reth — silently.
-// Reject explicitly so the bug surfaces at the caller.
+// TestWriteContractsRejectsZeroRoot pins that WriteContracts rejects a
+// contract with empty Storage and zero StateAccount.Root — passing
+// such a contract through would produce a malformed state-account leaf.
 func TestWriteContractsRejectsZeroRoot(t *testing.T) {
 	tmp := t.TempDir()
 	envs, err := OpenEnvs(tmp, true)
@@ -158,10 +155,10 @@ func TestWriteContractsRejectsZeroRoot(t *testing.T) {
 		StateAccount: &types.StateAccount{
 			Nonce:    1,
 			Balance:  uint256.NewInt(0),
-			Root:     common.Hash{}, // zero-Hash — the bug condition
+			Root:     common.Hash{},
 			CodeHash: types.EmptyCodeHash[:],
 		},
-		Storage: nil, // empty Storage triggers the preserve-Root branch
+		Storage: nil,
 		Code:    nil,
 	}
 

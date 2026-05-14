@@ -6,19 +6,14 @@ import (
 	"sync"
 )
 
-// registry is the process-level template lookup table. Populated by package
-// init() in each template-implementing file (raw.go, eoa.go, erc20.go, ...).
-//
-// The mutex is defensive — Register is only called from init(), which is
-// single-threaded, but exposing Register publicly means we may be called from
-// test setup or future plugins.
+// Process-level template lookup table populated by package init() in
+// each template-implementing file.
 var (
 	registryMu sync.RWMutex
 	registry   = make(map[string]Template)
 )
 
-// Register adds a template to the registry. Panics on duplicate name — that
-// always indicates a programmer bug, never a runtime condition.
+// Register adds a template to the registry. Panics on duplicate name.
 func Register(t Template) {
 	registryMu.Lock()
 	defer registryMu.Unlock()
@@ -37,9 +32,8 @@ func Lookup(name string) (Template, bool) {
 	return t, ok
 }
 
-// Names returns every registered template name, sorted. Includes
-// internal templates (raw, eoa) — used for diagnostics and tests.
-// For the user-facing validator, use UserVisibleNames instead.
+// Names returns every registered template name, sorted (includes
+// internal templates). Use UserVisibleNames for the user-facing set.
 func Names() []string {
 	registryMu.RLock()
 	defer registryMu.RUnlock()
@@ -51,11 +45,9 @@ func Names() []string {
 	return out
 }
 
-// UserVisibleNames returns the subset of registered template names users
-// may set in the YAML `template:` field. Internal templates (`raw`, `eoa`)
-// are excluded — they're dispatched from `kind:` directly, and a user
-// writing `template: raw` would bypass intended semantics. Used by
-// spec.Validate to power the "unknown template" check.
+// UserVisibleNames returns the subset of registered template names
+// users may set in the YAML `template:` field (excludes raw, eoa,
+// which are dispatched from `kind:` directly).
 func UserVisibleNames() []string {
 	registryMu.RLock()
 	defer registryMu.RUnlock()

@@ -1,15 +1,6 @@
-// Package main provides a tool for generating realistic Ethereum state
-// in a Pebble database compatible with go-ethereum.
-//
-// The tool writes state directly to the snapshot layer, which is the
-// authoritative source for state in modern geth. The trie can be
-// regenerated from snapshots on node startup.
-//
-// When a genesis file is provided, the tool:
-// 1. Includes genesis alloc accounts in state generation
-// 2. Computes the combined state root
-// 3. Writes the genesis block with the correct state root
-// 4. Produces a database ready to use without `geth init`
+// Package main is the state-actor CLI: generates Ethereum client
+// databases (geth / besu / nethermind / reth) end-to-end without going
+// through the client binary's init path.
 package main
 
 import (
@@ -51,31 +42,19 @@ var (
 	benchmark    = flag.Bool("benchmark", false, "Run in benchmark mode (print detailed stats)")
 	binaryTrie   = flag.Bool("binary-trie", false, "Generate state for binary trie mode (EIP-7864)")
 
-	// Target size
 	targetSize = flag.String("target-size", "", "Target total DB size on disk (e.g. '5GB', '500MB'). Stop condition only — set --accounts/--contracts/--min-slots/--max-slots explicitly. Honored by geth, besu, nethermind, and reth.")
 
-	// Synthetic genesis configuration. state-actor builds the genesis
-	// itself — no --genesis path. The four header knobs users actually
-	// vary are exposed as flags below; everything else takes a sensible
-	// default (Difficulty=0, Coinbase=0x0, Mixhash=0x0, Alloc empty).
 	fork      = flag.String("fork", "", "Hard fork active at genesis. Empty (default) resolves to the latest fork the chosen --client can write. Use --list-forks to see all values.")
 	listForks = flag.Bool("list-forks", false, "Print the list of accepted --fork values and exit.")
 	chainID   = flag.Int64("chain-id", 1337, "Chain ID embedded in the synthesized genesis chainspec (default 1337, the devnet convention).")
 
-	// Customizable state generation: a YAML spec declaring concrete EOAs +
-	// contracts the writer must include. Spec entities are written first;
-	// the synthetic-fill loop (--accounts/--contracts) runs on top until
-	// --target-size is reached. See docs/SPEC.md.
-	specFile = flag.String("spec", "", "Path to YAML state-spec file. See docs/SPEC.md for the schema.")
-	gasLimit       = flag.Uint64("gas-limit", 30_000_000, "Genesis block gas limit (default 30M).")
-	timestamp      = flag.Uint64("timestamp", 0, "Genesis block timestamp (unix seconds, default 0).")
-	extraData      = flag.String("extra-data", "", "Genesis block extraData as hex (default empty).")
+	specFile  = flag.String("spec", "", "Path to YAML state-spec file. See docs/SPEC.md for the schema.")
+	gasLimit  = flag.Uint64("gas-limit", 30_000_000, "Genesis block gas limit (default 30M).")
+	timestamp = flag.Uint64("timestamp", 0, "Genesis block timestamp (unix seconds, default 0).")
+	extraData = flag.String("extra-data", "", "Genesis block extraData as hex (default empty).")
 
-	// Binary trie group depth
 	groupDepth = flag.Int("group-depth", 8, "Binary trie group depth (1-8, default 8). Controls serialization unit size.")
 
-	// Client selection (multi-client support). Each client uses its own
-	// self-contained machinery inside client/<name>/; only the CLI is shared.
 	client = flag.String("client", "geth", "Target Ethereum client: 'geth' (default), 'nethermind', 'besu', or 'reth'.")
 )
 
@@ -100,10 +79,6 @@ func main() {
 		*seed = time.Now().UnixNano()
 	}
 
-	// Validate --client value and its compatibility with other flags. Doing
-	// this at CLI parse time (before any generation work) means misconfigured
-	// runs fail fast instead of burning minutes producing a wrong output.
-	// Rules live in internal/clientpolicy/ as one source-of-truth table.
 	if err := clientpolicy.ValidateForClient(*client, clientpolicy.FlagValues{
 		BinaryTrie: *binaryTrie,
 		TargetSize: *targetSize,
@@ -117,7 +92,6 @@ func main() {
 		trieMode = generator.TrieModeBinary
 	}
 
-	// Parse --target-size
 	var parsedTargetSize uint64
 	if *targetSize != "" {
 		var err error
@@ -126,14 +100,6 @@ func main() {
 			log.Fatalf("Invalid --target-size: %v", err)
 		}
 	}
-
-	// --target-size is a stop condition, not an auto-scaler. The previous
-	// auto-scaling block (which silently rewrote --accounts/--contracts/
-	// --min-slots/--max-slots and multiplied --contracts by 5) was removed;
-	// users now set per-entity flags explicitly. All four clients honour
-	// the stop: geth (two-phase 5× raw cap + dirSize sampling), besu
-	// (Phase 1 raw-byte cap), nethermind (Phase 1 5× raw cap + Phase 2
-	// dirSize sampling), reth (per-batch dirSize sampling).
 
 	config := generator.Config{
 		DBPath:         *dbPath,
@@ -147,16 +113,11 @@ func main() {
 		Verbose:        *verbose,
 		TrieMode:       trieMode,
 		CommitInterval: 500_000,
-		WriteTrieNodes: true, // Always write trie nodes — DB is unusable without them
+		WriteTrieNodes: true, // PathDB requires trie nodes on disk
 		TargetSize:     parsedTargetSize,
 		GroupDepth:     *groupDepth,
 	}
 
-	// Synthesize the genesis chainspec from CLI flags. state-actor no
-	// longer accepts an external --genesis file; the four header knobs
-	// users actually vary (--chain-id / --fork / --gas-limit /
-	// --timestamp / --extra-data) drive an in-memory *Genesis here, and
-	// each client's writer reads it via config.Genesis.
 	extraDataBytes := []byte{}
 	if *extraData != "" {
 		decoded, err := decodeHex(*extraData)
@@ -165,8 +126,7 @@ func main() {
 		}
 		extraDataBytes = decoded
 	}
-	// Empty --fork resolves to the per-client ceiling (auto). Explicit values
-	// past the ceiling were rejected by ValidateForClient above.
+	// Empty --fork resolves to the per-client ceiling.
 	chosenFork := *fork
 	if chosenFork == "" {
 		chosenFork = genesis.MaxForkForClient(*client)
@@ -182,10 +142,6 @@ func main() {
 			chosenFork, genesisConfig.Config.ChainID, uint64(genesisConfig.GasLimit), uint64(genesisConfig.Timestamp), len(genesisConfig.ExtraData))
 	}
 
-	// --spec: load YAML state spec, translate to PreAlloc. The
-	// per-writer Validate() (called inside each client's Run/Populate/
-	// runImpl) materializes PreAlloc into GenesisAccounts/Code/Storage;
-	// the writers consume those.
 	if *specFile != "" {
 		specDoc, err := spec.ParseFile(*specFile)
 		if err != nil {
@@ -246,15 +202,8 @@ func main() {
 	var stats *generator.Stats
 	switch *client {
 	case "geth":
-		// MPT mode goes through the direct-Pebble pipeline in
-		// client/geth/ (entitygen → temp Pebble → keccak-sorted writes
-		// to production). Binary-trie mode routes through
-		// generator.New().Generate() (generator/binary_stack_trie.go).
-		//
-		// Both paths read the synthesized genesisConfig populated by
-		// main.go's BuildSynthetic call. config.Genesis is the canonical
-		// surface; Populate reads it directly, and the binary path threads
-		// genesisConfig into WriteGenesisBlock explicitly.
+		// MPT mode → client/geth/.Populate (direct-Pebble pipeline).
+		// Binary-trie mode → generator.New().Generate() + WriteGenesisBlock.
 		if config.TrieMode == generator.TrieModeMPT {
 			var err error
 			stats, err = geth.Populate(context.Background(), config, geth.Options{})
@@ -273,8 +222,7 @@ func main() {
 				log.Fatalf("Failed to generate state: %v", err)
 			}
 
-			// Write genesis block (binary-trie path only — the MPT
-			// path's geth.Populate writes its own genesis block).
+			// MPT path writes its own genesis block; binary path writes it here.
 			if *verbose {
 				log.Printf("Writing genesis block with state root: %s", stats.StateRoot.Hex())
 			}
@@ -290,8 +238,6 @@ func main() {
 		}
 
 	case "nethermind":
-		// Nethermind path: writer in client/nethermind/ reads
-		// config.Genesis directly (no package globals).
 		var err error
 		stats, err = nethermind.Run(context.Background(), config, nethermind.Options{})
 		if err != nil {
@@ -299,7 +245,6 @@ func main() {
 		}
 
 	case "besu":
-		// Besu path: same — writer reads config.Genesis directly.
 		var err error
 		stats, err = besu.Run(context.Background(), config, besu.Options{})
 		if err != nil {
@@ -307,7 +252,6 @@ func main() {
 		}
 
 	case "reth":
-		// Reth path: same — writer reads config.Genesis directly.
 		var err error
 		stats, err = reth.RunCgo(context.Background(), config, reth.Options{})
 		if err != nil {
@@ -321,11 +265,6 @@ func main() {
 	fmt.Printf("Total Time:        %v\n", elapsed.Round(time.Millisecond))
 	fmt.Printf("Accounts Created:  %d\n", stats.AccountsCreated)
 	fmt.Printf("Contracts Created: %d\n", stats.ContractsCreated)
-	// StorageSlotsCreated / TotalBytes / Throughput are populated by the
-	// geth path; the nethermind path doesn't track them yet (writer
-	// streams through grocksdb without accumulating per-slot counters).
-	// Hide the rows when there's nothing to show rather than printing
-	// misleading zeros.
 	if stats.StorageSlotsCreated > 0 {
 		fmt.Printf("Storage Slots:     %d\n", stats.StorageSlotsCreated)
 	}
@@ -338,7 +277,6 @@ func main() {
 	if stats.StemBlobBytes > 0 {
 		fmt.Printf("Stem Blob Bytes:   %s\n", formatBytes(stats.StemBlobBytes))
 	}
-	// Report actual on-disk size (after Pebble compression).
 	if dbSize, err := dirSize(config.DBPath); err == nil {
 		fmt.Printf("Total DB Size:     %s\n", formatBytes(dbSize))
 	}
@@ -370,7 +308,6 @@ func main() {
 		fmt.Printf("Sys Memory:        %s\n", formatBytes(m.Sys))
 	}
 
-	// Print sample addresses for verification
 	if len(stats.SampleEOAs) > 0 {
 		fmt.Printf("\n=== Sample Addresses (for verification) ===\n")
 		for i, addr := range stats.SampleEOAs {

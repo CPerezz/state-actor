@@ -14,32 +14,23 @@ import (
 	"github.com/nerolation/state-actor/internal/spec"
 )
 
-// ExplicitOwner is one entry in the erc20 template's `owners` parameter:
-//
-//	owners:
-//	  - { address: "0x...", balance: "1000000000000000000" }
-//
-// Exported so e2e oracle code can verify each planted balance via RPC.
+// ExplicitOwner is one `{address, balance}` entry from the erc20
+// template's `owners` parameter.
 type ExplicitOwner struct {
 	Address common.Address
 	Balance *uint256.Int
 }
 
-// ExplicitAllowance is one entry in the erc20 template's `allowances`:
-//
-//	allowances:
-//	  - { owner: "0x...", spender: "0x...", allowance: "100" }
+// ExplicitAllowance is one `{owner, spender, allowance}` entry from the
+// erc20 template's `allowances` parameter.
 type ExplicitAllowance struct {
 	Owner   common.Address
 	Spender common.Address
 	Amount  *uint256.Int
 }
 
-// parseHexAddressParam decodes a parameter expected to be a `0x`-prefixed
-// 20-byte hex string. Returns a structured error if the value is not a
-// string or doesn't match the address shape. fieldLabel is interpolated
-// into the error message so callers ("owner address", "spender address")
-// stay readable.
+// parseHexAddressParam decodes a 0x-prefixed 20-byte hex string.
+// fieldLabel is interpolated into error messages for caller context.
 func parseHexAddressParam(v any, fieldLabel string) (common.Address, error) {
 	s, ok := v.(string)
 	if !ok {
@@ -62,9 +53,9 @@ func parseHexAddressParam(v any, fieldLabel string) (common.Address, error) {
 	return out, nil
 }
 
-// parseUint256Param decodes a parameter expected to be a quoted decimal
-// or 0x-hex string representing a non-negative integer. Delegates to
-// spec.ParseUint256 so the rules match the entity-level `balance:` field.
+// parseUint256Param decodes a quoted decimal or 0x-hex string into a
+// uint256. Delegates to spec.ParseUint256 so rules match the
+// entity-level `balance:` field.
 func parseUint256Param(v any, fieldLabel string) (*uint256.Int, error) {
 	s, ok := v.(string)
 	if !ok {
@@ -81,10 +72,8 @@ func parseUint256Param(v any, fieldLabel string) (*uint256.Int, error) {
 	return u, nil
 }
 
-// ParseNonNegIntParam decodes a parameter expected to be a non-negative
-// integer. Accepts both `int` and `int64` because yaml.v3 may return
-// either depending on magnitude. Exported so the e2e oracle can re-read
-// total_owners / total_allowances when verifying ERC-20 templates.
+// ParseNonNegIntParam decodes a non-negative integer parameter.
+// Accepts both int and int64 (yaml.v3 returns either by magnitude).
 func ParseNonNegIntParam(v any, fieldLabel string) (int, error) {
 	switch n := v.(type) {
 	case int:
@@ -103,9 +92,8 @@ func ParseNonNegIntParam(v any, fieldLabel string) (int, error) {
 }
 
 // ParseExplicitOwners decodes the `owners` parameter into a typed
-// slice. Each entry must be a map with `address` (0x-string) and
-// `balance` (quoted decimal or hex). Duplicate addresses are rejected.
-// Exported so the e2e oracle can read planted owners back from the spec.
+// slice. Each entry is a map with `address` (0x-string) and `balance`
+// (quoted decimal or hex). Duplicate addresses are rejected.
 func ParseExplicitOwners(v any) ([]ExplicitOwner, error) {
 	if v == nil {
 		return nil, nil
@@ -152,10 +140,8 @@ func ParseExplicitOwners(v any) ([]ExplicitOwner, error) {
 }
 
 // ParseExplicitAllowances decodes the `allowances` parameter into a
-// typed slice. Each entry must be a map with `owner`, `spender`, and
-// `allowance`. Duplicate (owner, spender) pairs are rejected; an
-// allowance owner does NOT need to have a balance entry. Exported so
-// the e2e oracle can read planted allowances back from the spec.
+// typed slice. Each entry has `owner`, `spender`, `allowance`.
+// Duplicate (owner, spender) pairs are rejected.
 func ParseExplicitAllowances(v any) ([]ExplicitAllowance, error) {
 	if v == nil {
 		return nil, nil
@@ -212,19 +198,16 @@ func ParseExplicitAllowances(v any) ([]ExplicitAllowance, error) {
 	return out, nil
 }
 
-// balanceSlotKey computes the storage slot key for `_balances[holder]`
-// using Solidity's mapping rule: keccak256(leftPad32(holder) || leftPad32(0)).
+// balanceSlotKey: keccak256(leftPad32(holder) || leftPad32(0)).
 func balanceSlotKey(holder common.Address) common.Hash {
 	var buf [64]byte
 	copy(buf[12:32], holder[:])
-	// buf[32..63] zero — slot index 0 left-padded
 	return crypto.Keccak256Hash(buf[:])
 }
 
-// allowanceSlotKey computes the storage slot key for
-// `_allowances[owner][spender]` using Solidity's nested-mapping rule:
+// allowanceSlotKey computes `_allowances[owner][spender]` slot:
 //
-//	inner = keccak256(leftPad32(owner)   || leftPad32(1))   // slot of _allowances[owner]
+//	inner = keccak256(leftPad32(owner)   || leftPad32(1))
 //	slot  = keccak256(leftPad32(spender) || inner)
 func allowanceSlotKey(owner, spender common.Address) common.Hash {
 	var innerBuf [64]byte
@@ -238,11 +221,8 @@ func allowanceSlotKey(owner, spender common.Address) common.Hash {
 	return crypto.Keccak256Hash(outerBuf[:])
 }
 
-// DeterministicRandomOwnerAddress returns the synthesized holder address
-// for the i-th random `_balances` entry of an ERC-20 contract:
-// `keccak256(seed || tokenAddr || i)[12:]`. Pure function of inputs.
-// Exported so the e2e oracle re-derives the same address it expects
-// eth_call balanceOf(...) to return a balance for.
+// DeterministicRandomOwnerAddress returns the synthesized i-th holder
+// address: keccak256(seed || tokenAddr || i)[12:].
 func DeterministicRandomOwnerAddress(seed int64, tokenAddr common.Address, i int) common.Address {
 	var buf [8 + common.AddressLength + 8]byte
 	binary.BigEndian.PutUint64(buf[:8], uint64(seed))
@@ -254,10 +234,8 @@ func DeterministicRandomOwnerAddress(seed int64, tokenAddr common.Address, i int
 	return addr
 }
 
-// DeterministicRandomBalance produces the synthesized balance value for
-// the i-th random holder of an ERC-20 contract. The value is in
-// `[1, 10^18]` wei, derived from `keccak256(seed || tokenAddr || "BAL" || i)`.
-// Deterministic across machines (cross-client invariant relies on this).
+// DeterministicRandomBalance produces the synthesized i-th balance in
+// [1, 10^18] wei. Deterministic across machines.
 func DeterministicRandomBalance(seed int64, tokenAddr common.Address, i int) common.Hash {
 	const tag = "BAL"
 	var preimage [8 + common.AddressLength + len(tag) + 8]byte
@@ -273,11 +251,8 @@ func DeterministicRandomBalance(seed int64, tokenAddr common.Address, i int) com
 	return uint256.NewInt(u).Bytes32()
 }
 
-// deterministicRandomAlwAddress produces the synthesized owner or
-// spender address for the i-th random allowance entry. tag is "AOW"
-// (owner) or "ASP" (spender) so owner and spender derive from disjoint
-// preimage spaces — a random owner won't collide with a random spender
-// at the same index.
+// deterministicRandomAlwAddress synthesizes the i-th allowance address.
+// tag ("AOW" or "ASP") gives owner and spender disjoint preimage spaces.
 func deterministicRandomAlwAddress(seed int64, tokenAddr common.Address, tag string, i int) common.Address {
 	if len(tag) != 3 {
 		panic(fmt.Sprintf("deterministicRandomAlwAddress: tag must be 3 bytes (got %q)", tag))
@@ -293,21 +268,16 @@ func deterministicRandomAlwAddress(seed int64, tokenAddr common.Address, tag str
 	return addr
 }
 
-// DeterministicRandomAlwOwnerAddress returns the synthesized owner
-// address for the i-th random allowance entry. Exported for the e2e
-// oracle.
 func DeterministicRandomAlwOwnerAddress(seed int64, tokenAddr common.Address, i int) common.Address {
 	return deterministicRandomAlwAddress(seed, tokenAddr, "AOW", i)
 }
 
-// DeterministicRandomAlwSpenderAddress returns the synthesized spender
-// address for the i-th random allowance entry.
 func DeterministicRandomAlwSpenderAddress(seed int64, tokenAddr common.Address, i int) common.Address {
 	return deterministicRandomAlwAddress(seed, tokenAddr, "ASP", i)
 }
 
-// DeterministicRandomAllowanceAmount: keccak256(seed||token||"AAM"||i),
-// mod 10^18, clamped to [1, 10^18].
+// DeterministicRandomAllowanceAmount synthesizes the i-th allowance in
+// [1, 10^18] from keccak256(seed||token||"AAM"||i).
 func DeterministicRandomAllowanceAmount(seed int64, tokenAddr common.Address, i int) common.Hash {
 	const tag = "AAM"
 	var preimage [8 + common.AddressLength + len(tag) + 8]byte
@@ -323,10 +293,9 @@ func DeterministicRandomAllowanceAmount(seed int64, tokenAddr common.Address, i 
 	return uint256.NewInt(u).Bytes32()
 }
 
-// erc20RandomAllowancesIter emits a deterministic stream of synthesized
-// `_allowances[owner][spender]` entries. Owner and spender are derived
-// independently per index so they're effectively random and disjoint.
-// Re-iteration is safe (pure function of seed/tokenAddr/count).
+// erc20RandomAllowancesIter emits synthesized
+// `_allowances[owner][spender]` entries. Owner and spender derive
+// independently per index. Re-iteration is safe (pure function).
 func erc20RandomAllowancesIter(seed int64, tokenAddr common.Address, count int) iter.Seq2[common.Hash, common.Hash] {
 	return func(yield func(common.Hash, common.Hash) bool) {
 		for i := range count {

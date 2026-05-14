@@ -87,14 +87,10 @@ type Config struct {
 	Genesis *genesis.Genesis
 
 	// GenesisAccounts / GenesisStorage / GenesisCode carry pre-allocated
-	// state — post-Merge EIP system contracts (deployed via
-	// oracle.AddPragueSystemContracts in e2e suites) and any other
-	// alloc entries tests need. All 4 client writers consume these
-	// fields (geth/nethermind/besu/reth). Config.Validate() enforces
-	// that GenesisStorage/GenesisCode have no orphan entries.
-	// Production CLI populates these via the --spec YAML path (the
-	// PreAlloc field, below, materializes into these maps at Validate
-	// time).
+	// state consumed by all 4 client writers (e.g. post-Merge EIP system
+	// contracts deployed by oracle.AddPragueSystemContracts). Validate()
+	// rejects orphan Storage/Code entries (no matching GenesisAccounts).
+	// The --spec YAML path populates these via PreAlloc + Validate().
 	GenesisAccounts map[common.Address]*types.StateAccount
 	GenesisStorage  map[common.Address]map[common.Hash]common.Hash
 	GenesisCode     map[common.Address][]byte
@@ -121,36 +117,17 @@ type Config struct {
 	// Controls how many trie levels are serialized per DB entry.
 	GroupDepth int
 
-	// PreAlloc carries entities produced by the --spec flag's YAML
-	// translator (internal/specbuild/). Validate() materializes PreAlloc
-	// entries into the GenesisAccounts/Code/Storage maps so every client
-	// writer consumes a single unified shape.
-	//
-	// Validate() must be called before any writer consumes Config — that
-	// is where the materialization happens.
+	// PreAlloc carries entities produced by the --spec YAML translator
+	// (internal/specbuild/). Validate() materializes their Account +
+	// Code into GenesisAccounts/Code (Storage stays on the iter for
+	// streaming consumption by per-client writers).
 	PreAlloc []templates.PreAllocEntity
 }
 
-// Validate rejects malformed Config combinations at command start, before
-// any DB write happens. Centralized so all 4 client writers enforce the
-// same invariants.
-//
-// Validate also materializes PreAlloc entries into the
-// GenesisAccounts/Code/Storage maps. Writers should call Validate as
-// their first non-trivial step.
-//
-// Rejects:
-//   - PreAlloc addresses collide with programmatic GenesisAccounts entries
-//     (e.g. oracle.AddPragueSystemContracts).
-//   - GenesisCode address not in GenesisAccounts — orphan code.
-//   - GenesisStorage address not in GenesisAccounts — orphan storage.
-//   - Spec storage estimate exceeds --target-size.
-//
-// Called by client writers as the first non-trivial step of
-// Run() / Populate() / runImpl().
+// Validate materializes PreAlloc into the GenesisAccounts/Code maps
+// and rejects orphan Storage/Code entries. Must be called before any
+// writer consumes Config.
 func (c *Config) Validate() error {
-	// Step 1: materialize PreAlloc. After this point the checks treat
-	// both YAML-spec entries and programmatic alloc entries uniformly.
 	if err := c.materializePreAlloc(); err != nil {
 		return err
 	}
@@ -165,35 +142,20 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("Config: GenesisStorage[%s] has no corresponding GenesisAccounts entry (orphan storage)", a.Hex())
 		}
 	}
-
-	// The pre-Validate target-size estimate for spec entities was removed
-	// when spec storage moved to streaming (internal/streamingtrie):
-	// slot counts are no longer known without iterating each entity's
-	// lazy Storage iter, which would defeat the bounded-RAM property
-	// we just gained. Target-size enforcement happens at write time
-	// instead — each per-client writer samples its on-disk datadir size
-	// between batches and stops emission once cfg.TargetSize is reached.
 	return nil
 }
 
-// materializePreAlloc folds Config.PreAlloc account headers + bytecodes
-// into the GenesisAccounts/Code maps so the existing per-client writers
-// pick them up uniformly with programmatically-added entries (e.g.
-// oracle.AddPragueSystemContracts).
+// materializePreAlloc folds PreAlloc account headers + code into
+// GenesisAccounts/Code so writers consume both YAML-spec and
+// programmatic alloc entries uniformly.
 //
-// Storage is NOT drained into GenesisStorage. Each PreAlloc entity's
-// Storage iter.Seq2 stays intact on c.PreAlloc and is consumed lazily
-// by the per-client streaming spec-storage Phase via
-// internal/streamingtrie — bounded RAM regardless of slot count, so
-// multi-GB ERC-20 fixtures stay within budget. Writers that need the
-// computed storage root read it back from
-// c.GenesisAccounts[addr].Root after the streaming Phase splices it
-// in.
+// Storage is NOT drained — it stays as iter.Seq2 on c.PreAlloc for
+// per-client streaming Phases to consume. Writers read the computed
+// storage root from c.GenesisAccounts[addr].Root after the streaming
+// Phase splices it in.
 //
-// PreAlloc is preserved (not cleared) so the per-client streaming Phase
-// can iterate it. Re-calling Validate stays idempotent because the
-// duplicate-address check below treats `existing == pe.Account` (same
-// pointer from a previous materialise) as a no-op rather than an error.
+// Re-Validate is idempotent: same-pointer collisions (`existing == pe.Account`)
+// are skipped rather than treated as errors.
 func (c *Config) materializePreAlloc() error {
 	if len(c.PreAlloc) == 0 {
 		return nil
@@ -207,10 +169,6 @@ func (c *Config) materializePreAlloc() error {
 
 	for i, pe := range c.PreAlloc {
 		if existing, dup := c.GenesisAccounts[pe.Address]; dup {
-			// Idempotent re-call: same PreAllocEntity, same pointer in
-			// GenesisAccounts → skip (we already materialised this on a
-			// previous Validate). Distinct entries colliding on address
-			// is the real error.
 			if existing == pe.Account {
 				continue
 			}
@@ -220,7 +178,6 @@ func (c *Config) materializePreAlloc() error {
 		if len(pe.Code) > 0 {
 			c.GenesisCode[pe.Address] = pe.Code
 		}
-		// pe.Storage is intentionally NOT drained — see function doc.
 	}
 	return nil
 }

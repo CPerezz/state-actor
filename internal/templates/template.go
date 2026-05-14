@@ -10,108 +10,73 @@ import (
 )
 
 // PreAllocEntity is the unified post-expansion record every writer
-// consumes. Each carries one address's account header (nonce/balance/
-// codeHash/root), the deployed code (nil for plain EOAs), and the
-// storage map.
-//
-// Storage iteration order is the responsibility of the consumer. For
-// state-root determinism, writers iterate by sorted key. Templates are not
-// required to emit storage in key-sorted order — they emit deterministically,
-// and the writer sorts.
+// consumes. Storage is iter.Seq2 (not materialised) so multi-GB
+// entities don't OOM; templates emit deterministically and writers
+// sort by keccak(key).
 type PreAllocEntity struct {
-	// Address is the on-chain address this entity occupies. Determined by
-	// internal/specbuild/derive.go from one of three modes (explicit, name-
-	// derived, position-derived).
+	// Address is determined by internal/specbuild/derive.go.
 	Address common.Address
 
-	// Account is the StateAccount header. Templates set Nonce + Balance.
-	// CodeHash is set by the template iff Code is non-nil. Root is left
-	// as types.EmptyRootHash by templates — the writer computes it from
-	// the Storage map.
+	// Account is the StateAccount header. Templates set Nonce + Balance;
+	// CodeHash iff Code is non-nil; Root is left as EmptyRootHash and
+	// computed by the writer from Storage.
 	Account *types.StateAccount
 
-	// Code is the deployed bytecode. nil for plain EOAs; non-nil for
-	// contracts; can also be a 23-byte EIP-7702 0xef0100<addr> delegation
-	// marker for EOAs.
+	// Code is the deployed bytecode. nil for plain EOAs; can be a
+	// 23-byte EIP-7702 0xef0100<addr> delegation marker for EOAs.
 	Code []byte
 
-	// Storage yields (key, value) pairs for this entity. iter.Seq2 (Go 1.23+
-	// range-over-function) so synthesized storage doesn't need to be
-	// materialised up front — a 50 GB ERC-20 spec produces a closure that
-	// computes slots on demand rather than a 50 GB Go-heap map. nil when
-	// the entity has no storage.
-	//
-	// Consumed by the per-client streaming spec-storage Phase via
-	// internal/streamingtrie.StorageRoot, which drains the iter into a
-	// per-entity sorted spill store (internal/streamsort) → walks it
-	// sorted to feed both the per-client MPT HashBuilder and the
-	// per-slot DB-row Sink in lockstep. Iteration order from this iter
-	// itself is NOT keccak-sorted; the helper handles sorting.
-	//
-	// Pure-function iterators may be re-iterated; templates emit those
-	// (deterministic synthesis) so callers can call the iter more than
-	// once and get the same yield sequence.
+	// Storage yields (key, value) pairs. nil when the entity has no
+	// storage. Iteration order is not keccak-sorted; the consumer sorts.
+	// Pure-function iterators are re-iterable.
 	Storage iter.Seq2[common.Hash, common.Hash]
 }
 
-// Context carries the inputs a Template needs to deterministically expand
-// one spec entity into one or more PreAllocEntity records.
+// Context carries the inputs a Template needs to deterministically
+// expand one spec entity into one or more PreAllocEntity records.
 type Context struct {
-	// Seed is the run-wide RNG seed (typically from --seed). Every template
-	// that synthesizes addresses or storage MUST derive from this seed so
-	// re-running the same spec produces byte-identical state.
+	// Seed is the run-wide RNG seed; templates that synthesize addresses
+	// or storage MUST derive from it for byte-identical reruns.
 	Seed int64
 
-	// ClientName identifies which writer (geth/besu/nethermind/reth) is
-	// consuming the templates. The size approximator uses this to pick a
-	// per-client bytes-per-slot calibration factor.
+	// ClientName identifies the consuming writer; used by Sizer for the
+	// per-client bytes-per-slot calibration.
 	ClientName string
 
-	// Sizer translates `approximate_size_bytes` into a synthetic storage-
-	// slot count. Per-client factor lives in internal/sizecal/.
+	// Sizer translates approximate_size_bytes into a slot count.
 	Sizer SizeApproximator
 
-	// ResolvedAddress is the entity's address as decided by the translator
-	// (internal/specbuild/derive.go). The template receives this rather
-	// than re-deriving so address resolution stays in one place.
+	// ResolvedAddress is the entity's address (decided by the translator
+	// at internal/specbuild/derive.go).
 	ResolvedAddress common.Address
 
-	// EntityIndex is the 0-based position of this entity in the spec.
-	// Templates may include it in synthesis-key derivation so two entities
-	// of the same template don't collide.
+	// EntityIndex is the 0-based position in the spec; templates use it
+	// to disambiguate synthesis keys.
 	EntityIndex int
 }
 
-// SizeApproximator converts a target byte budget to a synthetic slot count.
-// Implemented by internal/sizecal/. The templates package depends only on
-// this interface to avoid an import cycle.
+// SizeApproximator converts a target byte budget to a synthetic slot
+// count. Defined here to avoid a cycle with internal/sizecal.
 type SizeApproximator interface {
 	SlotsForBytes(client string, targetBytes uint64) int
 }
 
-// Template is the single extension point of this package. Adding a new
-// template (ERC-721, UniswapV2, Aave, etc.) is one new file implementing
-// this interface plus a Register() call in init().
+// Template is the extension point: one new file implementing this
+// interface plus Register() in init() adds a new template.
 //
-// Determinism contract: for the same (ctx, e), Expand must return the same
-// []PreAllocEntity byte-for-byte across runs and across machines.
+// Determinism contract: for the same (ctx, e), Expand returns the same
+// []PreAllocEntity byte-for-byte across runs and machines.
 type Template interface {
-	// Name is the registry key.
 	Name() string
 
-	// UserVisible reports whether this template is exposed via the YAML
-	// `template:` field. Internal-only templates (raw, eoa) return false
-	// — they're dispatched from `kind:` directly and must not be picked
-	// by user-supplied `template:` strings. UserVisibleNames() filters by
-	// this.
+	// UserVisible reports whether the template is exposed via the YAML
+	// `template:` field. Internal-only templates (raw, eoa) return false.
 	UserVisible() bool
 
-	// ValidateParameters runs at parse time, before any Expand call, so
-	// users see parameter errors early. Implementations should reject
-	// unknown parameter keys (avoid silent typos).
+	// ValidateParameters runs at parse time so unknown parameter keys
+	// surface as user errors early. Implementations should reject typos.
 	ValidateParameters(params map[string]any) error
 
-	// Expand turns one spec entity into 1..N PreAllocEntity records. Most
-	// templates emit one; multi-contract ecosystems (UniswapV2) emit many.
+	// Expand turns one spec entity into 1..N PreAllocEntity records.
 	Expand(ctx Context, e spec.Entity) ([]PreAllocEntity, error)
 }

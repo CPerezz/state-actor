@@ -14,21 +14,12 @@ func init() {
 	Register(&rawTemplate{})
 }
 
-// rawTemplate handles `kind: contract` with `code:` set (no `template:`
-// field). It emits exactly one PreAllocEntity with:
-//   - the user-supplied bytecode verbatim,
-//   - synthesized storage slots filling approximate_size_bytes (if > 0).
-//
-// This is also the template registered under a single-element list returned
-// by the registry — it isn't matched by name (the spec.Entity has no
-// `template:` value when it's a raw contract); the translator calls Expand
-// on it directly. The Name() value is "raw" for diagnostic clarity.
+// rawTemplate handles `kind: contract` with `code:` set. Emits one
+// PreAllocEntity with the supplied bytecode verbatim plus synthesized
+// storage slots filling approximate_size_bytes (if > 0).
 type rawTemplate struct{}
 
-func (rawTemplate) Name() string { return "raw" }
-
-// UserVisible reports false: `raw` is dispatched from `kind: contract`
-// + a `code:` field, never from a user-supplied `template:` value.
+func (rawTemplate) Name() string      { return "raw" }
 func (rawTemplate) UserVisible() bool { return false }
 
 func (rawTemplate) ValidateParameters(params map[string]any) error {

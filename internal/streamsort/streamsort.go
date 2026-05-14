@@ -1,32 +1,10 @@
-// Package streamsort is a Pebble-backed sorted-spill store tuned for
-// write-once-then-read-sorted bulk-sort workloads.
+// Package streamsort is a Pebble-backed sorted-spill store: write N
+// (key, value) pairs via Put, call Iterate to consume them sorted in a
+// single pass, Close to release.
 //
-// The intended use is: write N (key, value) pairs in any order via
-// Put → call Iterate → consume them sorted by key in a single read pass
-// → Close. There is no transaction model, no crash recovery, no
-// concurrent reader, and no expectation that the on-disk files survive
-// the Store's lifetime — Close removes the temp directory.
-//
-// This is the substrate used by every client writer (geth / besu /
-// nethermind / reth) for two purposes:
-//
-//  1. Global state-trie sort: synthesizing N accounts in batches, each
-//     batch yields per-account leaves; the streamsort iterates them
-//     sorted by addrHash and feeds an MPT HashBuilder.
-//
-//  2. Per-entity spec-storage sort: for each spec entity with a non-
-//     trivial Storage iter (e.g. an ERC-20 with total_owners > 1M),
-//     the writer drains the iter into a fresh Store, iterates sorted,
-//     and feeds both the storage MPT builder and the per-slot DB
-//     row writer in lockstep.
-//
-// Pebble is tuned aggressively for this workload — see New for the
-// full options table; cliff notes: no WAL, huge MemTable, compaction
-// deferred until iterate, no compression. The contract is "use this
-// as a sorted FIFO; don't read while writing".
-//
-// Not concurrency-safe. One goroutine owns a Store for its entire
-// lifetime.
+// No transaction model, no crash recovery, no concurrent reader. Close
+// removes the temp directory. Not concurrency-safe — one goroutine owns
+// a Store for its lifetime.
 package streamsort
 
 import (
@@ -41,33 +19,16 @@ import (
 )
 
 // MemTableSize is the in-memory write buffer per Pebble MemTable.
-// 2 GiB is deliberately huge: small-to-medium entities (≤ ~2 GB of
-// (key, value) pairs) never flush to L0 at all — they live in a single
-// sorted skiplist that's iterated directly. Larger entities flush
-// progressively; the deferred-compaction setting keeps each flush
-// cheap.
-//
-// Exported because the per-client RAM ceiling and docs/SPEC.md both
-// cite this constant.
+// Datasets up to this size stay entirely in RAM (no L0 flush).
 const MemTableSize = 2 << 30
 
-// batchFlushBytes caps the live Pebble WriteBatch size. Without this,
-// the batch would grow until Put returns and we'd accumulate the
-// entire input in batch memory in addition to the MemTable. 64 MiB
-// matches the chunking reth's prior Sorter used.
-const batchFlushBytes = 64 << 20
-
-// blockCacheBytes is the size of Pebble's block cache. The cache is
-// only meaningful for the read pass (Iterate); the small index/filter
-// blocks at the top of each L0 SST are touched repeatedly during a
-// k-way merge. 64 MiB is enough to keep those resident without
-// allocating space we won't touch.
-const blockCacheBytes = 64 << 20
+const (
+	batchFlushBytes = 64 << 20
+	blockCacheBytes = 64 << 20
+)
 
 // Store is a sorted-by-key spill buffer backed by a temp Pebble LSM.
-//
-// Lifecycle: New → Put… → Iterate → Close. Each method is single-
-// goroutine. Close is idempotent; safe to defer plus call explicitly.
+// Lifecycle: New → Put… → Iterate → Close. Close is idempotent.
 type Store struct {
 	dir    string
 	cache  *pebble.Cache
@@ -76,29 +37,9 @@ type Store struct {
 	closed bool
 }
 
-// New creates a fresh Store rooted under workDir. The caller is
-// responsible for ensuring workDir has enough free disk to hold the
-// sorted dataset on top of any other on-disk artefacts (Pebble spills
-// to disk once memTableSize is exceeded).
-//
-// If workDir is empty, os.TempDir() is used (TMPDIR= override applies).
-//
-// Tuning knobs applied (all rationales in the package doc / plan):
-//   - DisableWAL:                  true                       (no crash recovery for a temp store)
-//   - MemTableSize:                2 GiB                      (small entities stay entirely in-RAM)
-//   - MemTableStopWritesThreshold: 16                         (flushing MemTable never blocks Put)
-//   - L0CompactionThreshold:       math.MaxInt32              (defer compaction until Iterate)
-//   - L0StopWritesThreshold:       math.MaxInt32              (accept high L0 fan-out)
-//   - MaxConcurrentCompactions:    runtime.NumCPU()           (parallelise lazy compactions)
-//   - BytesPerSync:                0                          (disable mid-write SST fsync rate-limit)
-//   - WALBytesPerSync:             0                          (belt-and-braces; WAL is off)
-//   - Levels[0].Compression:       NoCompression              (random 32-byte data doesn't compress)
-//   - FormatMajorVersion:          FormatNewest               (latest SSTable format)
-//   - NoSyncOnClose:               true                       (temp dir; no need to fsync on close)
-//   - Cache:                       64 MiB                     (block cache for the iterate phase)
-//
-// (DisableTableStats is a newer Pebble knob; not present in v1.1.5.
-// Add when we bump the Pebble dep.)
+// New creates a Store rooted under workDir (empty → os.TempDir()).
+// Caller is responsible for sufficient free disk to hold the spilled
+// dataset.
 func New(workDir string) (*Store, error) {
 	dir, err := os.MkdirTemp(workDir, "streamsort-*")
 	if err != nil {
@@ -137,13 +78,9 @@ func New(workDir string) (*Store, error) {
 	}, nil
 }
 
-// Put inserts (key, value) into the pending batch. If the batch grows
-// past batchFlushBytes it is committed to Pebble and reset.
-//
-// Put after Close returns an error. Put is single-goroutine.
-//
-// The key and value slices are copied into the batch's internal
-// buffer; the caller may reuse the input slices immediately.
+// Put inserts (key, value) into the pending batch, flushing when the
+// batch exceeds batchFlushBytes. Key and value are copied; the caller
+// may reuse the input slices. Returns an error if called after Close.
 func (s *Store) Put(key, value []byte) error {
 	if s.closed {
 		return fmt.Errorf("streamsort: Put after Close")
@@ -160,21 +97,11 @@ func (s *Store) Put(key, value []byte) error {
 	return nil
 }
 
-// Iterate flushes any pending batch, opens a Pebble iterator over the
-// full keyspace, and invokes yield(k, v) for each entry in ascending
-// key order.
-//
-// IMPORTANT: the yield function's key/value slices alias Pebble's
-// internal buffers and are invalidated by the next Next() call.
-// Callers that retain either slice MUST copy it.
-//
-// If yield returns a non-nil error, iteration stops immediately and
-// that error is returned. The iterator's own Error() is checked after
-// the loop completes — meaning a yield error short-circuits the
-// internal-error check. Yield errors typically carry richer per-client
-// context (which sink, which key), so this precedence is deliberate.
-//
-// Iterate after Close returns an error.
+// Iterate flushes any pending batch and invokes yield for every entry
+// in ascending key order. Key/value slices alias Pebble's internal
+// buffers and are invalidated on the next Next() — callers that retain
+// either MUST copy it. A non-nil error from yield short-circuits and
+// is returned. Returns an error if called after Close.
 func (s *Store) Iterate(yield func(key, value []byte) error) error {
 	if s.closed {
 		return fmt.Errorf("streamsort: Iterate after Close")
@@ -201,15 +128,9 @@ func (s *Store) Iterate(yield func(key, value []byte) error) error {
 	return nil
 }
 
-// Close commits any pending batch (best-effort), closes the Pebble DB,
-// frees the block cache, and removes the on-disk temp directory.
-// Idempotent — subsequent calls return nil.
-//
-// Temp-dir RemoveAll errors are logged via log.Printf (not returned)
-// since the generated data has already been consumed by the caller's
-// Iterate before Close is called; leftover temp space is hygiene,
-// not correctness. Logging surfaces permission / disk-full
-// pathologies that would otherwise accumulate silently.
+// Close flushes any pending batch, closes the DB, frees the cache, and
+// removes the temp directory. Idempotent. RemoveAll failures are
+// logged, not returned.
 func (s *Store) Close() error {
 	if s.closed {
 		return nil
@@ -217,9 +138,6 @@ func (s *Store) Close() error {
 	s.closed = true
 
 	var firstErr error
-
-	// Best-effort flush of any pending writes. If this fails we still
-	// proceed to Close + cleanup so resources are released.
 	if err := s.batch.Commit(pebble.NoSync); err != nil {
 		firstErr = fmt.Errorf("streamsort: final batch.Commit: %w", err)
 	}

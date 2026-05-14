@@ -12,41 +12,24 @@ import (
 
 // BuildOptions carries the per-run inputs every Template.Expand needs.
 type BuildOptions struct {
-	// Seed is the RNG seed used for deterministic name→address derivation
-	// AND for synthesized storage slot generation. Threaded through every
-	// template invocation.
+	// Seed drives deterministic name→address derivation and
+	// synthesized storage generation.
 	Seed int64
-
-	// ClientName picks the per-client byte-budget factor in the sizer.
-	// One of "geth", "besu", "nethermind", "reth".
+	// ClientName is "geth", "besu", "nethermind", or "reth".
 	ClientName string
-
-	// Sizer translates approximate_size_bytes → slot count. Built outside
-	// this package (in internal/sizecal/) so templates have no import
-	// dependency on calibration code.
+	// Sizer translates approximate_size_bytes → slot count.
 	Sizer templates.SizeApproximator
 }
 
-// Diagnostics carries non-fatal warnings the translator wants to surface
-// to the CLI (which prints them before kickoff).
+// Diagnostics carries non-fatal warnings surfaced to the CLI.
 type Diagnostics struct {
 	Warnings []string
 }
 
 // Build translates a parsed Spec into the flat slice of PreAllocEntity
-// records each writer consumes.
-//
-// Steps per entity:
-//  1. Resolve the address (explicit / name-derived / position-derived).
-//  2. Pick the template — eoa for kind=eoa, the named template for
-//     kind=contract with template:, or raw for kind=contract with code:.
-//  3. Validate parameters (defense in depth — spec.Validate already ran).
-//  4. Call Template.Expand. The result joins the output slice.
-//
-// Post-expansion, every emitted PreAllocEntity address is checked for
-// collisions across the slice. The spec-time validator only catches
-// explicit-address collisions; synthesized (derived) addresses may also
-// collide and we must surface those before the writer is invoked.
+// records each writer consumes. Per entity: resolve address → pick
+// template → validate parameters → Expand. Collisions across emitted
+// addresses (including synthesized) are rejected.
 func Build(s *spec.Spec, opts BuildOptions) ([]templates.PreAllocEntity, Diagnostics, error) {
 	var (
 		out  []templates.PreAllocEntity
@@ -60,8 +43,7 @@ func Build(s *spec.Spec, opts BuildOptions) ([]templates.PreAllocEntity, Diagnos
 		return nil, diag, fmt.Errorf("Build: BuildOptions.Sizer is required")
 	}
 
-	// Track every emitted address so we can flag post-expansion collisions
-	// in the same loop. Maps lower-case hex → first-emitting entity index.
+	// Lower-case hex → first-emitting entity index.
 	seenAddrs := make(map[string]int, len(s.Entities))
 
 	for i, e := range s.Entities {
@@ -70,8 +52,7 @@ func Build(s *spec.Spec, opts BuildOptions) ([]templates.PreAllocEntity, Diagnos
 			return nil, diag, fmt.Errorf("entities[%d]: %w", i, err)
 		}
 
-		// Defense in depth: validate parameters again so a programmatic
-		// caller that bypasses spec.Validate still sees the failure.
+		// Defense in depth for programmatic callers bypassing spec.Validate.
 		if err := tmpl.ValidateParameters(e.Parameters); err != nil {
 			return nil, diag, fmt.Errorf("entities[%d]: %w", i, err)
 		}
@@ -106,10 +87,7 @@ func Build(s *spec.Spec, opts BuildOptions) ([]templates.PreAllocEntity, Diagnos
 	return out, diag, nil
 }
 
-// pickTemplate maps a spec entity to its handling template. Returns an
-// error when the entity is well-formed at parse time but the registry
-// doesn't have the requested template (which shouldn't happen if
-// spec.Validate received templates.Names(), but defense-in-depth).
+// pickTemplate maps a spec entity to its handling template.
 func pickTemplate(e spec.Entity) (templates.Template, error) {
 	switch e.Kind {
 	case spec.KindEOA:
@@ -133,13 +111,10 @@ func pickTemplate(e spec.Entity) (templates.Template, error) {
 			}
 			return t, nil
 		}
-		// spec.Validate already catches this; defensive only.
 		return nil, fmt.Errorf("kind=contract requires either template: or code:")
 	default:
 		return nil, fmt.Errorf("unknown kind %q", e.Kind)
 	}
 }
 
-// Ensure common.Address is referenced — keeps the import non-stale if a
-// future refactor drops the inline use. Cheap, zero runtime cost.
 var _ = (*common.Address)(nil)
