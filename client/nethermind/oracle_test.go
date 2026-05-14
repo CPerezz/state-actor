@@ -4,6 +4,7 @@ package nethermind
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -36,9 +37,9 @@ func TestDifferentialOracle(t *testing.T) {
 	fixturesDir := filepath.Join("..", "..", "internal", "neth", "testdata")
 
 	cases := []struct {
-		name             string
-		fixtureFile      string
-		wantGenesisHash  string
+		name            string
+		fixtureFile     string
+		wantGenesisHash string
 	}{
 		{
 			name:            "empty_accounts_and_storages",
@@ -79,12 +80,13 @@ func TestDifferentialOracle(t *testing.T) {
 			stateRoot := common.Hash(neth.EmptyTreeHash)
 			var stats generator.Stats
 			if len(accounts) > 0 {
-				stateRoot, err = writeGenesisAllocAccounts(dbs, accounts, codes, storages, &stats)
+				cfg := generator.Config{} // alloc-only; no synthetic generation
+				stateRoot, err = writeSyntheticAccounts(context.Background(), dbs, cfg, accounts, codes, storages, &stats)
 				if err != nil {
 					t.Fatalf("write genesis alloc: %v", err)
 				}
 				if stats.AccountBytes == 0 {
-					t.Errorf("writeGenesisAllocAccounts: stats.AccountBytes == 0 for %d accounts — accounting silently broken", len(accounts))
+					t.Errorf("writeSyntheticAccounts: stats.AccountBytes == 0 for %d accounts — accounting silently broken", len(accounts))
 				}
 			}
 
@@ -151,7 +153,7 @@ func loadParityChainspec(path string) (*parityChainspec, error) {
 }
 
 // paritySpecToStateAccounts converts Parity allocations into the
-// (StateAccount, code, storage) triple writeGenesisAllocAccounts expects.
+// (StateAccount, code, storage) triple writeSyntheticAccounts expects.
 // Empty accounts (EIP-161-empty: zero balance, zero nonce, no code, no
 // storage) and `builtin`-only entries (precompile gas-pricing
 // pseudoaccounts) are dropped — Nethermind's GenesisBuilder skips them at
@@ -257,21 +259,22 @@ func paritySpecToStateAccounts(t *testing.T, spec *parityChainspec) (
 //
 // Hash-relevant fields that Nethermind sets at genesis (per
 // HeaderDecoder.cs at SHA 09bd5a2d) and how we mirror each:
-//   ParentHash   ← spec.Genesis.ParentHash
-//   UncleHash    ← types.EmptyUncleHash (no uncles at genesis, fixed)
-//   Coinbase     ← spec.Genesis.Author
-//   Root         ← caller's stateRoot (already computed)
-//   TxHash       ← types.EmptyTxsHash (genesis has no txs, fixed)
-//   ReceiptHash  ← types.EmptyReceiptsHash (genesis has no receipts, fixed)
-//   Bloom        ← zero (no logs at genesis, fixed)
-//   Difficulty   ← spec.Genesis.Difficulty
-//   Number       ← 0 (genesis is block 0, fixed)
-//   GasLimit     ← spec.Genesis.GasLimit
-//   GasUsed      ← 0 (genesis has no execution, fixed)
-//   Time         ← spec.Genesis.Timestamp
-//   Extra        ← spec.Genesis.ExtraData
-//   MixDigest    ← spec.Genesis.Seal.Ethereum.MixHash
-//   Nonce        ← spec.Genesis.Seal.Ethereum.Nonce
+//
+//	ParentHash   ← spec.Genesis.ParentHash
+//	UncleHash    ← types.EmptyUncleHash (no uncles at genesis, fixed)
+//	Coinbase     ← spec.Genesis.Author
+//	Root         ← caller's stateRoot (already computed)
+//	TxHash       ← types.EmptyTxsHash (genesis has no txs, fixed)
+//	ReceiptHash  ← types.EmptyReceiptsHash (genesis has no receipts, fixed)
+//	Bloom        ← zero (no logs at genesis, fixed)
+//	Difficulty   ← spec.Genesis.Difficulty
+//	Number       ← 0 (genesis is block 0, fixed)
+//	GasLimit     ← spec.Genesis.GasLimit
+//	GasUsed      ← 0 (genesis has no execution, fixed)
+//	Time         ← spec.Genesis.Timestamp
+//	Extra        ← spec.Genesis.ExtraData
+//	MixDigest    ← spec.Genesis.Seal.Ethereum.MixHash
+//	Nonce        ← spec.Genesis.Seal.Ethereum.Nonce
 //
 // Optional EIP-1559 / Shanghai / Cancun / Prague fields stay nil — the
 // three vendored fixtures all target Berlin or earlier (the test class

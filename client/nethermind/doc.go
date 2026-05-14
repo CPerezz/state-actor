@@ -5,9 +5,10 @@
 //
 // Run() opens the RocksDB instances directly under <datadir>/ that
 // Nethermind expects (state, code, blocks, headers, blockNumbers,
-// blockInfos, receipts), populates State+Code via the
-// writeSyntheticAccounts / writeGenesisAllocAccounts dispatch, then
-// assembles the genesis block tree (header / block / blockNumbers /
+// blockInfos, receipts), populates State+Code via
+// writeSyntheticAccounts (which handles synthetic generation, genesis-
+// alloc accounts, AND spec-PreAlloc entities via the streaming Phase 0),
+// then assembles the genesis block tree (header / block / blockNumbers /
 // blockInfos with WasProcessed=true / empty receipts at row 0).
 // Booting nethermind against the produced datadir starts at block 0
 // ready — no init phase, no chainspec preallocation pass.

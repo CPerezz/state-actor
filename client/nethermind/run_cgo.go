@@ -4,21 +4,17 @@
 // inside the Dockerfile.nethermind build context where librocksdb and
 // grocksdb are available.
 //
-// runImpl drives three writer paths off generator.Config:
+// runImpl drives writer paths off generator.Config:
 //
 //   - Empty alloc (no --accounts/--contracts, no --genesis with non-zero
-//     alloc): the seven RocksDBs get a block-0 row each with
+//     alloc, no --spec): the seven RocksDBs get a block-0 row each with
 //     WasProcessed=true so Nethermind's BlockTree boot detection skips its
 //     own loader. State/Code stay empty (state root = EmptyTreeHash).
-//   - Genesis-alloc only (--genesis JSON with alloc, no synthetic
-//     accounts): writeGenesisAllocAccounts walks the alloc, writes
-//     accounts + storage tries + code, returns the computed state root.
-//   - Synthetic + optional genesis-alloc (--accounts/--contracts > 0):
-//     writeSyntheticAccounts streams entitygen-generated entities through
-//     a temp Pebble for sorted-by-addrHash account-trie build. Storage
-//     trees for genesis-alloc accounts are not yet threaded into this
-//     path; runImpl fails loud if the user combines them. Tracked at
-//     https://github.com/nerolation/state-actor/issues/22.
+//   - Any non-empty input (synthetic --accounts/--contracts, --genesis
+//     alloc, or --spec PreAlloc entities): writeSyntheticAccounts handles
+//     all three uniformly. Spec storage flows through the streaming
+//     Phase 0; genesis alloc + synthetic accounts feed the addrHash-
+//     sorted state-trie build via a temp Pebble.
 
 package nethermind
 
@@ -43,19 +39,19 @@ import (
 //     cfg.* / --genesis path.
 //  2. Open 7 grocksdb instances directly under cfg.DBPath/ via openNethDBs
 //     (which enforces the fresh-dir precondition).
-//  3. Dispatch to writeSyntheticAccounts / writeGenesisAllocAccounts /
-//     empty-alloc to populate the State + Code DBs and compute the state
-//     root.
+//  3. Dispatch to writeSyntheticAccounts (handles synthetic generation,
+//     genesis-alloc, AND spec-PreAlloc entities via the spec-storage
+//     streaming Phase 0). Empty alloc + zero synthetic counts → state
+//     stays empty and root = EmptyTreeHash.
 //  4. Build the genesis header with the computed state root.
 //  5. writeGenesisBlockToDBs assembles the 5 metadata DBs at block 0
 //     (headers/blocks/blockNumbers/receipts, blockInfos LAST as the boot
 //     gate; see genesis_cgo.go for the failure-window discipline).
 //  6. Close cleanly and return Stats.
 //
-// ctx and opts are reserved for future cancellation / boot-validation
-// wiring; runImpl's body runs synchronously today.
+// opts is reserved for future boot-validation wiring; runImpl's body
+// runs synchronously today.
 func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generator.Stats, error) {
-	_ = ctx
 	_ = opts
 
 	if cfg.TrieMode == generator.TrieModeBinary {
@@ -77,32 +73,22 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 	}
 	defer dbs.Close()
 
-	// State-trie population: dispatch by what the caller asked for.
-	//   - synthetic --accounts=N or --contracts=N → writeSyntheticAccounts
-	//     (entitygen → temp Pebble → addrHash-sorted state trie). It also
-	//     folds in genesis-alloc accounts so the same sort produces a
-	//     unified root.
-	//   - genesis-alloc only (no synthetic) → writeGenesisAllocAccounts (a
-	//     simpler in-memory path without the temp Pebble round-trip).
-	//   - empty alloc → state stays empty; root = EmptyTreeHash.
-	// alloc walking is kept for tests (cfg.GenesisAccounts/Storage/Code).
-	// The CLI never sets these — production runs always go through
-	// writeSyntheticAccounts with empty alloc.
+	// State-trie population: writeSyntheticAccounts handles every non-
+	// empty case (synthetic generation + genesis-alloc + spec-PreAlloc
+	// entities). Its per-loop gates on cfg.NumAccounts and
+	// cfg.NumContracts collapse the synthetic loops to zero iterations
+	// when the user passed --spec without --accounts/--contracts; the
+	// genesis-alloc loop and the spec-storage streaming Phase 0 still
+	// fire. Empty everything → state stays empty; root = EmptyTreeHash.
 	stateRoot := common.Hash(neth.EmptyTreeHash)
 	allocAccounts := cfg.GenesisAccounts
 	allocCodes := cfg.GenesisCode
 	allocStorages := cfg.GenesisStorage
 	stats := &generator.Stats{}
-	switch {
-	case cfg.NumAccounts > 0 || cfg.NumContracts > 0:
-		stateRoot, err = writeSyntheticAccounts(dbs, cfg, allocAccounts, allocCodes, allocStorages, stats)
+	if cfg.NumAccounts > 0 || cfg.NumContracts > 0 || len(allocAccounts) > 0 {
+		stateRoot, err = writeSyntheticAccounts(ctx, dbs, cfg, allocAccounts, allocCodes, allocStorages, stats)
 		if err != nil {
-			return nil, fmt.Errorf("write synthetic accounts: %w", err)
-		}
-	case len(allocAccounts) > 0:
-		stateRoot, err = writeGenesisAllocAccounts(dbs, allocAccounts, allocCodes, allocStorages, stats)
-		if err != nil {
-			return nil, fmt.Errorf("write genesis alloc: %w", err)
+			return nil, fmt.Errorf("write state: %w", err)
 		}
 	}
 	stats.TotalBytes = stats.AccountBytes + stats.StorageBytes + stats.CodeBytes
@@ -142,4 +128,3 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 	stats.ContractsCreated = cfg.NumContracts
 	return stats, nil
 }
-
