@@ -7,6 +7,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/holiman/uint256"
 
 	"github.com/nerolation/state-actor/internal/spec"
 )
@@ -19,8 +20,8 @@ func TestERC20ValidateParameters(t *testing.T) {
 		valid  bool
 	}{
 		{
-			name:   "complete",
-			params: map[string]any{"symbol": "USDC", "name": "USD Coin", "decimals": 6},
+			name:   "complete-bare",
+			params: map[string]any{"symbol": "USDC", "name": "USD Coin", "decimals": 18},
 			valid:  true,
 		},
 		{
@@ -36,8 +37,8 @@ func TestERC20ValidateParameters(t *testing.T) {
 			params: map[string]any{"symbol": "x", "name": "x"},
 		},
 		{
-			name:   "decimals-out-of-range",
-			params: map[string]any{"symbol": "x", "name": "x", "decimals": 999},
+			name:   "decimals-not-18",
+			params: map[string]any{"symbol": "x", "name": "x", "decimals": 6},
 		},
 		{
 			name:   "decimals-wrong-type",
@@ -56,13 +57,112 @@ func TestERC20ValidateParameters(t *testing.T) {
 			params: map[string]any{"symbol": "x", "name": "x", "decimals": 18, "supply": 1_000_000},
 		},
 		{
-			name:   "holders-int-ok",
+			name:   "holders-removed",
 			params: map[string]any{"symbol": "x", "name": "x", "decimals": 18, "holders": 1000},
-			valid:  true,
 		},
 		{
-			name:   "holders-bad-type",
-			params: map[string]any{"symbol": "x", "name": "x", "decimals": 18, "holders": "1000"},
+			name: "total_owners-only-ok",
+			params: map[string]any{
+				"symbol": "x", "name": "x", "decimals": 18,
+				"total_owners": 1000,
+			},
+			valid: true,
+		},
+		{
+			name: "owners-explicit-ok",
+			params: map[string]any{
+				"symbol": "x", "name": "x", "decimals": 18,
+				"owners": []any{
+					map[string]any{"address": "0x1111111111111111111111111111111111111111", "balance": "100"},
+				},
+			},
+			valid: true,
+		},
+		{
+			name: "owners-allowances-and-totals-ok",
+			params: map[string]any{
+				"symbol": "x", "name": "x", "decimals": 18,
+				"owners": []any{
+					map[string]any{"address": "0x1111111111111111111111111111111111111111", "balance": "100"},
+				},
+				"total_owners": 5,
+				"allowances": []any{
+					map[string]any{
+						"owner":     "0x1111111111111111111111111111111111111111",
+						"spender":   "0x2222222222222222222222222222222222222222",
+						"allowance": "50",
+					},
+				},
+				"total_allowances": 3,
+			},
+			valid: true,
+		},
+		{
+			name: "owners-duplicate-address",
+			params: map[string]any{
+				"symbol": "x", "name": "x", "decimals": 18,
+				"owners": []any{
+					map[string]any{"address": "0x1111111111111111111111111111111111111111", "balance": "100"},
+					map[string]any{"address": "0x1111111111111111111111111111111111111111", "balance": "200"},
+				},
+			},
+		},
+		{
+			name: "allowances-duplicate-pair",
+			params: map[string]any{
+				"symbol": "x", "name": "x", "decimals": 18,
+				"allowances": []any{
+					map[string]any{"owner": "0x1111111111111111111111111111111111111111", "spender": "0x2222222222222222222222222222222222222222", "allowance": "10"},
+					map[string]any{"owner": "0x1111111111111111111111111111111111111111", "spender": "0x2222222222222222222222222222222222222222", "allowance": "20"},
+				},
+			},
+		},
+		{
+			name: "total_owners-less-than-explicit",
+			params: map[string]any{
+				"symbol": "x", "name": "x", "decimals": 18,
+				"owners": []any{
+					map[string]any{"address": "0x1111111111111111111111111111111111111111", "balance": "100"},
+					map[string]any{"address": "0x2222222222222222222222222222222222222222", "balance": "200"},
+				},
+				"total_owners": 1,
+			},
+		},
+		{
+			name: "owner-missing-balance",
+			params: map[string]any{
+				"symbol": "x", "name": "x", "decimals": 18,
+				"owners": []any{
+					map[string]any{"address": "0x1111111111111111111111111111111111111111"},
+				},
+			},
+		},
+		{
+			name: "owner-bad-address",
+			params: map[string]any{
+				"symbol": "x", "name": "x", "decimals": 18,
+				"owners": []any{
+					map[string]any{"address": "0xZZZZ", "balance": "100"},
+				},
+			},
+		},
+		{
+			name: "owner-unquoted-balance",
+			params: map[string]any{
+				"symbol": "x", "name": "x", "decimals": 18,
+				"owners": []any{
+					map[string]any{"address": "0x1111111111111111111111111111111111111111", "balance": 100},
+				},
+			},
+		},
+		{
+			name: "allowance-missing-owner",
+			params: map[string]any{
+				"symbol": "x", "name": "x", "decimals": 18,
+				"allowances": []any{
+					map[string]any{"spender": "0x2222222222222222222222222222222222222222", "allowance": "10"},
+				},
+			},
 		},
 	}
 	for _, tc := range cases {
@@ -80,16 +180,18 @@ func TestERC20ValidateParameters(t *testing.T) {
 
 func TestERC20StorageLayout(t *testing.T) {
 	addr := common.HexToAddress("0x0000000000000000000000000000000000000006")
+	const seed = int64(1)
+	const totalOwners = 3
 	ent := spec.Entity{
 		Kind:     spec.KindContract,
 		Template: "erc20",
 		Parameters: map[string]any{
 			"symbol": "TEST", "name": "TestToken", "decimals": 18,
-			"holders": 3,
+			"total_owners": totalOwners,
 		},
 	}
 	ctx := Context{
-		Seed: 1, ClientName: "geth",
+		Seed: seed, ClientName: "geth",
 		Sizer:           fixedSizer{bytesPerSlot: 64},
 		ResolvedAddress: addr,
 	}
@@ -116,14 +218,21 @@ func TestERC20StorageLayout(t *testing.T) {
 		t.Errorf("symbol slot length byte = 0x%02x, want 0x08", symSlot[31])
 	}
 
-	// _totalSupply slot — holderCount=3, balance=1/each → totalSupply=3.
-	tsSlot := storage[uint64SlotKey(erc20SlotTotalSupply)]
-	if tsSlot[31] != 3 {
-		t.Errorf("totalSupply = %x, want 3", tsSlot)
+	// _totalSupply auto-summed from the synthesized random balances —
+	// re-derive the same values via deterministicRandomBalance and
+	// compare slot bytes.
+	wantTotal := new(uint256.Int)
+	for i := 0; i < totalOwners; i++ {
+		v := deterministicRandomBalance(seed, addr, i)
+		wantTotal.Add(wantTotal, new(uint256.Int).SetBytes(v[:]))
+	}
+	gotTotal := storage[uint64SlotKey(erc20SlotTotalSupply)]
+	if gotTotal != wantTotal.Bytes32() {
+		t.Errorf("totalSupply mismatch:\n got  %x\n want %x", gotTotal, wantTotal.Bytes32())
 	}
 
-	// _balances mapping — 3 holder entries. Storage map has 3 explicit slots
-	// (name/symbol/totalSupply) + 3 synthesized balance slots = 6 total.
+	// Storage shape: 3 fixed slots (name, symbol, totalSupply) + 3
+	// synthesized _balances slots = 6 entries total.
 	if len(storage) != 6 {
 		t.Errorf("storage entry count = %d, want 6", len(storage))
 	}
@@ -247,6 +356,173 @@ func TestERC20NonceHonorsUserValue(t *testing.T) {
 				t.Errorf("nonce: got %d, want %d", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestERC20OwnersExplicit verifies each explicit owner's balance slot
+// lands at the correct Solidity `keccak(pad32(addr) || pad32(0))` key
+// with the expected value.
+func TestERC20OwnersExplicit(t *testing.T) {
+	tokenAddr := common.HexToAddress("0x0000000000000000000000000000000000000aa1")
+	alice := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	bob := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	ent := spec.Entity{
+		Kind:     spec.KindContract,
+		Template: "erc20",
+		Parameters: map[string]any{
+			"symbol": "AAA", "name": "ExplicitOwnersToken", "decimals": 18,
+			"owners": []any{
+				map[string]any{"address": alice.Hex(), "balance": "1000"},
+				map[string]any{"address": bob.Hex(), "balance": "500"},
+			},
+		},
+	}
+	ctx := Context{Seed: 7, Sizer: fixedSizer{bytesPerSlot: 64}, ResolvedAddress: tokenAddr}
+	out, err := erc20Template{}.Expand(ctx, ent)
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	storage := collectMap(out[0].Storage)
+
+	wantAlice := uint256.NewInt(1000).Bytes32()
+	gotAlice := storage[balanceSlotKey(alice)]
+	if gotAlice != wantAlice {
+		t.Errorf("alice _balances slot:\n got  %x\n want %x", gotAlice, wantAlice)
+	}
+	wantBob := uint256.NewInt(500).Bytes32()
+	gotBob := storage[balanceSlotKey(bob)]
+	if gotBob != wantBob {
+		t.Errorf("bob _balances slot:\n got  %x\n want %x", gotBob, wantBob)
+	}
+}
+
+// TestERC20AllowancesExplicit verifies each explicit allowance lands at
+// the correct nested-mapping slot:
+//
+//	inner = keccak(pad32(owner)   || pad32(1))
+//	slot  = keccak(pad32(spender) || inner)
+func TestERC20AllowancesExplicit(t *testing.T) {
+	tokenAddr := common.HexToAddress("0x0000000000000000000000000000000000000aa1")
+	alice := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	spender := common.HexToAddress("0x3333333333333333333333333333333333333333")
+	ent := spec.Entity{
+		Kind:     spec.KindContract,
+		Template: "erc20",
+		Parameters: map[string]any{
+			"symbol": "AAA", "name": "T", "decimals": 18,
+			"allowances": []any{
+				map[string]any{"owner": alice.Hex(), "spender": spender.Hex(), "allowance": "100"},
+			},
+		},
+	}
+	ctx := Context{Seed: 7, Sizer: fixedSizer{bytesPerSlot: 64}, ResolvedAddress: tokenAddr}
+	out, err := erc20Template{}.Expand(ctx, ent)
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	storage := collectMap(out[0].Storage)
+	want := uint256.NewInt(100).Bytes32()
+	got := storage[allowanceSlotKey(alice, spender)]
+	if got != want {
+		t.Errorf("allowance slot:\n got  %x\n want %x", got, want)
+	}
+}
+
+// TestERC20TotalOwnersGapFill verifies that explicit owners + random
+// fill combine to exactly total_owners distinct _balances slots.
+func TestERC20TotalOwnersGapFill(t *testing.T) {
+	tokenAddr := common.HexToAddress("0x0000000000000000000000000000000000000aa3")
+	a := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	b := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	c := common.HexToAddress("0x4444444444444444444444444444444444444444")
+	ent := spec.Entity{
+		Kind:     spec.KindContract,
+		Template: "erc20",
+		Parameters: map[string]any{
+			"symbol": "CCC", "name": "Mixed", "decimals": 18,
+			"owners": []any{
+				map[string]any{"address": a.Hex(), "balance": "1000"},
+				map[string]any{"address": b.Hex(), "balance": "500"},
+				map[string]any{"address": c.Hex(), "balance": "250"},
+			},
+			"total_owners": 10,
+		},
+	}
+	ctx := Context{Seed: 13, Sizer: fixedSizer{bytesPerSlot: 64}, ResolvedAddress: tokenAddr}
+	out, err := erc20Template{}.Expand(ctx, ent)
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	storage := collectMap(out[0].Storage)
+
+	// Expect 3 fixed slots (name, symbol, totalSupply) + 10 _balances slots = 13.
+	if len(storage) != 13 {
+		t.Errorf("storage count = %d, want 13", len(storage))
+	}
+	// All three explicit owners must have their planted balances.
+	for _, want := range []struct {
+		addr common.Address
+		bal  uint64
+	}{{a, 1000}, {b, 500}, {c, 250}} {
+		got := storage[balanceSlotKey(want.addr)]
+		wantHash := uint256.NewInt(want.bal).Bytes32()
+		if got != wantHash {
+			t.Errorf("explicit owner %s: got %x, want %x", want.addr.Hex(), got, wantHash)
+		}
+	}
+}
+
+// TestERC20TotalSupplyAutoSummed verifies _totalSupply equals the sum of
+// every planted balance (explicit + random).
+func TestERC20TotalSupplyAutoSummed(t *testing.T) {
+	tokenAddr := common.HexToAddress("0x0000000000000000000000000000000000000aa3")
+	a := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	const seed = int64(17)
+	const totalOwners = 5
+	ent := spec.Entity{
+		Kind:     spec.KindContract,
+		Template: "erc20",
+		Parameters: map[string]any{
+			"symbol": "X", "name": "X", "decimals": 18,
+			"owners": []any{
+				map[string]any{"address": a.Hex(), "balance": "1000"},
+			},
+			"total_owners": totalOwners,
+		},
+	}
+	ctx := Context{Seed: seed, Sizer: fixedSizer{bytesPerSlot: 64}, ResolvedAddress: tokenAddr}
+	out, err := erc20Template{}.Expand(ctx, ent)
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	storage := collectMap(out[0].Storage)
+
+	want := uint256.NewInt(1000)
+	for i := 0; i < totalOwners-1; i++ {
+		v := deterministicRandomBalance(seed, tokenAddr, i)
+		want.Add(want, new(uint256.Int).SetBytes(v[:]))
+	}
+	got := storage[uint64SlotKey(erc20SlotTotalSupply)]
+	if got != want.Bytes32() {
+		t.Errorf("totalSupply:\n got  %x\n want %x", got, want.Bytes32())
+	}
+}
+
+// TestERC20SynthesizedAllowanceDeterminism pins re-iteration of
+// erc20RandomAllowancesIter: same (seed, tokenAddr, count) → byte-identical
+// slot stream. Cross-client invariance depends on this.
+func TestERC20SynthesizedAllowanceDeterminism(t *testing.T) {
+	tokenAddr := common.HexToAddress("0x0000000000000000000000000000000000000aa3")
+	pairs1 := collectPairs(erc20RandomAllowancesIter(42, tokenAddr, 8))
+	pairs2 := collectPairs(erc20RandomAllowancesIter(42, tokenAddr, 8))
+	if len(pairs1) != len(pairs2) || len(pairs1) != 8 {
+		t.Fatalf("got len=%d/%d, want 8", len(pairs1), len(pairs2))
+	}
+	for i := range pairs1 {
+		if pairs1[i] != pairs2[i] {
+			t.Errorf("pair %d diverged:\n run1 K=%x V=%x\n run2 K=%x V=%x",
+				i, pairs1[i].K, pairs1[i].V, pairs2[i].K, pairs2[i].V)
+		}
 	}
 }
 

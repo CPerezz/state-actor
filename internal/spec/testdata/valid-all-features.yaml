@@ -9,7 +9,7 @@ entities:
     balance: "0"
     parameters:
       symbol: EXP
-      decimals: 6
+      decimals: 18
       name: Explicit
     approximate_size_bytes: 100_000
 

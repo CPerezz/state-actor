@@ -134,7 +134,7 @@ func (b *BigIntDecimal) UnmarshalYAML(node *yaml.Node) error {
 	if s == "" {
 		return fmt.Errorf("balance is empty (line %d)", node.Line)
 	}
-	v, err := parseUint256(s)
+	v, err := ParseUint256(s)
 	if err != nil {
 		return fmt.Errorf("decode balance %q (line %d): %w", s, node.Line, err)
 	}
@@ -142,10 +142,15 @@ func (b *BigIntDecimal) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
-// parseUint256 accepts decimal (e.g. "1000000000000000000") or 0x-hex
+// ParseUint256 accepts decimal (e.g. "1000000000000000000") or 0x-hex
 // (e.g. "0xde0b6b3a7640000") representations and returns a *uint256.Int.
 // Underscores are not accepted (YAML strings don't strip them).
-func parseUint256(s string) (*uint256.Int, error) {
+//
+// Exported so the templates package can reuse the same parsing rules
+// for nested-object fields (e.g. erc20 owners' balance, allowances'
+// amount) — those decode through map[string]any and don't get our
+// custom UnmarshalYAML hooks.
+func ParseUint256(s string) (*uint256.Int, error) {
 	v := new(uint256.Int)
 	if strings.HasPrefix(s, "0x") || strings.HasPrefix(s, "0X") {
 		if err := v.SetFromHex(s); err != nil {

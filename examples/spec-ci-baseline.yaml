@@ -30,21 +30,23 @@ entities:
     nonce: 0
 
   # ── 2-6. ERC-20 flavor coverage ──────────────────────────────────────
-  # Different address-resolution modes + parameter shapes. Uses `holders`
-  # (explicit slot count) for deterministic cross-client output.
+  # Different address-resolution modes + parameter shapes. Uses
+  # `total_owners` (explicit random-fill count) for deterministic
+  # cross-client output. decimals must equal 18 (OZ v5 base default;
+  # the template rejects other values).
 
-  # Explicit address + holders.
+  # Explicit address + bulk random fill.
   - kind: contract
     template: erc20
     name: explicit-token
     address: 0x000000000000000000000000000000000000aaaa
     parameters:
       symbol: EXP
-      decimals: 6
+      decimals: 18
       name: Explicit
-      holders: 500
+      total_owners: 500
 
-  # Name-derived address + holders.
+  # Name-derived address + bulk random fill.
   - kind: contract
     template: erc20
     name: named-token
@@ -52,18 +54,18 @@ entities:
       symbol: NMD
       decimals: 18
       name: NamedToken
-      holders: 250
+      total_owners: 250
 
-  # Position-derived address (no `name`, no `address`) + holders.
+  # Position-derived address (no `name`, no `address`) + bulk random fill.
   - kind: contract
     template: erc20
     parameters:
       symbol: ANO
       decimals: 18
       name: AnonToken
-      holders: 100
+      total_owners: 100
 
-  # Skeleton ERC-20 — no holders, no approximate_size_bytes.
+  # Skeleton ERC-20 — no total_owners, no approximate_size_bytes.
   # Should produce only the explicit _name / _symbol slots, no _totalSupply.
   - kind: contract
     template: erc20
@@ -83,7 +85,7 @@ entities:
       symbol: N42
       decimals: 18
       name: NonceOverride
-      holders: 50
+      total_owners: 50
 
   # ── 7-8. Raw bytecode contract flavors ───────────────────────────────
 
