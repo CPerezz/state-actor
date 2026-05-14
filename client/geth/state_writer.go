@@ -101,7 +101,7 @@ func writeStateAndCollectRoot(
 		}
 		addr := pe.Address
 		addrHash := crypto.Keccak256Hash(addr[:])
-		hb := &gethStorageHashBuilder{t: trie.NewStackTrie(nil)}
+		hb := newGethStorageHashBuilder(w, addrHash)
 		streamSink := func(keyHash, _rawKey, value common.Hash) error {
 			valueRLP, encErr := encodeStorageValue(value)
 			if encErr != nil {
@@ -270,17 +270,23 @@ func writeStateAndCollectRoot(
 	// (0x56e81f..63b421), which mismatches the recorded SnapshotRoot and
 	// triggers `State snapshot is not consistent` → `Genesis state is
 	// missing` → every state RPC fails. See nerolation/state-actor#42.
+	//
+	// The callback captures the first PutTrieNode error in accountTrieErr;
+	// the outer error-return after sorter.Iterate surfaces it. Aborting
+	// via log.Fatalf here would bypass sorter.Close and other defers.
+	var accountTrieErr error
 	accountCb := func(path []byte, hash common.Hash, blob []byte) {
+		if accountTrieErr != nil {
+			return
+		}
 		// StackTrie warns the path/blob slices are volatile across calls;
 		// copy before queuing into the writer's batch.
-		p := make([]byte, len(path))
-		copy(p, path)
-		b := make([]byte, len(blob))
-		copy(b, blob)
+		p := append([]byte(nil), path...)
+		b := append([]byte(nil), blob...)
 		key := append([]byte{}, rawdb.TrieNodeAccountPrefix...)
 		key = append(key, p...)
 		if err := w.PutTrieNode(key, b); err != nil {
-			log.Fatalf("write account trie node: %v", err)
+			accountTrieErr = fmt.Errorf("geth: write account trie node: %w", err)
 		}
 	}
 	accountTrie := trie.NewStackTrie(accountCb)
@@ -390,8 +396,16 @@ func writeStateAndCollectRoot(
 	if iterErr != nil && !errors.Is(iterErr, earlyStop) {
 		return common.Hash{}, nil, iterErr
 	}
+	if accountTrieErr != nil {
+		return common.Hash{}, nil, accountTrieErr
+	}
 
 	stateRoot := accountTrie.Hash()
+	if accountTrieErr != nil {
+		// accountTrie.Hash() can flush remaining nodes through the
+		// callback; surface a failure from those final writes too.
+		return common.Hash{}, nil, accountTrieErr
+	}
 	stats.StateRoot = stateRoot
 	stats.DBWriteTime = time.Since(phase2Start)
 	if cfg.Verbose {
@@ -503,17 +517,19 @@ func buildStorageTrie(
 	})
 
 	acctHash := accountHash // capture for closure
+	var storageTrieErr error
 	storageCb := func(path []byte, hash common.Hash, blob []byte) {
-		p := make([]byte, len(path))
-		copy(p, path)
-		b := make([]byte, len(blob))
-		copy(b, blob)
+		if storageTrieErr != nil {
+			return
+		}
+		p := append([]byte(nil), path...)
+		b := append([]byte(nil), blob...)
 		key := make([]byte, 0, len(rawdb.TrieNodeStoragePrefix)+common.HashLength+len(p))
 		key = append(key, rawdb.TrieNodeStoragePrefix...)
 		key = append(key, acctHash[:]...)
 		key = append(key, p...)
 		if err := w.PutTrieNode(key, b); err != nil {
-			log.Fatalf("write storage trie node: %v", err)
+			storageTrieErr = fmt.Errorf("geth: write storage trie node: %w", err)
 		}
 	}
 	storageTrie := trie.NewStackTrie(storageCb)
@@ -528,27 +544,66 @@ func buildStorageTrie(
 		}
 		out = append(out, sortedSlot{slotHash: h.Hash, valueRLP: valueRLP})
 	}
-	return storageTrie.Hash(), out, nil
+	root := storageTrie.Hash()
+	if storageTrieErr != nil {
+		return common.Hash{}, nil, storageTrieErr
+	}
+	return root, out, nil
 }
 
 // gethStorageHashBuilder adapts go-ethereum's trie.StackTrie to the
-// streamingtrie.HashBuilder contract.
+// streamingtrie.HashBuilder contract for spec-entity Phase 0.
 //
-// AddLeaf calls t.Update with the streamingtrie-encoded value (trim
-// leading zeros + RLP) — exactly the encoding go-ethereum's snapshot
-// reader expects. The streamingtrie helper does the RLP encode, so
-// AddLeaf just forwards.
+// Each StackTrie node-completion callback writes the trie blob to the
+// production Pebble under TrieNodeStoragePrefix + addrHash + path —
+// the same key shape Phase 2's buildStorageTrie uses for synthetic
+// contracts. Without these writes, geth's PathDB has no way to walk
+// the storage trie at boot (eth_getProof, snapshot regeneration,
+// archive reads all fail for spec entities even though snapshot
+// flat-state rows are present).
 //
-// Root returns t.Hash() (StackTrie's accumulator). Returns nil error
-// (StackTrie.Hash never fails).
+// PutTrieNode failures are captured in err (sticky: first non-nil
+// wins) so the caller's outer error path surfaces them — aborting
+// inside the callback via log.Fatalf would bypass sorter.Close and
+// other defers.
 type gethStorageHashBuilder struct {
-	t *trie.StackTrie
+	t        *trie.StackTrie
+	w        *Writer
+	addrHash common.Hash
+	err      error
+}
+
+func newGethStorageHashBuilder(w *Writer, addrHash common.Hash) *gethStorageHashBuilder {
+	hb := &gethStorageHashBuilder{w: w, addrHash: addrHash}
+	cb := func(path []byte, hash common.Hash, blob []byte) {
+		if hb.err != nil {
+			return
+		}
+		p := append([]byte(nil), path...)
+		b := append([]byte(nil), blob...)
+		key := make([]byte, 0, len(rawdb.TrieNodeStoragePrefix)+common.HashLength+len(p))
+		key = append(key, rawdb.TrieNodeStoragePrefix...)
+		key = append(key, hb.addrHash[:]...)
+		key = append(key, p...)
+		if err := hb.w.PutTrieNode(key, b); err != nil {
+			hb.err = fmt.Errorf("geth: write storage trie node for %s: %w", hb.addrHash.Hex(), err)
+		}
+	}
+	hb.t = trie.NewStackTrie(cb)
+	return hb
 }
 
 func (g *gethStorageHashBuilder) AddLeaf(keyHash common.Hash, valueRLP []byte) error {
+	if g.err != nil {
+		return g.err
+	}
 	return g.t.Update(keyHash[:], valueRLP)
 }
 
 func (g *gethStorageHashBuilder) Root() (common.Hash, error) {
-	return g.t.Hash(), nil
+	root := g.t.Hash() // triggers final node-completion callbacks
+	if g.err != nil {
+		return common.Hash{}, g.err
+	}
+	return root, nil
 }
