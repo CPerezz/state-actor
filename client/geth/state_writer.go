@@ -23,6 +23,7 @@ import (
 
 	"github.com/nerolation/state-actor/generator"
 	"github.com/nerolation/state-actor/internal/entitygen"
+	"github.com/nerolation/state-actor/internal/streamingtrie"
 	"github.com/nerolation/state-actor/internal/streamsort"
 )
 
@@ -74,6 +75,48 @@ func writeStateAndCollectRoot(
 		return common.Hash{}, nil, fmt.Errorf("geth: streamsort.New: %w", err)
 	}
 	defer sorter.Close()
+
+	// Reverse map for Phase 2: addrHash → original Address, so we can
+	// look up cfg.GenesisAccounts[addr].Root (set by the Phase 0 streaming
+	// spec-storage pass below) when encoding spec-entity account leaves.
+	hashToAddr := make(map[common.Hash]common.Address, len(cfg.GenesisAccounts))
+	for addr := range cfg.GenesisAccounts {
+		hashToAddr[crypto.Keccak256Hash(addr[:])] = addr
+	}
+
+	// --- Phase 0: stream per-spec-entity storage. ---
+	//
+	// For each PreAlloc entity with non-nil Storage, drain the iter
+	// through streamingtrie.StorageRoot: the HashBuilder wraps a per-
+	// account go-ethereum trie.StackTrie, and the Sink writes each
+	// snapshot-Pebble storage row via w.WriteStorageRLP. The returned
+	// root is spliced into cfg.GenesisAccounts[addr].Root so Phase 2
+	// picks it up via hashToAddr.
+	for i, pe := range cfg.PreAlloc {
+		if pe.Storage == nil {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return common.Hash{}, nil, err
+		}
+		addr := pe.Address
+		addrHash := crypto.Keccak256Hash(addr[:])
+		hb := &gethStorageHashBuilder{t: trie.NewStackTrie(nil)}
+		streamSink := func(keyHash, _rawKey, value common.Hash) error {
+			valueRLP, encErr := encodeStorageValue(value)
+			if encErr != nil {
+				return encErr
+			}
+			return w.WriteStorageRLP(addrHash, keyHash, valueRLP)
+		}
+		root, err := streamingtrie.StorageRoot("", pe.Storage, hb, streamSink)
+		if err != nil {
+			return common.Hash{}, nil, fmt.Errorf("geth: stream spec storage[%d] %s: %w", i, addr.Hex(), err)
+		}
+		if acc, ok := cfg.GenesisAccounts[addr]; ok && acc != nil {
+			acc.Root = root
+		}
+	}
 
 	rng := mrand.New(mrand.NewSource(int64(cfg.Seed)))
 
@@ -262,10 +305,21 @@ func writeStateAndCollectRoot(
 		}
 
 		// Build storage trie + collect (sortedSlotHash, encodedValue) for
-		// snapshot writes in keccak order.
+		// snapshot writes in keccak order. For spec entities whose
+		// storage was streamed in Phase 0, ent.slots is empty (because
+		// materializePreAlloc no longer populates cfg.GenesisStorage for
+		// them) — use the pre-computed root from cfg.GenesisAccounts.
 		storageRoot, sortedSlotEntries, err := buildStorageTrie(w, addrHash, ent.slots)
 		if err != nil {
 			return fmt.Errorf("phase2 storage trie at #%d: %w", count, err)
+		}
+		if len(ent.slots) == 0 {
+			if specAddr, ok := hashToAddr[addrHash]; ok {
+				if acc := cfg.GenesisAccounts[specAddr]; acc != nil &&
+					acc.Root != (common.Hash{}) {
+					storageRoot = acc.Root
+				}
+			}
 		}
 
 		// Snapshot-side flat state writes (sequential by addrHash, and
@@ -475,4 +529,26 @@ func buildStorageTrie(
 		out = append(out, sortedSlot{slotHash: h.Hash, valueRLP: valueRLP})
 	}
 	return storageTrie.Hash(), out, nil
+}
+
+// gethStorageHashBuilder adapts go-ethereum's trie.StackTrie to the
+// streamingtrie.HashBuilder contract.
+//
+// AddLeaf calls t.Update with the streamingtrie-encoded value (trim
+// leading zeros + RLP) — exactly the encoding go-ethereum's snapshot
+// reader expects. The streamingtrie helper does the RLP encode, so
+// AddLeaf just forwards.
+//
+// Root returns t.Hash() (StackTrie's accumulator). Returns nil error
+// (StackTrie.Hash never fails).
+type gethStorageHashBuilder struct {
+	t *trie.StackTrie
+}
+
+func (g *gethStorageHashBuilder) AddLeaf(keyHash common.Hash, valueRLP []byte) error {
+	return g.t.Update(keyHash[:], valueRLP)
+}
+
+func (g *gethStorageHashBuilder) Root() (common.Hash, error) {
+	return g.t.Hash(), nil
 }
