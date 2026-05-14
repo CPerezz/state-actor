@@ -3,6 +3,7 @@ package geth
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	mrand "math/rand"
@@ -13,7 +14,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cockroachdb/pebble"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -23,6 +23,7 @@ import (
 
 	"github.com/nerolation/state-actor/generator"
 	"github.com/nerolation/state-actor/internal/entitygen"
+	"github.com/nerolation/state-actor/internal/streamsort"
 )
 
 // phase1FlushBytes mirrors client/besu/state_writer_cgo.go: 64 MiB temp
@@ -66,37 +67,15 @@ func writeStateAndCollectRoot(
 	stats := &generator.Stats{}
 	start := time.Now()
 
-	// --- Phase 1: stream entitygen → temp Pebble. ---
+	// --- Phase 1: stream entitygen → streamsort.Store. ---
 
-	tmpDir, err := os.MkdirTemp("", "geth-mpt-*")
+	sorter, err := streamsort.New("")
 	if err != nil {
-		return common.Hash{}, nil, fmt.Errorf("geth: mkdtemp: %w", err)
+		return common.Hash{}, nil, fmt.Errorf("geth: streamsort.New: %w", err)
 	}
-	defer os.RemoveAll(tmpDir)
-
-	pdb, err := pebble.Open(tmpDir, &pebble.Options{
-		MemTableSize: 64 * 1024 * 1024,
-		// DisableWAL is left at default-false because pebble's compactor
-		// can stall waiting on WAL fsyncs even with Sync=false on
-		// individual writes; the dominant cost we're avoiding is sync,
-		// not the WAL itself.
-	})
-	if err != nil {
-		return common.Hash{}, nil, fmt.Errorf("geth: open temp pebble: %w", err)
-	}
-	defer pdb.Close()
+	defer sorter.Close()
 
 	rng := mrand.New(mrand.NewSource(int64(cfg.Seed)))
-	pendingBytes := 0
-	batch := pdb.NewBatch()
-	flush := func() error {
-		if err := batch.Commit(noSync); err != nil {
-			return err
-		}
-		batch = pdb.NewBatch()
-		pendingBytes = 0
-		return nil
-	}
 
 	// Phase 1 raw-byte safety cap for --target-size. Phase 1 doesn't
 	// write to the production DB (all prod writes happen in Phase 2 in
@@ -131,14 +110,8 @@ func writeStateAndCollectRoot(
 	genesisAddrs := make(map[common.Address]struct{}, len(cfg.GenesisAccounts))
 
 	writeBlob := func(addrHash common.Hash, blob []byte) error {
-		if err := batch.Set(addrHash[:], blob, nil); err != nil {
+		if err := sorter.Put(addrHash[:], blob); err != nil {
 			return err
-		}
-		pendingBytes += 32 + len(blob)
-		if pendingBytes >= phase1FlushBytes {
-			if err := flush(); err != nil {
-				return err
-			}
 		}
 		checkTarget(len(blob))
 		return nil
@@ -235,13 +208,6 @@ func writeStateAndCollectRoot(
 		}
 	}
 
-	if err := flush(); err != nil {
-		return common.Hash{}, nil, fmt.Errorf("phase1 final flush: %w", err)
-	}
-	if err := pdb.Compact(nil, bytes32xFF, false); err != nil {
-		return common.Hash{}, nil, fmt.Errorf("phase1 compact: %w", err)
-	}
-
 	stats.GenerationTime = time.Since(start)
 	if cfg.Verbose {
 		log.Printf("[geth MPT Phase 1] complete: %d accounts, %d contracts, %d slots in %v",
@@ -281,30 +247,25 @@ func writeStateAndCollectRoot(
 	// it again. Bounded by total unique contracts.
 	codeSeen := make(map[common.Hash]struct{}, cfg.NumContracts)
 
-	iter, err := pdb.NewIter(nil)
-	if err != nil {
-		return common.Hash{}, nil, fmt.Errorf("phase2 open iter: %w", err)
-	}
-	defer iter.Close()
-
 	count := 0
-	for ok := iter.First(); ok; ok = iter.Next() {
+	earlyStop := errors.New("geth phase2: target size reached")
+	iterErr := sorter.Iterate(func(key, value []byte) error {
 		if err := ctx.Err(); err != nil {
-			return common.Hash{}, nil, err
+			return err
 		}
 		var addrHash common.Hash
-		copy(addrHash[:], iter.Key())
+		copy(addrHash[:], key)
 
-		ent, err := decodeEntityBlob(iter.Value())
+		ent, err := decodeEntityBlob(value)
 		if err != nil {
-			return common.Hash{}, nil, fmt.Errorf("phase2 decode at #%d: %w", count, err)
+			return fmt.Errorf("phase2 decode at #%d: %w", count, err)
 		}
 
 		// Build storage trie + collect (sortedSlotHash, encodedValue) for
 		// snapshot writes in keccak order.
 		storageRoot, sortedSlotEntries, err := buildStorageTrie(w, addrHash, ent.slots)
 		if err != nil {
-			return common.Hash{}, nil, fmt.Errorf("phase2 storage trie at #%d: %w", count, err)
+			return fmt.Errorf("phase2 storage trie at #%d: %w", count, err)
 		}
 
 		// Snapshot-side flat state writes (sequential by addrHash, and
@@ -321,17 +282,17 @@ func writeStateAndCollectRoot(
 			acc.CodeHash = codeHash.Bytes()
 		}
 		if err := w.WriteAccount(common.Address{}, addrHash, &acc, 0); err != nil {
-			return common.Hash{}, nil, fmt.Errorf("phase2 write account at #%d: %w", count, err)
+			return fmt.Errorf("phase2 write account at #%d: %w", count, err)
 		}
 		for _, s := range sortedSlotEntries {
 			if err := w.WriteStorageRLP(addrHash, s.slotHash, s.valueRLP); err != nil {
-				return common.Hash{}, nil, fmt.Errorf("phase2 write slot at #%d: %w", count, err)
+				return fmt.Errorf("phase2 write slot at #%d: %w", count, err)
 			}
 		}
 		if len(ent.code) > 0 {
 			if _, dup := codeSeen[codeHash]; !dup {
 				if err := w.WriteCode(codeHash, ent.code); err != nil {
-					return common.Hash{}, nil, fmt.Errorf("phase2 write code at #%d: %w", count, err)
+					return fmt.Errorf("phase2 write code at #%d: %w", count, err)
 				}
 				codeSeen[codeHash] = struct{}{}
 			}
@@ -343,10 +304,10 @@ func writeStateAndCollectRoot(
 		// elides Root for EOAs and crashes on decode.
 		fullRLP, err := rlp.EncodeToBytes(&acc)
 		if err != nil {
-			return common.Hash{}, nil, fmt.Errorf("phase2 encode account RLP at #%d: %w", count, err)
+			return fmt.Errorf("phase2 encode account RLP at #%d: %w", count, err)
 		}
 		if err := accountTrie.Update(addrHash[:], fullRLP); err != nil {
-			return common.Hash{}, nil, fmt.Errorf("phase2 account trie update at #%d: %w", count, err)
+			return fmt.Errorf("phase2 account trie update at #%d: %w", count, err)
 		}
 
 		count++
@@ -360,16 +321,20 @@ func writeStateAndCollectRoot(
 		// a 1024-batch is ~600 KiB, well below typical target tolerances.
 		if cfg.TargetSize > 0 && count%1024 == 0 {
 			if err := w.FlushBatch(); err != nil {
-				return common.Hash{}, nil, fmt.Errorf("phase2 target-size flush: %w", err)
+				return fmt.Errorf("phase2 target-size flush: %w", err)
 			}
 			if size, err := dirSize(cfg.DBPath); err == nil && size >= cfg.TargetSize {
 				if cfg.Verbose {
 					log.Printf("geth MPT Phase 2: dirSize %d MiB >= target %d MiB — stopping iteration",
 						size>>20, cfg.TargetSize>>20)
 				}
-				break
+				return earlyStop
 			}
 		}
+		return nil
+	})
+	if iterErr != nil && !errors.Is(iterErr, earlyStop) {
+		return common.Hash{}, nil, iterErr
 	}
 
 	stateRoot := accountTrie.Hash()

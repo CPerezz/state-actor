@@ -64,10 +64,10 @@ func TestRunCgoStreamingMultiBatch(t *testing.T) {
 		if filepath.Base(e.Name()) == "" {
 			continue
 		}
-		// reth-sort-* prefix matches NewSorter's MkdirTemp pattern.
+		// streamsort-* prefix matches streamsort.New's MkdirTemp pattern.
 		name := e.Name()
-		if len(name) > len("reth-sort-") && name[:len("reth-sort-")] == "reth-sort-" {
-			t.Errorf("Sorter temp dir leaked into datadir: %s", name)
+		if len(name) > len("streamsort-") && name[:len("streamsort-")] == "streamsort-" {
+			t.Errorf("streamsort temp dir leaked into datadir: %s", name)
 		}
 	}
 }

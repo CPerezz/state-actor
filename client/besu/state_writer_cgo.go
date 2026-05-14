@@ -8,10 +8,8 @@ import (
 	"fmt"
 	"log"
 	mrand "math/rand"
-	"os"
 	"sort"
 
-	"github.com/cockroachdb/pebble"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/holiman/uint256"
@@ -21,11 +19,8 @@ import (
 	besurlp "github.com/nerolation/state-actor/internal/besu/rlp"
 	besutrie "github.com/nerolation/state-actor/internal/besu/trie"
 	"github.com/nerolation/state-actor/internal/entitygen"
+	"github.com/nerolation/state-actor/internal/streamsort"
 )
-
-// phase1FlushBytes caps the temp-Pebble write batch at 64 MiB to bound Phase 1
-// memory while amortizing per-batch syscall overhead.
-const phase1FlushBytes = 64 * 1024 * 1024
 
 // writeStateAndCollectRoot drives the two-phase streaming pipeline.
 //
@@ -45,30 +40,15 @@ func writeStateAndCollectRoot(
 ) (common.Hash, []byte, *generator.Stats, error) {
 	stats := &generator.Stats{}
 
-	// --- Phase 1: stream entities to temp Pebble. ---
+	// --- Phase 1: stream entities to a shared streamsort.Store. ---
 
-	tmpDir, err := os.MkdirTemp("", "besu-acct-trie-*")
+	sorter, err := streamsort.New("")
 	if err != nil {
-		return common.Hash{}, nil, nil, fmt.Errorf("besu: mkdtemp: %w", err)
+		return common.Hash{}, nil, nil, fmt.Errorf("besu: streamsort.New: %w", err)
 	}
-	defer os.RemoveAll(tmpDir)
-
-	pdb, err := pebble.Open(tmpDir, &pebble.Options{})
-	if err != nil {
-		return common.Hash{}, nil, nil, fmt.Errorf("besu: open temp pebble: %w", err)
-	}
+	defer sorter.Close()
 
 	rng := mrand.New(mrand.NewSource(int64(cfg.Seed)))
-	pendingBytes := 0
-	batch := pdb.NewBatch()
-	flush := func() error {
-		if err := batch.Commit(pebble.Sync); err != nil {
-			return err
-		}
-		batch = pdb.NewBatch()
-		pendingBytes = 0
-		return nil
-	}
 
 	// Phase 1 target-size cap. Tracks raw entity bytes (32B addrHash key + blob)
 	// and stops emission once cfg.TargetSize is reached. Over-estimates the
@@ -91,22 +71,13 @@ func writeStateAndCollectRoot(
 
 	for i := 0; i < cfg.NumAccounts && !targetReached; i++ {
 		if err := ctx.Err(); err != nil {
-			pdb.Close()
 			return common.Hash{}, nil, nil, err
 		}
 		acc := entitygen.GenerateEOA(rng)
 		addrHash := acc.AddrHash
 		blob := encodeEntityEOA(acc.StateAccount.Nonce, acc.StateAccount.Balance)
-		if err := batch.Set(addrHash[:], blob, nil); err != nil {
-			pdb.Close()
+		if err := sorter.Put(addrHash[:], blob); err != nil {
 			return common.Hash{}, nil, nil, err
-		}
-		pendingBytes += 32 + len(blob)
-		if pendingBytes >= phase1FlushBytes {
-			if err := flush(); err != nil {
-				pdb.Close()
-				return common.Hash{}, nil, nil, err
-			}
 		}
 		if checkTarget(len(blob)) {
 			break
@@ -123,7 +94,6 @@ func writeStateAndCollectRoot(
 	seenAlloc := make(map[common.Address]struct{}, len(cfg.GenesisAccounts))
 	for addr, acc := range cfg.GenesisAccounts {
 		if err := ctx.Err(); err != nil {
-			pdb.Close()
 			return common.Hash{}, nil, nil, err
 		}
 		if _, dup := seenAlloc[addr]; dup {
@@ -142,16 +112,8 @@ func writeStateAndCollectRoot(
 		} else {
 			blob = encodeEntityContract(acc.Nonce, balance, code, cfg.GenesisStorage[addr])
 		}
-		if err := batch.Set(addrHash[:], blob, nil); err != nil {
-			pdb.Close()
+		if err := sorter.Put(addrHash[:], blob); err != nil {
 			return common.Hash{}, nil, nil, err
-		}
-		pendingBytes += 32 + len(blob)
-		if pendingBytes >= phase1FlushBytes {
-			if err := flush(); err != nil {
-				pdb.Close()
-				return common.Hash{}, nil, nil, err
-			}
 		}
 	}
 
@@ -161,7 +123,6 @@ func writeStateAndCollectRoot(
 	}
 	for i := 0; i < cfg.NumContracts && !targetReached; i++ {
 		if err := ctx.Err(); err != nil {
-			pdb.Close()
 			return common.Hash{}, nil, nil, err
 		}
 		// Canonical (slot-count, contract) draw order — single source of
@@ -174,48 +135,24 @@ func writeStateAndCollectRoot(
 		}
 		addrHash := contract.AddrHash
 		blob := encodeEntityContract(contract.StateAccount.Nonce, contract.StateAccount.Balance, contract.Code, slotMap)
-		if err := batch.Set(addrHash[:], blob, nil); err != nil {
-			pdb.Close()
+		if err := sorter.Put(addrHash[:], blob); err != nil {
 			return common.Hash{}, nil, nil, err
-		}
-		pendingBytes += 32 + len(blob)
-		if pendingBytes >= phase1FlushBytes {
-			if err := flush(); err != nil {
-				pdb.Close()
-				return common.Hash{}, nil, nil, err
-			}
 		}
 		if checkTarget(len(blob)) {
 			break
 		}
 	}
-	if err := flush(); err != nil {
-		pdb.Close()
-		return common.Hash{}, nil, nil, err
-	}
-	// Compact merges all SSTs into one sorted run for fastest forward iteration.
-	if err := pdb.Compact(nil, []byte{0xff, 0xff, 0xff, 0xff}, false); err != nil {
-		pdb.Close()
-		return common.Hash{}, nil, nil, err
-	}
 
 	// --- Phase 2: iterate sorted, drive Builder + flat-state writes. ---
 
 	builder := besutrie.New(sink)
-	iter, err := pdb.NewIter(nil)
-	if err != nil {
-		pdb.Close()
-		return common.Hash{}, nil, nil, fmt.Errorf("besu: temp iter: %w", err)
-	}
-	for iter.First(); iter.Valid(); iter.Next() {
+	if err := sorter.Iterate(func(key, value []byte) error {
 		if err := ctx.Err(); err != nil {
-			iter.Close()
-			pdb.Close()
-			return common.Hash{}, nil, nil, err
+			return err
 		}
 		var addrHash common.Hash
-		copy(addrHash[:], iter.Key())
-		entity := decodeEntity(iter.Value())
+		copy(addrHash[:], key)
+		entity := decodeEntity(value)
 
 		// Storage trie + flat slots + code.
 		storageRoot := besu.EmptyTrieNodeHash
@@ -250,32 +187,24 @@ func writeStateAndCollectRoot(
 					valueTrieRLP := besurlp.EncodeStorageValue(e.value)
 					valueFlat := besurlp.TrimStorageValue(e.value)
 					if err := sb.AddSlot(e.slotHash, valueTrieRLP); err != nil {
-						iter.Close()
-						pdb.Close()
-						return common.Hash{}, nil, nil, err
+						return err
 					}
 					if err := sink.PutFlatStorage(addrHash, e.slotHash, valueFlat); err != nil {
-						iter.Close()
-						pdb.Close()
-						return common.Hash{}, nil, nil, err
+						return err
 					}
 					stats.StorageSlotsCreated++
 					stats.StorageBytes += uint64(64 + len(valueTrieRLP) + len(valueFlat))
 				}
 				root, err := sb.Commit()
 				if err != nil {
-					iter.Close()
-					pdb.Close()
-					return common.Hash{}, nil, nil, err
+					return err
 				}
 				storageRoot = root
 			}
 			if len(entity.code) > 0 {
 				codeHash = crypto.Keccak256Hash(entity.code)
 				if err := sink.PutCode(codeHash, entity.code); err != nil {
-					iter.Close()
-					pdb.Close()
-					return common.Hash{}, nil, nil, err
+					return err
 				}
 				stats.CodeBytes += uint64(len(entity.code))
 			}
@@ -283,19 +212,13 @@ func writeStateAndCollectRoot(
 
 		accountRLP, err := besurlp.EncodeAccount(entity.nonce, entity.balance, storageRoot, codeHash)
 		if err != nil {
-			iter.Close()
-			pdb.Close()
-			return common.Hash{}, nil, nil, fmt.Errorf("besu: encode account: %w", err)
+			return fmt.Errorf("besu: encode account: %w", err)
 		}
 		if err := sink.PutFlatAccount(addrHash, accountRLP); err != nil {
-			iter.Close()
-			pdb.Close()
-			return common.Hash{}, nil, nil, err
+			return err
 		}
 		if err := builder.AddAccount(addrHash, accountRLP); err != nil {
-			iter.Close()
-			pdb.Close()
-			return common.Hash{}, nil, nil, err
+			return err
 		}
 
 		if entity.kind == entityEOA {
@@ -304,12 +227,8 @@ func writeStateAndCollectRoot(
 			stats.ContractsCreated++
 		}
 		stats.AccountBytes += uint64(32 + len(accountRLP))
-	}
-	if err := iter.Close(); err != nil {
-		pdb.Close()
-		return common.Hash{}, nil, nil, err
-	}
-	if err := pdb.Close(); err != nil {
+		return nil
+	}); err != nil {
 		return common.Hash{}, nil, nil, err
 	}
 

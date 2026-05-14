@@ -10,6 +10,7 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 
 	"github.com/nerolation/state-actor/internal/entitygen"
+	"github.com/nerolation/state-actor/internal/streamsort"
 )
 
 // TestStreaming_GoldenEqualsLegacy is the load-bearing determinism test
@@ -39,9 +40,9 @@ func TestStreaming_GoldenEqualsLegacy(t *testing.T) {
 	}
 
 	// Streaming: same seed, batched, RLP → Sorter → ComputeStateRootStreaming.
-	sorter, err := NewSorter(t.TempDir())
+	sorter, err := streamsort.New(t.TempDir())
 	if err != nil {
-		t.Fatalf("NewSorter: %v", err)
+		t.Fatalf("streamsort.New: %v", err)
 	}
 	defer sorter.Close()
 
@@ -118,9 +119,9 @@ func TestStreaming_MixedAccountsContracts(t *testing.T) {
 	}
 
 	// --- Streaming path (same seed, batched, sorter-backed) ---
-	sorter, err := NewSorter(t.TempDir())
+	sorter, err := streamsort.New(t.TempDir())
 	if err != nil {
-		t.Fatalf("NewSorter: %v", err)
+		t.Fatalf("streamsort.New: %v", err)
 	}
 	defer sorter.Close()
 
