@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	stategenesis "github.com/nerolation/state-actor/genesis"
 	"github.com/nerolation/state-actor/generator"
+	stategenesis "github.com/nerolation/state-actor/genesis"
 	e2e "github.com/nerolation/state-actor/internal/e2e_testing"
 	"github.com/nerolation/state-actor/internal/oracle"
 	iReth "github.com/nerolation/state-actor/internal/reth"
@@ -180,7 +180,7 @@ func TestRethNodeBootEmptyAlloc(t *testing.T) {
 	t.Cleanup(func() {
 		logs, _ := exec.Command("docker", "logs", containerName).CombinedOutput()
 		t.Logf("reth container logs:\n%s", logs)
-		exec.Command("docker", "stop", containerName).Run()    //nolint:errcheck
+		exec.Command("docker", "stop", containerName).Run()     //nolint:errcheck
 		exec.Command("docker", "rm", "-f", containerName).Run() //nolint:errcheck
 	})
 
@@ -290,7 +290,7 @@ func TestE2ESuite(t *testing.T) {
 	t.Cleanup(func() {
 		logs, _ := exec.Command("docker", "logs", containerName).CombinedOutput()
 		t.Logf("reth container logs:\n%s", logs)
-		exec.Command("docker", "stop", containerName).Run()    //nolint:errcheck
+		exec.Command("docker", "stop", containerName).Run()     //nolint:errcheck
 		exec.Command("docker", "rm", "-f", containerName).Run() //nolint:errcheck
 	})
 

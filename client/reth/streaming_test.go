@@ -85,12 +85,12 @@ func TestStreaming_GoldenEqualsLegacy(t *testing.T) {
 // for the sorter.
 func TestStreaming_MixedAccountsContracts(t *testing.T) {
 	const (
-		seed         = int64(99)
-		nEOAs        = 500
-		nContracts   = 50
-		codeSize     = 256
-		slotCount    = 5
-		batchSize    = 100
+		seed       = int64(99)
+		nEOAs      = 500
+		nContracts = 50
+		codeSize   = 256
+		slotCount  = 5
+		batchSize  = 100
 	)
 
 	// --- Legacy path (uninterrupted RNG stream) ---

@@ -72,6 +72,16 @@ func WriteContracts(envs *Envs, contracts []*entitygen.Account, blockNum uint64,
 				}
 			} else {
 				storageRoot = contract.StateAccount.Root
+				if storageRoot == (common.Hash{}) {
+					// Defensive: callers MUST set Root (e.g. to
+					// types.EmptyRootHash) before WriteContracts. Passing a
+					// zero-Hash through would produce a malformed state-
+					// account leaf — undecodable in besu/geth and corrupt
+					// archive RPCs in reth — silently.
+					return fmt.Errorf("WriteContracts: contract %s has empty Storage AND zero StateAccount.Root — "+
+						"caller must set Root (e.g. types.EmptyRootHash) before calling WriteContracts",
+						contract.Address.Hex())
+				}
 			}
 
 			// Step 2: write bytecode and get the code hash. `wrote` is false on
@@ -153,4 +163,3 @@ func WriteContracts(envs *Envs, contracts []*entitygen.Account, blockNum uint64,
 	}
 	return nil
 }
-

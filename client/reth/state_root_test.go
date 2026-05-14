@@ -231,11 +231,11 @@ func TestComputeStorageRootGeneratedContracts(t *testing.T) {
 // matches go-ethereum's StackTrie for the whole state trie.
 func TestComputeStateRootWithContracts(t *testing.T) {
 	const (
-		seed      = int64(42)
-		nAccounts = 10
+		seed       = int64(42)
+		nAccounts  = 10
 		nContracts = 3
-		codeSize  = 256
-		slotCount = 2
+		codeSize   = 256
+		slotCount  = 2
 	)
 	rng := rand.New(rand.NewSource(seed))
 

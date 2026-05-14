@@ -4,6 +4,7 @@ package reth
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 
 	"github.com/erigontech/mdbx-go/mdbx"
@@ -33,15 +34,25 @@ import (
 // has been updated to preserve `Root` when `len(Storage) == 0`, so the
 // pre-set root carries through to the account leaf and the global
 // state trie.
-func streamSpecStorage(envs *Envs, cfg *generator.Config, stats *generator.Stats) error {
+//
+// Stats are accumulated in a local variable and transferred to the
+// caller's *generator.Stats only after Mdbx.Update commits cleanly —
+// mirroring WriteContracts. A rolled-back commit therefore leaves
+// stats untouched (no phantom byte counts for writes that never
+// landed).
+func streamSpecStorage(ctx context.Context, envs *Envs, cfg *generator.Config, stats *generator.Stats) error {
 	if len(cfg.PreAlloc) == 0 {
 		return nil
 	}
-	return envs.Mdbx.Update(func(txn *mdbx.Txn) error {
+	var totalStorageBytes uint64
+	err := envs.Mdbx.Update(func(txn *mdbx.Txn) error {
 		var localStorageBytes uint64
 		for i, pe := range cfg.PreAlloc {
 			if pe.Storage == nil {
 				continue
+			}
+			if err := ctx.Err(); err != nil {
+				return err
 			}
 			addr := pe.Address
 			addrHash := crypto.Keccak256Hash(addr[:])
@@ -110,11 +121,16 @@ func streamSpecStorage(envs *Envs, cfg *generator.Config, stats *generator.Stats
 				acc.Root = root
 			}
 		}
-		if stats != nil {
-			stats.StorageBytes += localStorageBytes
-		}
+		totalStorageBytes = localStorageBytes
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	if stats != nil {
+		stats.StorageBytes += totalStorageBytes
+	}
+	return nil
 }
 
 // rethStorageHashBuilder adapts iReth.HashBuilder to the
@@ -139,4 +155,3 @@ func (r *rethStorageHashBuilder) AddLeaf(keyHash common.Hash, valueRLP []byte) e
 func (r *rethStorageHashBuilder) Root() (common.Hash, error) {
 	return r.hb.Root(), nil
 }
-
