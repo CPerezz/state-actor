@@ -276,8 +276,8 @@ func buildConfFile(seg staticFileSegment, header *types.Header, rows uint64, unc
 	// - Non-empty segments: Some(Lz4) → [0x01, 0x01, 0x00, 0x00, 0x00]
 	//   (0x01 = Some, u32 LE = 1 = Lz4 enum variant index, Lz4 struct has no fields)
 	if rows > 0 {
-		out = append(out, 0x01)    // Option: Some
-		out = appendLE32(out, 1)   // Compressors::Lz4 discriminant (variant index 1)
+		out = append(out, 0x01)  // Option: Some
+		out = appendLE32(out, 1) // Compressors::Lz4 discriminant (variant index 1)
 		// Lz4 struct {} has no fields → 0 more bytes
 	} else {
 		out = append(out, 0x00) // Option: None
@@ -376,7 +376,21 @@ func buildSegmentHeaderBytes(seg staticFileSegment) []byte {
 //
 // 11. parent_beacon_block_root (Option<B256>): specialized_to_compact, writes B256 raw if Some.
 //
-// 12. extra_fields (Option<HeaderExt>): None for genesis → nothing written.
+//  12. extra_fields (Option<HeaderExt>): when Some (Prague-active genesis),
+//     the inner HeaderExt is itself Compact-encoded as:
+//     - 1 byte inner bitflag, LSB bit 0 = requests_hash presence
+//     - 32 bytes B256 for requests_hash (when Some)
+//     Total per-field: 33 bytes when requests_hash is Some.
+//     The presence is detected via h.RequestsHash != nil — genesisheader.Build
+//     sets that pointer exactly when g.Config.IsPrague(0, t) returns true.
+//
+//     This is REQUIRED for reth's RPC layer to decode the genesis header
+//     correctly. Omitting it produced a hash mismatch on every eth_call
+//     against block "0x0" — the col-2 sidecar and HeaderNumbers entry
+//     reference the full-RLP header hash (RequestsHash included), but
+//     a static-file Compact stream that drops requests_hash decodes back
+//     to a header without that field, recomputes a different keccak, and
+//     reth's hash-by-decode lookup returns "block not found: hash X".
 //
 // 13. extra_data (Bytes): written verbatim (last field, length = buf.len() - consumed).
 //
@@ -397,6 +411,11 @@ func headerCompactBytes(h *types.Header) ([]byte, error) {
 	hasBlobGasUsed := h.BlobGasUsed != nil
 	hasExcessBlobGas := h.ExcessBlobGas != nil
 	hasParentBeaconRoot := h.ParentBeaconRoot != nil
+	// extra_fields (Option<HeaderExt>) is Some iff RequestsHash is set —
+	// which genesisheader.Build does iff Prague is active. For a Prague-
+	// active genesis the inner HeaderExt.requests_hash is also Some
+	// (set to EmptyRequestsHash).
+	hasExtraFields := h.RequestsHash != nil
 
 	// Build the 4-byte bitfield LSB-first (matches modular_bitfield LSB packing).
 	var bits uint32
@@ -417,8 +436,7 @@ func headerCompactBytes(h *types.Header) ([]byte, error) {
 	packBits(boolBit(hasBlobGasUsed), 1)      // bit 28
 	packBits(boolBit(hasExcessBlobGas), 1)    // bit 29
 	packBits(boolBit(hasParentBeaconRoot), 1) // bit 30
-	// extra_fields = None → 0 at bit 31 (already zero)
-	bitPos++ // account for bit 31 (extra_fields presence)
+	packBits(boolBit(hasExtraFields), 1)      // bit 31 — extra_fields presence
 
 	if bitPos != 32 {
 		return nil, fmt.Errorf("headerCompactBytes: internal error: bitPos=%d", bitPos)
@@ -484,7 +502,14 @@ func headerCompactBytes(h *types.Header) ([]byte, error) {
 		out = append(out, h.ParentBeaconRoot.Bytes()...)
 	}
 
-	// 12. extra_fields: None → nothing written.
+	// 12. extra_fields = Some(HeaderExt{requests_hash: Some(B256)}) when
+	//     Prague is active.
+	//     HeaderExt Compact wire: 1-byte inner bitflag (bit 0 =
+	//     requests_hash presence) + 32 bytes B256 when Some.
+	if hasExtraFields {
+		out = append(out, 0x01) // inner bitflag: requests_hash = Some
+		out = append(out, h.RequestsHash.Bytes()...)
+	}
 
 	// 13. extra_data (Bytes, verbatim, last field).
 	out = append(out, h.Extra...)
