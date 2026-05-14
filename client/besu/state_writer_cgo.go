@@ -19,6 +19,7 @@ import (
 	besurlp "github.com/nerolation/state-actor/internal/besu/rlp"
 	besutrie "github.com/nerolation/state-actor/internal/besu/trie"
 	"github.com/nerolation/state-actor/internal/entitygen"
+	"github.com/nerolation/state-actor/internal/streamingtrie"
 	"github.com/nerolation/state-actor/internal/streamsort"
 )
 
@@ -39,6 +40,51 @@ func writeStateAndCollectRoot(
 	sink *nodeSink,
 ) (common.Hash, []byte, *generator.Stats, error) {
 	stats := &generator.Stats{}
+
+	// The account-trie builder is created up-front so the spec-storage
+	// streaming Phase below (Phase 0) can drive per-account BeginStorage
+	// sub-builders before Phase 1 even queues the account leaves.
+	builder := besutrie.New(sink)
+
+	// Reverse map for Phase 2: addrHash → original Address, so we can
+	// look up cfg.GenesisAccounts[addr].Root (set by the streaming Phase
+	// 0) when encoding spec-entity account leaves.
+	hashToAddr := make(map[common.Hash]common.Address, len(cfg.GenesisAccounts))
+	for addr := range cfg.GenesisAccounts {
+		hashToAddr[crypto.Keccak256Hash(addr[:])] = addr
+	}
+
+	// --- Phase 0: stream per-spec-entity storage. ---
+	//
+	// For each PreAlloc entity with non-nil Storage, drain the iter
+	// through streamingtrie.StorageRoot: the HashBuilder wraps a
+	// per-account BeginStorage→AddSlot→Commit cycle on the besu builder
+	// (writes Bonsai storage-trie nodes via sink), and the Sink writes
+	// the Bonsai flat-state slot row via sink.PutFlatStorage. The
+	// returned root is spliced into cfg.GenesisAccounts[addr].Root so
+	// Phase 2 picks it up via hashToAddr.
+	for i, pe := range cfg.PreAlloc {
+		if pe.Storage == nil {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return common.Hash{}, nil, nil, err
+		}
+		addr := pe.Address
+		addrHash := crypto.Keccak256Hash(addr[:])
+		sb := builder.BeginStorage(addrHash)
+		hb := &besuStorageHashBuilder{sb: sb}
+		streamSink := func(_keyHash, _rawKey, value common.Hash) error {
+			return sink.PutFlatStorage(addrHash, _keyHash, besurlp.TrimStorageValue(value))
+		}
+		root, err := streamingtrie.StorageRoot("", pe.Storage, hb, streamSink)
+		if err != nil {
+			return common.Hash{}, nil, nil, fmt.Errorf("besu: stream spec storage[%d] %s: %w", i, addr.Hex(), err)
+		}
+		if acc, ok := cfg.GenesisAccounts[addr]; ok && acc != nil {
+			acc.Root = root
+		}
+	}
 
 	// --- Phase 1: stream entities to a shared streamsort.Store. ---
 
@@ -144,8 +190,9 @@ func writeStateAndCollectRoot(
 	}
 
 	// --- Phase 2: iterate sorted, drive Builder + flat-state writes. ---
+	// `builder` was created up-front (line ~46) so Phase 0 could pre-
+	// populate per-account storage tries for spec entities.
 
-	builder := besutrie.New(sink)
 	if err := sorter.Iterate(func(key, value []byte) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -156,6 +203,15 @@ func writeStateAndCollectRoot(
 
 		// Storage trie + flat slots + code.
 		storageRoot := besu.EmptyTrieNodeHash
+		// If Phase 0 streamed storage for this address, use the
+		// pre-computed root from cfg.GenesisAccounts. Otherwise
+		// compute from entity.slots below.
+		if specAddr, ok := hashToAddr[addrHash]; ok {
+			if acc := cfg.GenesisAccounts[specAddr]; acc != nil &&
+				acc.Root != (common.Hash{}) && acc.Root != besu.EmptyTrieNodeHash {
+				storageRoot = acc.Root
+			}
+		}
 		codeHash := besu.EmptyCodeHash
 		if entity.kind == entityContract {
 			if len(entity.slots) > 0 {
@@ -339,4 +395,27 @@ func decodeEntity(blob []byte) entity {
 		}
 	}
 	return e
+}
+
+// besuStorageHashBuilder adapts a per-account besutrie.StorageBuilder
+// to the streamingtrie.HashBuilder contract.
+//
+// AddLeaf calls sb.AddSlot with the streamingtrie-encoded value (trim
+// leading zeros + RLP, matching besu's PathBasedWorldView.encodeTrieValue
+// exactly). The Sink slot of streamingtrie is used separately by the
+// per-entity adapter to write the flat-state row (raw trimmed bytes,
+// per BonsaiWorldState.java:182 putStorageValueBySlotHash).
+//
+// Root calls sb.Commit which finalises the storage trie + emits non-
+// inline nodes via the bound NodeSink.
+type besuStorageHashBuilder struct {
+	sb *besutrie.StorageBuilder
+}
+
+func (b *besuStorageHashBuilder) AddLeaf(keyHash common.Hash, valueRLP []byte) error {
+	return b.sb.AddSlot(keyHash, valueRLP)
+}
+
+func (b *besuStorageHashBuilder) Root() (common.Hash, error) {
+	return b.sb.Commit()
 }
