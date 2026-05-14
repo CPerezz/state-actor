@@ -76,7 +76,49 @@ deterministic `(key, value)` pairs derived from `(seed, address)`.
 
 | Template | Required parameters | Optional | Notes |
 |---|---|---|---|
-| `erc20`  | `symbol`, `name`, `decimals` | `holders` | Vendored OpenZeppelin v5.6.1 ERC20 deployed runtime bytecode (`internal/templates/erc20_oz_v5.hex`, regenerate via `scripts/regen-erc20-bytecode.sh`). `decimals` must equal 18 (OZ v5 base default); use the `raw` template for other decimals. `_balances` mapping synthesized per holder. |
+| `erc20`  | `symbol`, `name`, `decimals` | `owners`, `allowances`, `total_owners`, `total_allowances` | Vendored OpenZeppelin v5.6.1 ERC20 deployed runtime bytecode (`internal/templates/erc20_oz_v5.hex`, regenerate via `scripts/regen-erc20-bytecode.sh`). `decimals` must equal 18 (OZ v5 base default); use the `raw` template for other decimals. |
+
+### `erc20` parameters in detail
+
+```yaml
+- kind: contract
+  template: erc20
+  parameters:
+    symbol: USDC                                  # required, ≤31 bytes
+    name: USD Coin                                # required, ≤31 bytes
+    decimals: 18                                  # required; must equal 18
+
+    # Optional: granular per-owner balances. Each entry plants
+    # _balances[address] = balance. Duplicate addresses are rejected.
+    owners:
+      - { address: "0x1111111111111111111111111111111111111111", balance: "1000000000000000000" }
+      - { address: "0x2222222222222222222222222222222222222222", balance: "500000000000000000" }
+
+    # Optional: bulk-fill target. total_owners - len(owners) additional
+    # random holders are synthesized with deterministic varied balances
+    # in [1, 10^18] wei. Must satisfy total_owners >= len(owners).
+    total_owners: 20000000
+
+    # Optional: granular per-pair allowances. Each entry plants
+    # _allowances[owner][spender] = allowance. Duplicate (owner, spender)
+    # pairs are rejected. Allowance owner doesn't need a balance entry —
+    # ERC-20 allows approving from zero balance.
+    allowances:
+      - { owner: "0x1111111111111111111111111111111111111111", spender: "0x3333333333333333333333333333333333333333", allowance: "100" }
+
+    # Optional: bulk-fill target for the allowances mapping. Same pattern
+    # as total_owners.
+    total_allowances: 5000000
+```
+
+`_totalSupply` is auto-summed from every planted balance (explicit +
+random). Users cannot override it — the ERC-20 conservation invariant
+is preserved by construction.
+
+Type rules inside `parameters`: addresses, balances, and allowances
+**must be quoted strings**, because yaml.v3 decodes nested maps via
+`map[string]any` and our custom hex/uint256 hooks only apply at the
+top-level entity fields.
 
 Built-in non-template handlers (no `template:` field needed):
 
