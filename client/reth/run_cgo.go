@@ -16,6 +16,7 @@ import (
 	"github.com/nerolation/state-actor/generator"
 	"github.com/nerolation/state-actor/genesis"
 	"github.com/nerolation/state-actor/internal/entitygen"
+	"github.com/nerolation/state-actor/internal/streamsort"
 )
 
 // defaultStreamBatchSize is the per-iteration generation batch.
@@ -105,9 +106,9 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 	// every return path; the explicit Close before Phase 5 frees the disk
 	// before chainspec/static-file writes (and is a no-op on the deferred
 	// call due to idempotency).
-	sorter, err := NewSorter(cfg.DBPath)
+	sorter, err := streamsort.New(cfg.DBPath)
 	if err != nil {
-		return nil, fmt.Errorf("RunCgo: NewSorter: %w", err)
+		return nil, fmt.Errorf("RunCgo: streamsort.New: %w", err)
 	}
 	defer sorter.Close()
 

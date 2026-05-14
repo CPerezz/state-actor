@@ -14,7 +14,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/ethereum/go-ethereum/ethdb/pebble"
 	gethrlp "github.com/ethereum/go-ethereum/rlp"
 	"github.com/linxGnu/grocksdb"
 
@@ -22,6 +21,7 @@ import (
 	"github.com/nerolation/state-actor/internal/entitygen"
 	nethrlp "github.com/nerolation/state-actor/internal/neth/rlp"
 	nethtrie "github.com/nerolation/state-actor/internal/neth/trie"
+	"github.com/nerolation/state-actor/internal/streamsort"
 )
 
 // writeSyntheticAccounts generates --accounts EOAs and --contracts contracts
@@ -75,31 +75,11 @@ func writeSyntheticAccounts(
 	defer func() { _ = sink.close() }()
 	builder := nethtrie.NewBuilder(sink)
 
-	tempDir, err := os.MkdirTemp("", "neth-acct-trie-*")
+	sorter, err := streamsort.New("")
 	if err != nil {
-		return common.Hash{}, fmt.Errorf("create temp dir: %w", err)
+		return common.Hash{}, fmt.Errorf("open streamsort: %w", err)
 	}
-	defer os.RemoveAll(tempDir)
-
-	tempDB, err := pebble.New(tempDir, 128, 64, "neth-acct/", false)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("open temp pebble: %w", err)
-	}
-	defer tempDB.Close()
-	batch := tempDB.NewBatch()
-
-	const batchFlushBytes = 64 * 1024 * 1024
-
-	flushBatchIfFull := func() error {
-		if batch.ValueSize() < batchFlushBytes {
-			return nil
-		}
-		if err := batch.Write(); err != nil {
-			return fmt.Errorf("commit batch: %w", err)
-		}
-		batch.Reset()
-		return nil
-	}
+	defer sorter.Close()
 
 	codeWO := grocksdb.NewDefaultWriteOptions()
 	defer codeWO.Destroy()
@@ -178,14 +158,11 @@ func writeSyntheticAccounts(
 		if err != nil {
 			return common.Hash{}, fmt.Errorf("encode genesis account %s: %w", addr.Hex(), err)
 		}
-		if err := batch.Put(ah[:], data); err != nil {
+		if err := sorter.Put(ah[:], data); err != nil {
 			return common.Hash{}, fmt.Errorf("queue genesis account: %w", err)
 		}
 		if stats != nil {
 			stats.AccountBytes += uint64(len(data))
-		}
-		if err := flushBatchIfFull(); err != nil {
-			return common.Hash{}, err
 		}
 	}
 
@@ -232,14 +209,11 @@ func writeSyntheticAccounts(
 		if err != nil {
 			return common.Hash{}, fmt.Errorf("encode EOA %d: %w", i, err)
 		}
-		if err := batch.Put(acc.AddrHash[:], data); err != nil {
+		if err := sorter.Put(acc.AddrHash[:], data); err != nil {
 			return common.Hash{}, fmt.Errorf("queue EOA: %w", err)
 		}
 		if stats != nil {
 			stats.AccountBytes += uint64(len(data))
-		}
-		if err := flushBatchIfFull(); err != nil {
-			return common.Hash{}, err
 		}
 	}
 
@@ -311,14 +285,11 @@ func writeSyntheticAccounts(
 		if err != nil {
 			return common.Hash{}, fmt.Errorf("encode contract %d: %w", i, err)
 		}
-		if err := batch.Put(contract.AddrHash[:], data); err != nil {
+		if err := sorter.Put(contract.AddrHash[:], data); err != nil {
 			return common.Hash{}, fmt.Errorf("queue contract: %w", err)
 		}
 		if stats != nil {
 			stats.AccountBytes += uint64(len(data))
-		}
-		if err := flushBatchIfFull(); err != nil {
-			return common.Hash{}, err
 		}
 		// Every contractSampleEvery contracts, flush the production
 		// State DB sink and walk cfg.DBPath. Stop the loop once the
@@ -336,43 +307,31 @@ func writeSyntheticAccounts(
 		}
 	}
 
-	if err := batch.Write(); err != nil {
-		return common.Hash{}, fmt.Errorf("final batch write: %w", err)
-	}
-
-	// Compact the temp DB so Phase 2's iterator walks fewer SSTs.
-	if err := tempDB.Compact(nil, nil); err != nil {
-		return common.Hash{}, fmt.Errorf("compact temp DB: %w", err)
-	}
-
 	// Phase 2: addrHash-sorted iteration → AddAccount. Account-trie nodes
 	// get added to the production State DB here; storage-trie + code
 	// already landed in Phase 1, so Phase 2 only contributes a smaller
 	// delta. cfg.TargetSize already triggered the stop in Phase 1 if we
 	// were over budget — Phase 2 just finalizes the trie from whatever
 	// was emitted before the stop.
-	iter := tempDB.NewIterator(nil, nil)
-	defer iter.Release()
-
-	for iter.Next() {
+	if err := sorter.Iterate(func(key, value []byte) error {
 		var ah [32]byte
-		copy(ah[:], iter.Key())
+		copy(ah[:], key)
 
 		var sa types.StateAccount
-		if err := gethrlp.DecodeBytes(iter.Value(), &sa); err != nil {
-			return common.Hash{}, fmt.Errorf("decode StateAccount: %w", err)
+		if err := gethrlp.DecodeBytes(value, &sa); err != nil {
+			return fmt.Errorf("decode StateAccount: %w", err)
 		}
 
 		accRLP, err := nethrlp.EncodeAccount(&sa)
 		if err != nil {
-			return common.Hash{}, fmt.Errorf("encode neth account: %w", err)
+			return fmt.Errorf("encode neth account: %w", err)
 		}
 		if err := builder.AddAccount(ah, accRLP); err != nil {
-			return common.Hash{}, fmt.Errorf("add account: %w", err)
+			return fmt.Errorf("add account: %w", err)
 		}
-	}
-	if err := iter.Error(); err != nil {
-		return common.Hash{}, fmt.Errorf("temp DB iter: %w", err)
+		return nil
+	}); err != nil {
+		return common.Hash{}, fmt.Errorf("streamsort iterate: %w", err)
 	}
 
 	root, err := builder.FinalizeStateRoot()
