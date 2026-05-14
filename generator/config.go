@@ -214,7 +214,7 @@ func (c *Config) materializePreAlloc() error {
 			if existing == pe.Account {
 				continue
 			}
-			return fmt.Errorf("Config.PreAlloc[%d]: address %s already present in GenesisAccounts (programmatic-alloc + spec-alloc collision)", i, pe.Address.Hex())
+			return fmt.Errorf("Config.PreAlloc[%d]: address %s already present in GenesisAccounts with a different *types.StateAccount pointer — either pass the same pointer (idempotent re-Validate is OK) or move the pre-existing entry into PreAlloc", i, pe.Address.Hex())
 		}
 		c.GenesisAccounts[pe.Address] = pe.Account
 		if len(pe.Code) > 0 {

@@ -12,29 +12,30 @@
 //
 //  2. Iterate the sorted store. For each sorted (keyHash, rawKey, value)
 //     triple:
-//       a. Call the caller-supplied Sink with (keyHash, rawKey, value).
-//          This is where the per-client storage-row DB writes happen
-//          (reth's PlainStorageState + HashedStorages, nethermind's
-//          Storage CF, besu's Bonsai flat-state, geth's snapshot).
-//          The Sink receives BOTH the rawKey (for DupSort-style tables
-//          that store the original slot key) AND the keyHash (for
-//          hashed-storage tables).
-//       b. Strip leading zeros from the slot value + RLP-encode the
-//          result. This is the canonical MPT leaf-value encoding
-//          (Yellow Paper §4.1; reth and alloy_trie::root::storage_root
-//          do exactly the same trim+RLP). Centralising it here
-//          guarantees all four clients consume identical bytes.
-//       c. Feed (keyHash, RLP'd value) into the caller-supplied
-//          HashBuilder. The builder yields the canonical storage MPT
-//          root on Root().
+//     a. Call the caller-supplied Sink with (keyHash, rawKey, value).
+//     This is where the per-client storage-row DB writes happen
+//     (reth's PlainStorageState + HashedStorages, nethermind's
+//     Storage CF, besu's Bonsai flat-state, geth's snapshot).
+//     The Sink receives BOTH the rawKey (for DupSort-style tables
+//     that store the original slot key) AND the keyHash (for
+//     hashed-storage tables).
+//     b. Strip leading zeros from the slot value + RLP-encode the
+//     result. This is the canonical MPT leaf-value encoding
+//     (Yellow Paper §4.1; reth and alloy_trie::root::storage_root
+//     do exactly the same trim+RLP). Centralising it here
+//     guarantees all four clients consume identical bytes.
+//     c. Feed (keyHash, RLP'd value) into the caller-supplied
+//     HashBuilder. The builder yields the canonical storage MPT
+//     root on Root().
 //
 //  3. Return hb.Root() — the storage trie root the per-client account
 //     writer must splice into StateAccount.Root before the account leaf
 //     is finalised.
 //
-// RAM is bounded at streamsort.MemTableSize (currently 2 GiB) regardless
-// of slot count. Disk usage during the drain is O(slot_count × 96 B)
-// in the temp Pebble dir; reclaimed on Store.Close().
+// RAM is bounded at streamsort.MemTableSize (2 GiB; see
+// internal/streamsort) regardless of slot count. Disk usage during the
+// drain is O(slot_count × 96 B) in the temp Pebble dir; reclaimed on
+// Store.Close().
 //
 // Re-iteration safety: pure-function iter.Seq2 producers (the templates
 // package emits these) may be passed to StorageRoot multiple times with
@@ -78,7 +79,7 @@ type HashBuilder interface {
 // matching storage-row(s) into the destination DB:
 //
 //   - reth:        PlainStorageState (rawKey-keyed DupSort), HashedStorages
-//                  (keyHash-keyed DupSort), StorageChangeSets, StoragesHistory.
+//     (keyHash-keyed DupSort), StorageChangeSets, StoragesHistory.
 //   - nethermind:  Storage CF rows keyed by HalfPath(addrHash || keyHash).
 //   - besu:        Bonsai flat-state row keyed by addrHash || keyHash.
 //   - geth:        Snapshot Pebble row keyed by addrHash || keyHash.

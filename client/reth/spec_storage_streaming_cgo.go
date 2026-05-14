@@ -111,7 +111,7 @@ func streamSpecStorage(ctx context.Context, envs *Envs, cfg *generator.Config, s
 			hb := newRethStorageHashBuilder()
 			root, err := streamingtrie.StorageRoot(cfg.DBPath, pe.Storage, hb, sink)
 			if err != nil {
-				return fmt.Errorf("streamSpecStorage[%d] %s: %w", i, addr.Hex(), err)
+				return fmt.Errorf("reth: stream spec storage[%d] %s: %w", i, addr.Hex(), err)
 			}
 
 			// Splice the computed root into the materialized Account so the
