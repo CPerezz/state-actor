@@ -38,9 +38,9 @@ import (
 // the batch worker mutex contention plus random write order, neither of
 // which this design has.
 type Writer struct {
-	db        *pebble.DB
-	kv        *pebbleKV // ethdb.KeyValueStore adapter; cold path only
-	dbPath    string
+	db         *pebble.DB
+	kv         *pebbleKV // ethdb.KeyValueStore adapter; cold path only
+	dbPath     string
 	flushBytes int
 
 	// batchMu serialises hot-path Put on `batch` against mid-run
@@ -327,4 +327,3 @@ func trimLeftZeroes(s []byte) []byte {
 	}
 	return nil
 }
-
