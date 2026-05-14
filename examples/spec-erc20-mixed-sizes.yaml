@@ -11,10 +11,12 @@
 # fill loop then adds --contracts=20 random-code contracts on top until
 # --target-size is reached.
 entities:
-  # Three ERC-20s of decreasing size. Runtime bytecode is a STOP-only
-  # stub; storage layout matches OpenZeppelin v5 (_balances at slot 0,
-  # _totalSupply at slot 2, _name/_symbol at slots 3/4) but eth_call
-  # returns zero.
+  # Three ERC-20s of decreasing size. Runtime bytecode is the vendored
+  # OpenZeppelin v5.6.1 ERC20 deployed dispatcher
+  # (internal/templates/erc20_oz_v5.hex); eth_call balanceOf / totalSupply /
+  # name / symbol / decimals / allowance all return correct values.
+  # Storage layout: _balances at slot 0, _allowances at slot 1,
+  # _totalSupply at slot 2, _name/_symbol at slots 3/4.
   - kind: contract
     template: erc20
     name: token-large
