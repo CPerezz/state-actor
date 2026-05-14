@@ -231,16 +231,5 @@ func packShortString(s string) common.Hash {
 	return h
 }
 
-// ERC20RuntimeBytecode is the deployed bytecode for ERC-20 template
-// instances. The bytes form a non-reverting STOP opcode so genesis
-// state-root computation succeeds and JSON-RPC eth_call to the contract
-// returns empty bytes (which decode to zero for any uint256/bool return
-// type — so balanceOf and totalSupply return 0 regardless of stored
-// values).
-//
-// The storage layout (_balances mapping at slot 0, _totalSupply at
-// slot 2, _name/_symbol at slots 3/4 in short-string format) matches
-// OpenZeppelin v5 ERC20.sol — Story 1's "10 GB ERC-20" produces real
-// 10 GB of on-disk state-trie data even though the runtime stub is not
-// callable via RPC.
-var ERC20RuntimeBytecode = []byte{0x00}
+// ERC20RuntimeBytecode is defined in erc20_bytecode.go — it embeds the
+// vendored OpenZeppelin v5.6.1 ERC20 deployed runtime bytecode.

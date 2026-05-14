@@ -251,12 +251,14 @@ func TestERC20NonceHonorsUserValue(t *testing.T) {
 }
 
 func TestERC20RuntimeBytecodePinned(t *testing.T) {
-	// Guards against unintentional bytecode changes. When the bytecode
-	// is intentionally updated, the expected hash below must be updated
-	// too.
-	want := "bc36789e7a1e281436464229828f817d6612f7b477d66591ff96a9e064bcc98a" // keccak256(0x00)
+	// Guards against unintentional changes to the vendored OZ v5.6.1
+	// ERC20 deployed runtime bytecode (internal/templates/erc20_oz_v5.hex).
+	// If scripts/regen-erc20-bytecode.sh is re-run against a different OZ
+	// tag or solc version, this hash must be updated alongside the .hex
+	// file.
+	want := "fe5269d44e5721ea4127b444fd44577c7bfb0b0ebb6ea07bf076fd7cf4cb0b88"
 	got := hex.EncodeToString(crypto.Keccak256(ERC20RuntimeBytecode))
 	if got != want {
-		t.Errorf("ERC20RuntimeBytecode keccak256 changed:\n got  %s\n want %s\n(intentional bytecode change? update this test)", got, want)
+		t.Errorf("ERC20RuntimeBytecode keccak256 changed:\n got  %s\n want %s\n(intentional bytecode regen? update this test alongside the .hex file)", got, want)
 	}
 }

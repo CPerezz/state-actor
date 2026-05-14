@@ -76,7 +76,7 @@ deterministic `(key, value)` pairs derived from `(seed, address)`.
 
 | Template | Required parameters | Optional | Notes |
 |---|---|---|---|
-| `erc20`  | `symbol`, `name`, `decimals` | `holders` | OpenZeppelin v5 storage layout. `_balances` mapping synthesized per holder. Runtime bytecode is a STOP-only stub; storage is correct but RPC calls return zero. |
+| `erc20`  | `symbol`, `name`, `decimals` | `holders` | Vendored OpenZeppelin v5.6.1 ERC20 deployed runtime bytecode (`internal/templates/erc20_oz_v5.hex`, regenerate via `scripts/regen-erc20-bytecode.sh`). `decimals` must equal 18 (OZ v5 base default); use the `raw` template for other decimals. `_balances` mapping synthesized per holder. |
 
 Built-in non-template handlers (no `template:` field needed):
 
