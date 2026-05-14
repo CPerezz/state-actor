@@ -376,21 +376,44 @@ func buildSegmentHeaderBytes(seg staticFileSegment) []byte {
 //
 // 11. parent_beacon_block_root (Option<B256>): specialized_to_compact, writes B256 raw if Some.
 //
-//  12. extra_fields (Option<HeaderExt>): when Some (Prague-active genesis),
-//     the inner HeaderExt is itself Compact-encoded as:
-//     - 1 byte inner bitflag, LSB bit 0 = requests_hash presence
-//     - 32 bytes B256 for requests_hash (when Some)
-//     Total per-field: 33 bytes when requests_hash is Some.
-//     The presence is detected via h.RequestsHash != nil — genesisheader.Build
-//     sets that pointer exactly when g.Config.IsPrague(0, t) returns true.
+//  12. extra_fields (Option<HeaderExt>): when Some (Prague-active genesis).
+//     Option<HeaderExt> uses reth's NON-specialized Compact encoding —
+//     unlike the four sibling Option fields above (withdrawals_root /
+//     base_fee_per_gas / blob_gas_used / excess_blob_gas /
+//     parent_beacon_block_root) which use specialized_to_compact and
+//     emit raw bytes only. The non-specialized form
+//     (reth-codecs-0.3.1 lib.rs:302-322 Option<T>::to_compact) writes:
+//
+//     varuint(N) || HeaderExt_bytes      (N = len(HeaderExt_bytes))
+//
+//     HeaderExt is itself Compact-derived with three optional fields
+//     (requests_hash, block_access_list_hash, slot_number) and a 1-byte
+//     inner bitflag (HeaderExt::bitflag_encoded_bytes() == 1, per
+//     reth-codecs-0.3.1 alloy/header.rs:191):
+//
+//     - inner_bitflag bit 0 = requests_hash presence
+//     - inner_bitflag bit 1 = block_access_list_hash presence
+//     - inner_bitflag bit 2 = slot_number presence
+//     - then, in declaration order:
+//     requests_hash         (Option<B256>, specialized — 32 bytes raw)
+//     block_access_list_hash (Option<B256>, specialized — 32 bytes raw)
+//     slot_number           (Option<u64>,  varuint(len) + BE bytes)
+//
+//     For Prague-active genesis genesisheader.Build sets only RequestsHash,
+//     so the inner HeaderExt is 33 bytes (0x01 + 32-byte B256). varuint(33)
+//     is a single byte 0x21 — total per-field 34 bytes appended.
 //
 //     This is REQUIRED for reth's RPC layer to decode the genesis header
-//     correctly. Omitting it produced a hash mismatch on every eth_call
-//     against block "0x0" — the col-2 sidecar and HeaderNumbers entry
-//     reference the full-RLP header hash (RequestsHash included), but
-//     a static-file Compact stream that drops requests_hash decodes back
-//     to a header without that field, recomputes a different keccak, and
-//     reth's hash-by-decode lookup returns "block not found: hash X".
+//     correctly. Omitting the entire HeaderExt produced "block not found"
+//     for every eth_call against block "0x0" — the col-2 sidecar and
+//     HeaderNumbers entry reference the full-RLP header hash (RequestsHash
+//     included), and reth's decoder recomputes the keccak from the
+//     static-file bytes; without RequestsHash in the stream that recompute
+//     landed on a different hash than HeaderNumbers indexes by. Omitting
+//     the varuint prefix (a previous attempt) caused
+//     Option<HeaderExt>::from_compact to misread the inner bitflag as
+//     varuint(N), then run off the end of buf inside `Compact for [u8;N]`
+//     at lib.rs:448:20.
 //
 // 13. extra_data (Bytes): written verbatim (last field, length = buf.len() - consumed).
 //
@@ -504,11 +527,23 @@ func headerCompactBytes(h *types.Header) ([]byte, error) {
 
 	// 12. extra_fields = Some(HeaderExt{requests_hash: Some(B256)}) when
 	//     Prague is active.
-	//     HeaderExt Compact wire: 1-byte inner bitflag (bit 0 =
-	//     requests_hash presence) + 32 bytes B256 when Some.
+	//     Option<HeaderExt> is the first NON-specialized Option in the
+	//     parent Header struct, so reth-codecs-0.3.1 Option<T>::to_compact
+	//     (lib.rs:302-322) prefixes the inner bytes with varuint(len).
+	//     Specialized Option<B256> / Option<u64> elsewhere in this header
+	//     have NO length prefix — only the generic Compact-derived struct
+	//     case does. Omitting the prefix mis-aligns reth's decoder and
+	//     panics at lib.rs:448:20 (Compact for [u8;N]).
+	//
+	//     For a Prague-active genesis we only set requests_hash, so the
+	//     inner HeaderExt is 33 bytes (1-byte bitflag = 0x01 + 32-byte
+	//     B256) and varuint(33) is a single byte 0x21 — total 34 bytes.
 	if hasExtraFields {
-		out = append(out, 0x01) // inner bitflag: requests_hash = Some
-		out = append(out, h.RequestsHash.Bytes()...)
+		var inner []byte
+		inner = append(inner, 0x01) // bitflag: requests_hash = Some
+		inner = append(inner, h.RequestsHash.Bytes()...)
+		out = appendVarUint(out, uint64(len(inner)))
+		out = append(out, inner...)
 	}
 
 	// 13. extra_data (Bytes, verbatim, last field).

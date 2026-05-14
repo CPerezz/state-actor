@@ -336,16 +336,21 @@ func TestHeaderCompactBytesGenesis(t *testing.T) {
 }
 
 // TestHeaderCompactBytesPragueExtraFields verifies that a Prague-active
-// header (RequestsHash set) emits the HeaderExt wire-form at the tail:
+// header (RequestsHash set) emits the Option<HeaderExt> wire-form at the
+// tail per reth-codecs-0.3.1 (lib.rs:302-322 Option<T>::to_compact for
+// the non-specialized branch):
 //
 //   - bit 31 of the LE bitfield (byte 3, bit 7) is set
-//   - the appended HeaderExt is exactly 33 bytes:
-//     1-byte inner bitflag = 0x01 + 32 bytes RequestsHash
+//   - the appended payload is exactly 34 bytes:
+//     varuint(33) = 0x21
+//     inner bitflag = 0x01 (requests_hash = Some)
+//     32 bytes raw RequestsHash
 //
-// Without this encoding, reth's static-file decoder reconstructs a header
-// with RequestsHash=nil and computes a different keccak than the col-2
-// sidecar / HeaderNumbers entry — causing every eth_call against "0x0"
-// to fail with -32001 block-not-found.
+// The varuint prefix is what reth-codecs requires for any Option<T> over
+// a custom (non-specialized) Compact-derived struct — specialized Options
+// (Option<B256>, Option<u64>) elsewhere in the parent header skip it.
+// Omitting the prefix mis-aligns reth's decoder and panics in
+// `Compact for [u8;N]::from_compact` at lib.rs:448:20.
 func TestHeaderCompactBytesPragueExtraFields(t *testing.T) {
 	// Build the minimal genesis header from TestHeaderCompactBytesGenesis,
 	// then add the Prague RequestsHash. Compare lengths and byte structure.
@@ -373,9 +378,10 @@ func TestHeaderCompactBytesPragueExtraFields(t *testing.T) {
 		t.Fatalf("headerCompactBytes (prague): %v", err)
 	}
 
-	// Prague encoding must be exactly 33 bytes longer (1 inner bitflag + 32 B256).
-	if len(pragueBytes)-len(baseBytes) != 33 {
-		t.Errorf("Prague-active byte delta = %d, want 33 (inner bitflag + B256)",
+	// Prague encoding must be exactly 34 bytes longer: 1 byte varuint(33)
+	// + 1 byte inner bitflag + 32 bytes B256.
+	if len(pragueBytes)-len(baseBytes) != 34 {
+		t.Errorf("Prague-active byte delta = %d, want 34 (varuint + inner bitflag + B256)",
 			len(pragueBytes)-len(baseBytes))
 	}
 
@@ -387,15 +393,18 @@ func TestHeaderCompactBytesPragueExtraFields(t *testing.T) {
 		t.Errorf("non-Prague header has extra_fields bit set: byte 3 = %#x", baseBytes[3])
 	}
 
-	// Tail layout: extra_data is empty for both headers, so the last 33
-	// bytes of pragueBytes must be the HeaderExt encoding:
-	// [0x01, RequestsHash[0..32)].
-	tail := pragueBytes[len(pragueBytes)-33:]
-	if tail[0] != 0x01 {
-		t.Errorf("HeaderExt inner bitflag = %#x, want 0x01 (requests_hash=Some)", tail[0])
+	// Tail layout: extra_data is empty for both headers, so the last 34
+	// bytes of pragueBytes must be the Option<HeaderExt> Some encoding:
+	// [0x21, 0x01, RequestsHash[0..32)].
+	tail := pragueBytes[len(pragueBytes)-34:]
+	if tail[0] != 0x21 {
+		t.Errorf("HeaderExt varuint length prefix = %#x, want 0x21 (varuint(33))", tail[0])
 	}
-	if [32]byte(tail[1:]) != emptyReq {
-		t.Errorf("HeaderExt requests_hash bytes:\n got  %x\n want %x", tail[1:], emptyReq)
+	if tail[1] != 0x01 {
+		t.Errorf("HeaderExt inner bitflag = %#x, want 0x01 (requests_hash=Some)", tail[1])
+	}
+	if [32]byte(tail[2:]) != emptyReq {
+		t.Errorf("HeaderExt requests_hash bytes:\n got  %x\n want %x", tail[2:], emptyReq)
 	}
 }
 
