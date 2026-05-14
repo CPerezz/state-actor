@@ -39,4 +39,3 @@ func Run(ctx context.Context, cfg generator.Config, opts Options) (*generator.St
 	}
 	return runImpl(ctx, cfg, opts)
 }
-

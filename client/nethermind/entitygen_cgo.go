@@ -4,6 +4,7 @@ package nethermind
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"log"
 	mrand "math/rand"
@@ -65,6 +66,7 @@ import (
 // semantics — values differ across clients because each writer encodes
 // state in its own on-disk format.
 func writeSyntheticAccounts(
+	ctx context.Context,
 	dbs *nethDBs,
 	cfg generator.Config,
 	genesisAccounts map[common.Address]*types.StateAccount,
@@ -107,6 +109,9 @@ func writeSyntheticAccounts(
 		if pe.Storage == nil {
 			continue
 		}
+		if err := ctx.Err(); err != nil {
+			return common.Hash{}, err
+		}
 		addr := pe.Address
 		var ah [32]byte
 		copy(ah[:], crypto.Keccak256(addr[:]))
@@ -144,9 +149,8 @@ func writeSyntheticAccounts(
 			}
 		}
 
-		// Storage trie. Lifted from writeGenesisAllocAccounts:154-213 —
-		// same sort discipline (keccak(slotKey) ascending), same
-		// leading-zero-trim + RLP encode, same finalize-and-stamp pattern.
+		// Storage trie: slots enter the StackTrie in keccak(slotKey)-
+		// ascending order; values are leading-zero-trimmed + RLP-encoded.
 		if slots := genesisStorages[addr]; len(slots) > 0 {
 			ahBytes := crypto.Keccak256Hash(addr[:])
 			var ah [32]byte
