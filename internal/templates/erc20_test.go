@@ -219,11 +219,11 @@ func TestERC20StorageLayout(t *testing.T) {
 	}
 
 	// _totalSupply auto-summed from the synthesized random balances —
-	// re-derive the same values via deterministicRandomBalance and
+	// re-derive the same values via DeterministicRandomBalance and
 	// compare slot bytes.
 	wantTotal := new(uint256.Int)
 	for i := 0; i < totalOwners; i++ {
-		v := deterministicRandomBalance(seed, addr, i)
+		v := DeterministicRandomBalance(seed, addr, i)
 		wantTotal.Add(wantTotal, new(uint256.Int).SetBytes(v[:]))
 	}
 	gotTotal := storage[uint64SlotKey(erc20SlotTotalSupply)]
@@ -499,7 +499,7 @@ func TestERC20TotalSupplyAutoSummed(t *testing.T) {
 
 	want := uint256.NewInt(1000)
 	for i := 0; i < totalOwners-1; i++ {
-		v := deterministicRandomBalance(seed, tokenAddr, i)
+		v := DeterministicRandomBalance(seed, tokenAddr, i)
 		want.Add(want, new(uint256.Int).SetBytes(v[:]))
 	}
 	got := storage[uint64SlotKey(erc20SlotTotalSupply)]

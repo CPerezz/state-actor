@@ -134,3 +134,53 @@ entities:
   # Position-derived address (neither name nor address set).
   - kind: eoa
     balance: "1000000000000000000"
+
+  # ── 14-16. ERC-20 new-schema coverage (E1/E2/E3) ─────────────────────
+  # Exercises every combination of the new owners/allowances/
+  # total_owners/total_allowances knobs so the cross-client
+  # genesis-root aggregator AND the per-suite Phase-4 RPC oracle
+  # (CheckERC20Templates) cover all schema permutations on every
+  # MPT client. Counts kept small (~10 entries) so CI runtime is flat.
+
+  # E1 — explicit owners + explicit allowances, no random fill.
+  - kind: contract
+    template: erc20
+    name: token-explicit
+    address: 0x000000000000000000000000000000000000aa11
+    parameters:
+      symbol: AAA
+      decimals: 18
+      name: ExplicitOwnersToken
+      owners:
+        - { address: "0x1111111111111111111111111111111111111111", balance: "1000" }
+        - { address: "0x2222222222222222222222222222222222222222", balance: "500" }
+      allowances:
+        - { owner: "0x1111111111111111111111111111111111111111", spender: "0x3333333333333333333333333333333333333333", allowance: "100" }
+
+  # E2 — bulk-fill only (no explicit). Exercises the random-synthesis path.
+  - kind: contract
+    template: erc20
+    name: token-bulk
+    address: 0x000000000000000000000000000000000000aa22
+    parameters:
+      symbol: BBB
+      decimals: 18
+      name: BulkRandomToken
+      total_owners: 10
+      total_allowances: 5
+
+  # E3 — explicit AND random combined (the multi-knob case).
+  - kind: contract
+    template: erc20
+    name: token-mixed
+    address: 0x000000000000000000000000000000000000aa33
+    parameters:
+      symbol: CCC
+      decimals: 18
+      name: CombinedToken
+      owners:
+        - { address: "0x4444444444444444444444444444444444444444", balance: "1000000" }
+      total_owners: 8
+      allowances:
+        - { owner: "0x4444444444444444444444444444444444444444", spender: "0x5555555555555555555555555555555555555555", allowance: "1000" }
+      total_allowances: 4

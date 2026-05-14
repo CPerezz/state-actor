@@ -77,10 +77,13 @@ func TestE2ESuite(t *testing.T) {
 		Verbose:      true,
 		TrieMode:     generator.TrieModeMPT,
 		Genesis:      g,
-		// Spec-driven pre-alloc via examples/spec-ci-baseline.yaml
-		// exercises every schema variant (including the spamoor sender).
-		PreAlloc: e2e.LoadCISpecPreAlloc(t, "../../examples/spec-ci-baseline.yaml", "besu"),
 	}
+	// Spec-driven pre-alloc via examples/spec-ci-baseline.yaml exercises
+	// every schema variant (including the spamoor sender). The Spec
+	// document is also passed to RunSuitePhases so Phase 4 verifies every
+	// erc20 template field via eth_call.
+	specDoc, preAlloc := e2e.LoadCISpec(t, "../../examples/spec-ci-baseline.yaml", "besu")
+	cfg.PreAlloc = preAlloc
 	// Deploy EIP-4788/7002/7251/2935 system contracts at their canonical
 	// addresses — besu refuses to boot a Prague-active chain without
 	// them ("Withdrawal Request Contract Address not found"), and on
@@ -177,5 +180,7 @@ func TestE2ESuite(t *testing.T) {
 		EOAs:            eoas,
 		Contracts:       contracts,
 		GeneratorConfig: &cfg,
+		Spec:            specDoc,
+		SpecSeed:        e2e.CISpecSeed,
 	})
 }

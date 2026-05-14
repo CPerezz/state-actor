@@ -121,18 +121,18 @@ func (erc20Template) ValidateParameters(params map[string]any) error {
 
 	// Structural validation of the optional list parameters. Reuses the
 	// same parsers Expand uses so validation and expansion stay in sync.
-	owners, err := parseExplicitOwners(params["owners"])
+	owners, err := ParseExplicitOwners(params["owners"])
 	if err != nil {
 		return err
 	}
-	allowances, err := parseExplicitAllowances(params["allowances"])
+	allowances, err := ParseExplicitAllowances(params["allowances"])
 	if err != nil {
 		return err
 	}
 
 	totalOwners := 0
 	if v, has := params["total_owners"]; has {
-		n, err := parseNonNegIntParam(v, "total_owners")
+		n, err := ParseNonNegIntParam(v, "total_owners")
 		if err != nil {
 			return err
 		}
@@ -145,7 +145,7 @@ func (erc20Template) ValidateParameters(params map[string]any) error {
 
 	totalAllowances := 0
 	if v, has := params["total_allowances"]; has {
-		n, err := parseNonNegIntParam(v, "total_allowances")
+		n, err := ParseNonNegIntParam(v, "total_allowances")
 		if err != nil {
 			return err
 		}
@@ -168,18 +168,18 @@ func (erc20Template) Expand(ctx Context, e spec.Entity) ([]PreAllocEntity, error
 		balance = e.Balance.V
 	}
 
-	owners, err := parseExplicitOwners(e.Parameters["owners"])
+	owners, err := ParseExplicitOwners(e.Parameters["owners"])
 	if err != nil {
 		return nil, err
 	}
-	allowances, err := parseExplicitAllowances(e.Parameters["allowances"])
+	allowances, err := ParseExplicitAllowances(e.Parameters["allowances"])
 	if err != nil {
 		return nil, err
 	}
 
 	totalOwners := len(owners)
 	if v, has := e.Parameters["total_owners"]; has {
-		n, err := parseNonNegIntParam(v, "total_owners")
+		n, err := ParseNonNegIntParam(v, "total_owners")
 		if err != nil {
 			return nil, err
 		}
@@ -187,7 +187,7 @@ func (erc20Template) Expand(ctx Context, e spec.Entity) ([]PreAllocEntity, error
 	}
 	totalAllowances := len(allowances)
 	if v, has := e.Parameters["total_allowances"]; has {
-		n, err := parseNonNegIntParam(v, "total_allowances")
+		n, err := ParseNonNegIntParam(v, "total_allowances")
 		if err != nil {
 			return nil, err
 		}
@@ -220,7 +220,7 @@ func (erc20Template) Expand(ctx Context, e spec.Entity) ([]PreAllocEntity, error
 	// below when composing the storage iter. Each yields the same
 	// (key, value) pairs.
 	for i := 0; i < randomOwnerCount; i++ {
-		v := deterministicRandomBalance(ctx.Seed, ctx.ResolvedAddress, i)
+		v := DeterministicRandomBalance(ctx.Seed, ctx.ResolvedAddress, i)
 		totalSupply.Add(totalSupply, new(uint256.Int).SetBytes(v[:]))
 	}
 
@@ -264,7 +264,7 @@ func (erc20Template) Expand(ctx Context, e spec.Entity) ([]PreAllocEntity, error
 // `_balances[holder]` storage entries for the random-fill portion of an
 // erc20 contract. The holder address is `keccak256(seed||token||index)[12:]`
 // — pure function of `(seed, tokenAddr, index)`. Balance values come from
-// deterministicRandomBalance, also a pure function of the same inputs.
+// DeterministicRandomBalance, also a pure function of the same inputs.
 //
 // Each slot key is computed using Solidity's mapping rule:
 //
@@ -291,7 +291,7 @@ func erc20BalancesIter(seed int64, tokenAddr common.Address, count int) iter.Seq
 			// the mapKey buffer's first 32 bytes.
 			copy(mapKeyBuf[12:32], holderHash[12:])
 			slotKey := crypto.Keccak256Hash(mapKeyBuf[:])
-			val := deterministicRandomBalance(seed, tokenAddr, i)
+			val := DeterministicRandomBalance(seed, tokenAddr, i)
 			if !yield(slotKey, val) {
 				return
 			}
