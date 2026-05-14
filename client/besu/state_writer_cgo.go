@@ -74,8 +74,11 @@ func writeStateAndCollectRoot(
 		addrHash := crypto.Keccak256Hash(addr[:])
 		sb := builder.BeginStorage(addrHash)
 		hb := &besuStorageHashBuilder{sb: sb}
-		streamSink := func(_keyHash, _rawKey, value common.Hash) error {
-			return sink.PutFlatStorage(addrHash, _keyHash, besurlp.TrimStorageValue(value))
+		var entityStorageBytes uint64
+		streamSink := func(keyHash, _rawKey, value common.Hash) error {
+			trimmed := besurlp.TrimStorageValue(value)
+			entityStorageBytes += uint64(len(trimmed))
+			return sink.PutFlatStorage(addrHash, keyHash, trimmed)
 		}
 		root, err := streamingtrie.StorageRoot("", pe.Storage, hb, streamSink)
 		if err != nil {
@@ -84,6 +87,7 @@ func writeStateAndCollectRoot(
 		if acc, ok := cfg.GenesisAccounts[addr]; ok && acc != nil {
 			acc.Root = root
 		}
+		stats.StorageBytes += entityStorageBytes
 	}
 
 	// --- Phase 1: stream entities to a shared streamsort.Store. ---

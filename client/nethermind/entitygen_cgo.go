@@ -113,21 +113,33 @@ func writeSyntheticAccounts(
 			return common.Hash{}, err
 		}
 		addr := pe.Address
-		var ah [32]byte
-		copy(ah[:], crypto.Keccak256(addr[:]))
+		addrHash := crypto.Keccak256Hash(addr[:])
+		ah := [32]byte(addrHash)
 		hb := &nethermindStorageHashBuilder{builder: builder, ah: ah}
-		root, err := streamingtrie.StorageRoot("", pe.Storage, hb, nil)
+		var entityStorageBytes uint64
+		statSink := func(_, _, value common.Hash) error {
+			// RLP-of-trimmed-value: 1 prefix byte + len(trimmed). Matches
+			// the per-slot byte tally the genesis-alloc loop performs below
+			// for non-streaming slots, so reported StorageBytes is uniform
+			// across spec + alloc + synthetic paths.
+			v := value[:]
+			for len(v) > 0 && v[0] == 0 {
+				v = v[1:]
+			}
+			if len(v) > 0 {
+				entityStorageBytes += uint64(len(v) + 1)
+			}
+			return nil
+		}
+		root, err := streamingtrie.StorageRoot("", pe.Storage, hb, statSink)
 		if err != nil {
-			return common.Hash{}, fmt.Errorf("stream spec storage[%d] %s: %w", i, addr.Hex(), err)
+			return common.Hash{}, fmt.Errorf("nethermind: stream spec storage[%d] %s: %w", i, addr.Hex(), err)
 		}
 		if acc, ok := genesisAccounts[addr]; ok && acc != nil {
 			acc.Root = root
 		}
 		if stats != nil {
-			// Count storage bytes via the streamingtrie iter — we already
-			// fed those slots to the builder; conservative best-effort
-			// accounting matches the existing handler's per-slot uint64
-			// tally without re-iterating the iter.
+			stats.StorageBytes += entityStorageBytes
 		}
 	}
 

@@ -31,6 +31,7 @@ package streamsort
 
 import (
 	"fmt"
+	"log"
 	"math"
 	"os"
 	"runtime"
@@ -39,13 +40,16 @@ import (
 	"github.com/cockroachdb/pebble/sstable"
 )
 
-// memTableSize is the in-memory write buffer per Pebble MemTable.
+// MemTableSize is the in-memory write buffer per Pebble MemTable.
 // 2 GiB is deliberately huge: small-to-medium entities (≤ ~2 GB of
 // (key, value) pairs) never flush to L0 at all — they live in a single
 // sorted skiplist that's iterated directly. Larger entities flush
 // progressively; the deferred-compaction setting keeps each flush
 // cheap.
-const memTableSize = 2 << 30
+//
+// Exported because the per-client RAM ceiling and docs/SPEC.md both
+// cite this constant.
+const MemTableSize = 2 << 30
 
 // batchFlushBytes caps the live Pebble WriteBatch size. Without this,
 // the batch would grow until Put returns and we'd accumulate the
@@ -104,7 +108,7 @@ func New(workDir string) (*Store, error) {
 	cache := pebble.NewCache(blockCacheBytes)
 	opts := &pebble.Options{
 		DisableWAL:                  true,
-		MemTableSize:                memTableSize,
+		MemTableSize:                MemTableSize,
 		MemTableStopWritesThreshold: 16,
 		L0CompactionThreshold:       math.MaxInt32,
 		L0StopWritesThreshold:       math.MaxInt32,
@@ -165,8 +169,10 @@ func (s *Store) Put(key, value []byte) error {
 // Callers that retain either slice MUST copy it.
 //
 // If yield returns a non-nil error, iteration stops immediately and
-// that error is returned. The iterator's own Error() takes precedence
-// only on internal failure.
+// that error is returned. The iterator's own Error() is checked after
+// the loop completes — meaning a yield error short-circuits the
+// internal-error check. Yield errors typically carry richer per-client
+// context (which sink, which key), so this precedence is deliberate.
 //
 // Iterate after Close returns an error.
 func (s *Store) Iterate(yield func(key, value []byte) error) error {
@@ -197,10 +203,13 @@ func (s *Store) Iterate(yield func(key, value []byte) error) error {
 
 // Close commits any pending batch (best-effort), closes the Pebble DB,
 // frees the block cache, and removes the on-disk temp directory.
-// Idempotent — subsequent calls return nil. Temp-dir RemoveAll errors
-// are logged-implicit (return nil) since the underlying generation
-// has already succeeded by the time Close is called; leftover temp
-// space is hygiene, not correctness.
+// Idempotent — subsequent calls return nil.
+//
+// Temp-dir RemoveAll errors are logged via log.Printf (not returned)
+// since the generated data has already been consumed by the caller's
+// Iterate before Close is called; leftover temp space is hygiene,
+// not correctness. Logging surfaces permission / disk-full
+// pathologies that would otherwise accumulate silently.
 func (s *Store) Close() error {
 	if s.closed {
 		return nil
@@ -222,6 +231,8 @@ func (s *Store) Close() error {
 	if s.cache != nil {
 		s.cache.Unref()
 	}
-	_ = os.RemoveAll(s.dir) // leftover temp dir is hygiene, not correctness
+	if err := os.RemoveAll(s.dir); err != nil {
+		log.Printf("streamsort: cleanup of %s failed: %v", s.dir, err)
+	}
 	return firstErr
 }
