@@ -31,8 +31,8 @@ func (s *stackTrieBuilder) AddLeaf(keyHash common.Hash, valueRLP []byte) error {
 	return s.t.Update(keyHash[:], valueRLP)
 }
 
-func (s *stackTrieBuilder) Root() common.Hash {
-	return s.t.Hash()
+func (s *stackTrieBuilder) Root() (common.Hash, error) {
+	return s.t.Hash(), nil
 }
 
 // stackTrieRootMaterialised computes the storage MPT root via the

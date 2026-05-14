@@ -70,7 +70,7 @@ import (
 // the canonical storage MPT root for the inputs received.
 type HashBuilder interface {
 	AddLeaf(keyHash common.Hash, valueRLP []byte) error
-	Root() common.Hash
+	Root() (common.Hash, error)
 }
 
 // Sink is invoked once per sorted (keyHash, rawKey, value) triple before
@@ -116,7 +116,11 @@ func StorageRoot(
 	if storage == nil {
 		// Empty storage → the builder hasn't seen any leaves → Root() is
 		// the canonical empty-MPT root.
-		return hb.Root(), nil
+		root, err := hb.Root()
+		if err != nil {
+			return common.Hash{}, fmt.Errorf("streamingtrie: Root: %w", err)
+		}
+		return root, nil
 	}
 
 	s, err := streamsort.New(workDir)
@@ -179,7 +183,11 @@ func StorageRoot(
 		return common.Hash{}, err
 	}
 
-	return hb.Root(), nil
+	root, err := hb.Root()
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("streamingtrie: Root: %w", err)
+	}
+	return root, nil
 }
 
 // uint64SlotKey is a small helper used by tests to construct
