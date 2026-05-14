@@ -136,7 +136,7 @@ func (r *rethStorageHashBuilder) AddLeaf(keyHash common.Hash, valueRLP []byte) e
 	return r.hb.AddLeaf(addrHashToNibbles(keyHash[:]), valueRLP)
 }
 
-func (r *rethStorageHashBuilder) Root() common.Hash {
-	return r.hb.Root()
+func (r *rethStorageHashBuilder) Root() (common.Hash, error) {
+	return r.hb.Root(), nil
 }
 
