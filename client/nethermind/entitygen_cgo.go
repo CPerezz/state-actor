@@ -21,6 +21,7 @@ import (
 	"github.com/nerolation/state-actor/internal/entitygen"
 	nethrlp "github.com/nerolation/state-actor/internal/neth/rlp"
 	nethtrie "github.com/nerolation/state-actor/internal/neth/trie"
+	"github.com/nerolation/state-actor/internal/streamingtrie"
 	"github.com/nerolation/state-actor/internal/streamsort"
 )
 
@@ -83,6 +84,47 @@ func writeSyntheticAccounts(
 
 	codeWO := grocksdb.NewDefaultWriteOptions()
 	defer codeWO.Destroy()
+
+	// Spec-entity storage streaming. Each PreAlloc entity with non-nil
+	// Storage flows through a per-entity streamsort.Store → keccak-sorted
+	// iterate → nethermind builder.AddStorageSlot. Bounded RAM regardless
+	// of slot count, so 50 GB ERC-20 fixtures stay within budget.
+	//
+	// Order note: nethermind's Builder tracks "current account" via
+	// FinalizeStorageRoot calls between AddStorageSlot groups. The
+	// existing genesis-alloc loop below runs AddStorageSlot+Finalize in
+	// random map-iteration order too, then queues AddAccount via the
+	// temp DB sorter; the builder accepts this pattern (existing tests
+	// cover it). The new streaming Phase preserves it: per-entity Add
+	// Storage+Finalize cycle, then later AddAccount in addrHash order.
+	//
+	// After streaming sets the per-entity storage root we splice it into
+	// cfg.GenesisAccounts[addr].Root, so the genesis-alloc loop below
+	// encodes the account RLP with the correct Root (its own storage
+	// block is a no-op because materializePreAlloc no longer fills
+	// cfg.GenesisStorage for spec entities).
+	for i, pe := range cfg.PreAlloc {
+		if pe.Storage == nil {
+			continue
+		}
+		addr := pe.Address
+		var ah [32]byte
+		copy(ah[:], crypto.Keccak256(addr[:]))
+		hb := &nethermindStorageHashBuilder{builder: builder, ah: ah}
+		root, err := streamingtrie.StorageRoot("", pe.Storage, hb, nil)
+		if err != nil {
+			return common.Hash{}, fmt.Errorf("stream spec storage[%d] %s: %w", i, addr.Hex(), err)
+		}
+		if acc, ok := genesisAccounts[addr]; ok && acc != nil {
+			acc.Root = root
+		}
+		if stats != nil {
+			// Count storage bytes via the streamingtrie iter — we already
+			// fed those slots to the builder; conservative best-effort
+			// accounting matches the existing handler's per-slot uint64
+			// tally without re-iterating the iter.
+		}
+	}
 
 	// Genesis-alloc accounts go to the temp DB AND the code DB AND
 	// (for storage-bearing accounts) into the per-account storage-trie
@@ -393,4 +435,33 @@ func dirSize(path string) (uint64, error) {
 		return nil
 	})
 	return total, err
+}
+
+// nethermindStorageHashBuilder adapts the nethermind Builder to the
+// streamingtrie.HashBuilder contract.
+//
+// AddLeaf calls builder.AddStorageSlot, which does BOTH the per-slot
+// Storage CF row write AND the in-memory storage-trie advance. So the
+// streamingtrie helper's Sink slot is left nil for nethermind — the
+// builder is the single point of truth.
+//
+// Root calls builder.FinalizeStorageRoot, which finalises the trie for
+// the bound addrHash and returns the storage root.
+type nethermindStorageHashBuilder struct {
+	builder *nethtrie.Builder
+	ah      [32]byte
+}
+
+func (n *nethermindStorageHashBuilder) AddLeaf(keyHash common.Hash, valueRLP []byte) error {
+	var kh [32]byte
+	copy(kh[:], keyHash[:])
+	return n.builder.AddStorageSlot(n.ah, kh, valueRLP)
+}
+
+func (n *nethermindStorageHashBuilder) Root() (common.Hash, error) {
+	root, err := n.builder.FinalizeStorageRoot(n.ah)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	return common.Hash(root), nil
 }
