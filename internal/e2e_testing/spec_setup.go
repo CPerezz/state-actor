@@ -23,6 +23,14 @@ import (
 // YAML.
 const FixedBytesPerSlot uint64 = 64
 
+// CISpecSeed is the seed used by every per-client TestE2ESuite when
+// building PreAlloc from the CI fixture. It drives address derivation
+// (name-derived + position-derived) AND random-fill synthesis (random
+// holder addresses, random balances, random allowance tuples). The
+// RPC oracle (CheckERC20Templates) re-derives synthesized values with
+// the same seed to verify what landed on-chain.
+const CISpecSeed int64 = 0
+
 // LoadCISpecPreAlloc loads the shared CI YAML fixture, validates it,
 // translates it through internal/specbuild with sizecal.NewFixed(64),
 // and returns the resulting PreAlloc slice for assignment to
@@ -38,32 +46,39 @@ const FixedBytesPerSlot uint64 = 64
 // from `client/<name>/`.
 func LoadCISpecPreAlloc(t *testing.T, yamlPath, clientName string) []templates.PreAllocEntity {
 	t.Helper()
+	_, preAlloc := LoadCISpec(t, yamlPath, clientName)
+	return preAlloc
+}
+
+// LoadCISpec is the broader-shaped variant of LoadCISpecPreAlloc: it
+// also surfaces the parsed *spec.Spec so the RPC oracle
+// (CheckERC20Templates) can iterate the original entities and verify
+// every template parameter via JSON-RPC after the node boots.
+func LoadCISpec(t *testing.T, yamlPath, clientName string) (*spec.Spec, []templates.PreAllocEntity) {
+	t.Helper()
 
 	absPath, err := filepath.Abs(yamlPath)
 	if err != nil {
-		t.Fatalf("LoadCISpecPreAlloc: abs path %q: %v", yamlPath, err)
+		t.Fatalf("LoadCISpec: abs path %q: %v", yamlPath, err)
 	}
 	specDoc, err := spec.ParseFile(absPath)
 	if err != nil {
-		t.Fatalf("LoadCISpecPreAlloc: ParseFile %q: %v", absPath, err)
+		t.Fatalf("LoadCISpec: ParseFile %q: %v", absPath, err)
 	}
 	if _, err := specDoc.Validate(templates.UserVisibleNames()); err != nil {
-		t.Fatalf("LoadCISpecPreAlloc: Validate: %v", err)
+		t.Fatalf("LoadCISpec: Validate: %v", err)
 	}
 
-	// sizecal.NewFixed(FixedBytesPerSlot) — uniform across all 4 clients
-	// so the same YAML produces the same PreAlloc. The cross-client
-	// genesis-root invariant depends on this.
 	preAlloc, diag, err := specbuild.Build(specDoc, specbuild.BuildOptions{
-		Seed:       0, // address derivation seed; the synthetic-fill seed lives on cfg.Seed
+		Seed:       CISpecSeed,
 		ClientName: clientName,
 		Sizer:      sizecal.NewFixed(FixedBytesPerSlot),
 	})
 	if err != nil {
-		t.Fatalf("LoadCISpecPreAlloc: specbuild.Build: %v", err)
+		t.Fatalf("LoadCISpec: specbuild.Build: %v", err)
 	}
 	for _, w := range diag.Warnings {
 		t.Logf("spec warning: %s", w)
 	}
-	return preAlloc
+	return specDoc, preAlloc
 }

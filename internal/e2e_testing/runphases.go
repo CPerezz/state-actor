@@ -10,6 +10,7 @@ import (
 	"github.com/nerolation/state-actor/internal/entitygen"
 	"github.com/nerolation/state-actor/internal/oracle"
 	"github.com/nerolation/state-actor/internal/rpcprobe"
+	"github.com/nerolation/state-actor/internal/spec"
 )
 
 // SuitePhasesCfg parameterizes the post-boot phases of a per-client e2e
@@ -44,6 +45,15 @@ type SuitePhasesCfg struct {
 	// where a client writer ignores a cfg field, surfaces locally
 	// instead of only via the cross-client genesis-root aggregator.
 	GeneratorConfig *generator.Config
+
+	// Spec is the parsed spec document — typically the same document
+	// LoadCISpec returned. When non-nil, Phase 4 also calls
+	// CheckERC20Templates against it (verifies every ERC-20 template's
+	// name/symbol/decimals/totalSupply/balanceOf/allowance via eth_call).
+	// SpecSeed must equal the build seed used to derive synthesized
+	// random balances/allowances so the oracle re-derives the same values.
+	Spec     *spec.Spec
+	SpecSeed int64
 
 	// SpamoorSlotDuration overrides the default 1s slot pacing — neth's
 	// e2e historically used 250ms (matches smoke-nethermind-spamoor).
@@ -108,6 +118,15 @@ func RunSuitePhases(t *testing.T, cfg SuitePhasesCfg) {
 	// field — see CheckInjections docstring for the bug class.
 	if !CheckInjections(t, cfg.RPCURL, cfg.GeneratorConfig, "0x0") {
 		t.Fatalf("genesis-state oracle re-query (injections + alloc) failed; aborting before spamoor phase")
+	}
+	// 4c — ERC-20 template oracle: name/symbol/decimals/totalSupply +
+	// every explicit owner/allowance + sampled random ones. Verifies
+	// the vendored OZ v5 bytecode is RPC-callable and every spec'd
+	// field landed on every client.
+	if cfg.Spec != nil {
+		if !CheckERC20Templates(t, cfg.RPCURL, cfg.Spec, cfg.SpecSeed, "0x0") {
+			t.Fatalf("genesis-state oracle re-query (erc20 templates) failed; aborting before spamoor phase")
+		}
 	}
 
 	if cfg.SkipBlockProduction {

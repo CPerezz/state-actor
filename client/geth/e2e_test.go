@@ -95,13 +95,15 @@ func TestE2ESuite(t *testing.T) {
 		Verbose:      true,
 		TrieMode:     generator.TrieModeMPT,
 		Genesis:      g,
-		// Spec-driven pre-alloc via examples/spec-ci-baseline.yaml
-		// exercises every schema variant (including the spamoor sender).
-		// LoadCISpecPreAlloc uses sizecal.NewFixed so all 4 clients get
-		// byte-identical PreAlloc, preserving the cross-client
-		// genesis-root invariant.
-		PreAlloc: e2e.LoadCISpecPreAlloc(t, "../../examples/spec-ci-baseline.yaml", "geth"),
 	}
+	// Spec-driven pre-alloc via examples/spec-ci-baseline.yaml exercises
+	// every schema variant (including the spamoor sender). LoadCISpec
+	// uses sizecal.NewFixed so all 4 clients get byte-identical PreAlloc,
+	// preserving the cross-client genesis-root invariant. The Spec
+	// document is also handed to RunSuitePhases so Phase 4 verifies every
+	// erc20 template field via eth_call.
+	specDoc, preAlloc := e2e.LoadCISpec(t, "../../examples/spec-ci-baseline.yaml", "geth")
+	cfg.PreAlloc = preAlloc
 	// Deploy EIP-4788/2935/7002/7251 system contracts at their canonical
 	// addresses — required for the cross-client genesis-root invariant
 	// (besu refuses to boot without them; geth/neth/reth tolerate but
@@ -185,6 +187,8 @@ func TestE2ESuite(t *testing.T) {
 		EOAs:            eoas,
 		Contracts:       contracts,
 		GeneratorConfig: &cfg,
+		Spec:            specDoc,
+		SpecSeed:        e2e.CISpecSeed,
 	})
 }
 
