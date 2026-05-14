@@ -126,6 +126,20 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 
 	const batchSize = defaultStreamBatchSize
 
+	// Phase 4a.4: stream per-spec-entity storage via internal/streamingtrie.
+	// Each PreAlloc entity with non-nil Storage flows through a per-entity
+	// streamsort.Store: drain (slotKey, slotValue) iter → sorted iterate →
+	// write 4 storage tables + compute MPT root → splice root into
+	// cfg.GenesisAccounts[addr].Root. RAM is bounded at streamsort's
+	// memTableSize regardless of slot count, so 50 GB ERC-20 fixtures
+	// stay within budget. Phase 4a.5 (below) sees pre-set Roots and
+	// WriteContracts has been updated to preserve them when Storage is
+	// empty (which it is, post-materializePreAlloc removal of the
+	// Storage drain).
+	if err := streamSpecStorage(envs, &cfg, stats); err != nil {
+		return nil, fmt.Errorf("RunCgo: streamSpecStorage: %w", err)
+	}
+
 	// Phase 4a.5: genesis-alloc accounts (cfg.GenesisAccounts/Code/Storage).
 	// The e2e suite uses these to deploy EIP-4788/2935/7002/7251 system
 	// contracts at their canonical addresses via oracle.AddPragueSystemContracts
