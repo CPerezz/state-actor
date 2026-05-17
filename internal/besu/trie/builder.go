@@ -78,6 +78,18 @@ func (b *Builder) BeginStorage(addrHash common.Hash) *StorageBuilder {
 	}
 }
 
+// BeginStreamingStorage returns a StreamingStorageBuilder for the
+// per-account storage trie. Like BeginStorage, but builds in O(depth)
+// memory by consuming AddSlot calls in keccak-ascending order via a
+// right-spine algorithm. Required for entities with millions of slots
+// where the non-streaming StorageBuilder OOMs.
+func (b *Builder) BeginStreamingStorage(addrHash common.Hash) *StreamingStorageBuilder {
+	return &StreamingStorageBuilder{
+		addrHash: addrHash,
+		sink:     b.sink,
+	}
+}
+
 // Commit finalizes the account-state trie and emits all non-inline nodes via
 // the sink. Returns the root hash and root RLP. Caller is responsible for
 // calling sink.SaveWorldState once the genesis block hash is computed.
