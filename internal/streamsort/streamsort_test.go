@@ -154,3 +154,48 @@ func TestStoreIterateYieldErrorPropagates(t *testing.T) {
 		t.Errorf("Iterate: got %v, want %v", gotErr, sentinel)
 	}
 }
+
+// TestStoreIterateRepeatable: two consecutive Iterate calls on the same
+// Store must yield byte-identical sequences. The reth pipeline relies
+// on this for AddLeaf offload — the worker iterates once to compute the
+// storage root, the writer iterates again to drive MDBX writes.
+func TestStoreIterateRepeatable(t *testing.T) {
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+
+	pairs := [][2][]byte{
+		{[]byte("a"), []byte("alpha")},
+		{[]byte("b"), []byte("beta")},
+		{[]byte("c"), []byte("gamma")},
+	}
+	for _, p := range pairs {
+		if err := s.Put(p[0], p[1]); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+	}
+
+	collect := func() [][2][]byte {
+		var out [][2][]byte
+		if err := s.Iterate(func(k, v []byte) error {
+			out = append(out, [2][]byte{append([]byte{}, k...), append([]byte{}, v...)})
+			return nil
+		}); err != nil {
+			t.Fatalf("Iterate: %v", err)
+		}
+		return out
+	}
+	first := collect()
+	second := collect()
+	if len(first) != len(pairs) || len(second) != len(pairs) {
+		t.Fatalf("iterate counts: first=%d second=%d want=%d", len(first), len(second), len(pairs))
+	}
+	for i := range first {
+		if !bytes.Equal(first[i][0], second[i][0]) || !bytes.Equal(first[i][1], second[i][1]) {
+			t.Errorf("multi-iterate divergence at %d:\n first=(%q,%q)\n second=(%q,%q)",
+				i, first[i][0], first[i][1], second[i][0], second[i][1])
+		}
+	}
+}
