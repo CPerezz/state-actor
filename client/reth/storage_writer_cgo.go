@@ -36,11 +36,16 @@ import (
 // their keys are not counted, mirroring nethermind's "value-bytes" semantics.
 // Caller is responsible for transferring the returned count to *generator.Stats
 // only after the enclosing MDBX transaction commits.
+//
+// skipChangeSets elides the StorageChangeSets write (table 3). Safe for
+// genesis (blockNum == 0) per the runtime audit — block 0 changesets are
+// never consulted by any reth read path. MUST be false for blockNum != 0.
 func WriteContractStorage(
 	txn *mdbx.Txn,
 	dbis map[string]mdbx.DBI,
 	contract *entitygen.Account,
 	blockNum uint64,
+	skipChangeSets bool,
 ) (uint64, error) {
 	blockKey := iReth.BlockNumberAddress{BlockNumber: blockNum, Address: contract.Address}
 	var blockKeyBuf bytes.Buffer
@@ -73,12 +78,14 @@ func WriteContractStorage(
 
 		// 3. StorageChangeSets: BlockNumberAddress → StorageEntry{slot_key, prev_value=0}
 		// For genesis (block 0), the "before" value is 0 — slot was newly set.
-		changeEntry := iReth.StorageEntry{Key: slot.Key, Value: uint256.NewInt(0)}
-		var changeBuf bytes.Buffer
-		changeEntry.EncodeCompact(&changeBuf)
-		if err := txn.Put(dbis["StorageChangeSets"], blockKeyBytes, changeBuf.Bytes(), 0); err != nil {
-			return 0, fmt.Errorf("StorageChangeSets %s slot %s: %w",
-				contract.Address.Hex(), slot.Key.Hex(), err)
+		if !skipChangeSets {
+			changeEntry := iReth.StorageEntry{Key: slot.Key, Value: uint256.NewInt(0)}
+			var changeBuf bytes.Buffer
+			changeEntry.EncodeCompact(&changeBuf)
+			if err := txn.Put(dbis["StorageChangeSets"], blockKeyBytes, changeBuf.Bytes(), 0); err != nil {
+				return 0, fmt.Errorf("StorageChangeSets %s slot %s: %w",
+					contract.Address.Hex(), slot.Key.Hex(), err)
+			}
 		}
 
 		// 4. StoragesHistory: StorageShardedKey{addr, slot_key, u64::MAX} → IntegerList([block])
