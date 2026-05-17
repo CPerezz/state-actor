@@ -98,10 +98,12 @@ func (s *Store) Put(key, value []byte) error {
 }
 
 // Iterate flushes any pending batch and invokes yield for every entry
-// in ascending key order. Key/value slices alias Pebble's internal
-// buffers and are invalidated on the next Next() — callers that retain
-// either MUST copy it. A non-nil error from yield short-circuits and
-// is returned. Returns an error if called after Close.
+// in ascending key order. Safe to call multiple times — each call
+// re-opens a fresh Pebble iter over the same data. Key/value slices
+// alias Pebble's internal buffers and are invalidated on the next
+// Next() — callers that retain either MUST copy it. A non-nil error
+// from yield short-circuits and is returned. Returns an error if
+// called after Close.
 func (s *Store) Iterate(yield func(key, value []byte) error) error {
 	if s.closed {
 		return fmt.Errorf("streamsort: Iterate after Close")
