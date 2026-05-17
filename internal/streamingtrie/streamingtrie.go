@@ -48,6 +48,11 @@ type Sink func(keyHash, rawKey, value common.Hash) error
 // workDir is passed through to streamsort.New (empty → os.TempDir()).
 // storage MUST yield deterministically. hb MUST be freshly constructed.
 // sink MAY be nil (root-only path).
+//
+// Equivalent to: Drain → IterateRoot → Close. Use the split form when
+// the drain phase should run in a different goroutine from the
+// iterate-with-sink phase (e.g. to parallelise drain across entities
+// while serialising the write phase on a single DB-writer lock).
 func StorageRoot(
 	workDir string,
 	storage iter.Seq2[common.Hash, common.Hash],
@@ -57,20 +62,44 @@ func StorageRoot(
 	if hb == nil {
 		return common.Hash{}, fmt.Errorf("streamingtrie: nil HashBuilder")
 	}
-	if storage == nil {
-		root, err := hb.Root()
-		if err != nil {
-			return common.Hash{}, fmt.Errorf("streamingtrie: Root: %w", err)
-		}
-		return root, nil
+	d, err := Drain(workDir, storage)
+	if err != nil {
+		return common.Hash{}, err
 	}
+	defer d.Close()
+	return d.IterateRoot(hb, sink)
+}
 
+// Drained is a finished drain-phase result — a sorted on-disk store of
+// (keyHash, rawKey||value) entries ready to be replayed in keccak-
+// ascending order via IterateRoot. The caller MUST Close it once the
+// iterate phase is done.
+//
+// A Drained is owned by a single goroutine at a time; the drain
+// goroutine may hand it off to a writer goroutine over a channel.
+type Drained struct {
+	store *streamsort.Store
+}
+
+// Drain hashes every (rawKey, value) pair from storage, skips zero
+// values, and writes (keccak(rawKey), rawKey||value) to a temp
+// streamsort.Store. The store's Iterate is called later via
+// IterateRoot. The returned Drained owns the streamsort and MUST be
+// closed by the caller.
+//
+// nil storage is allowed and returns an empty Drained (IterateRoot
+// will yield the empty-trie root).
+func Drain(
+	workDir string,
+	storage iter.Seq2[common.Hash, common.Hash],
+) (*Drained, error) {
 	s, err := streamsort.New(workDir)
 	if err != nil {
-		return common.Hash{}, fmt.Errorf("streamingtrie: streamsort.New: %w", err)
+		return nil, fmt.Errorf("streamingtrie: streamsort.New: %w", err)
 	}
-	defer s.Close()
-
+	if storage == nil {
+		return &Drained{store: s}, nil
+	}
 	// Store layout: key=keccak(rawKey) (32 B), value=rawKey||value (64 B).
 	var putErr error
 	storage(func(k, v common.Hash) bool {
@@ -88,10 +117,21 @@ func StorageRoot(
 		return true
 	})
 	if putErr != nil {
-		return common.Hash{}, putErr
+		s.Close()
+		return nil, putErr
 	}
+	return &Drained{store: s}, nil
+}
 
-	if err := s.Iterate(func(keyHashB, combinedB []byte) error {
+// IterateRoot walks the drained store in keccak-ascending order,
+// invoking sink (if non-nil) and HashBuilder.AddLeaf in lockstep,
+// then returns the storage trie root. Callable exactly once per
+// Drained; closing is the caller's responsibility.
+func (d *Drained) IterateRoot(hb HashBuilder, sink Sink) (common.Hash, error) {
+	if hb == nil {
+		return common.Hash{}, fmt.Errorf("streamingtrie: nil HashBuilder")
+	}
+	if err := d.store.Iterate(func(keyHashB, combinedB []byte) error {
 		var keyHash, rawKey, value common.Hash
 		copy(keyHash[:], keyHashB)
 		copy(rawKey[:], combinedB[0:32])
@@ -118,12 +158,20 @@ func StorageRoot(
 	}); err != nil {
 		return common.Hash{}, err
 	}
-
 	root, err := hb.Root()
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("streamingtrie: Root: %w", err)
 	}
 	return root, nil
+}
+
+// Close releases the underlying streamsort store. Idempotent.
+func (d *Drained) Close() {
+	if d == nil || d.store == nil {
+		return
+	}
+	_ = d.store.Close()
+	d.store = nil
 }
 
 func uint64SlotKey(slot uint64) common.Hash {
