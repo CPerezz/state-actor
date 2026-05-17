@@ -122,6 +122,19 @@ type Config struct {
 	// Code into GenesisAccounts/Code (Storage stays on the iter for
 	// streaming consumption by per-client writers).
 	PreAlloc []templates.PreAllocEntity
+
+	// SkipGenesisChangeSets, when true, omits writes to reth's
+	// StorageChangeSets table for block 0. Safe per the runtime audit
+	// at the head of ~/.claude/plans/on-the-meantime-i-proud-karp.md:
+	// block 0 changesets are never consulted by any read path
+	// (overlay revert range starts at anchor_number+1; historical
+	// lookups only seek InChangeset(N) with N>=1). Saves ~33 B per
+	// storage slot on disk on a bloatnet-scale run.
+	//
+	// StoragesHistory is NOT affected by this flag — historical
+	// eth_getStorageAt would silently return zero for state-actor
+	// slots if it were missing.
+	SkipGenesisChangeSets bool
 }
 
 // Validate materializes PreAlloc into the GenesisAccounts/Code maps

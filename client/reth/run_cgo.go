@@ -100,7 +100,7 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 			}
 		}
 		if len(allocContracts) > 0 {
-			if err := WriteContracts(envs, allocContracts, 0, stats); err != nil {
+			if err := WriteContracts(envs, allocContracts, 0, cfg.SkipGenesisChangeSets, stats); err != nil {
 				return nil, fmt.Errorf("RunCgo: WriteContracts(alloc): %w", err)
 			}
 		}
@@ -168,7 +168,7 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 				// WriteContracts mutates each contract's StateAccount.Root
 				// + .CodeHash in place; putAccountRLP below captures the
 				// updated values.
-				if err := WriteContracts(envs, batch, 0, stats); err != nil {
+				if err := WriteContracts(envs, batch, 0, cfg.SkipGenesisChangeSets, stats); err != nil {
 					return nil, fmt.Errorf("RunCgo: WriteContracts: %w", err)
 				}
 				for _, c := range batch {

@@ -151,11 +151,13 @@ func streamSpecStorage(ctx context.Context, envs *Envs, cfg *generator.Config, s
 					return fmt.Errorf("HashedStorages %s slot %s: %w", addrHash.Hex(), rawKey.Hex(), err)
 				}
 
-				changeEntry := iReth.StorageEntry{Key: rawKey, Value: uint256.NewInt(0)}
-				var changeBuf bytes.Buffer
-				changeEntry.EncodeCompact(&changeBuf)
-				if err := txn.Put(envs.MdbxDBIs["StorageChangeSets"], blockKeyBytes, changeBuf.Bytes(), 0); err != nil {
-					return fmt.Errorf("StorageChangeSets %s slot %s: %w", addr.Hex(), rawKey.Hex(), err)
+				if !cfg.SkipGenesisChangeSets {
+					changeEntry := iReth.StorageEntry{Key: rawKey, Value: uint256.NewInt(0)}
+					var changeBuf bytes.Buffer
+					changeEntry.EncodeCompact(&changeBuf)
+					if err := txn.Put(envs.MdbxDBIs["StorageChangeSets"], blockKeyBytes, changeBuf.Bytes(), 0); err != nil {
+						return fmt.Errorf("StorageChangeSets %s slot %s: %w", addr.Hex(), rawKey.Hex(), err)
+					}
 				}
 
 				ssk := iReth.StorageShardedKey{

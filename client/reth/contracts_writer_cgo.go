@@ -28,7 +28,7 @@ import (
 // counts code that actually got written), and StorageBytes (sum of
 // PlainStorageState compact-encoded entries). Increments are applied
 // only after the MDBX transaction commits.
-func WriteContracts(envs *Envs, contracts []*entitygen.Account, blockNum uint64, stats *generator.Stats) error {
+func WriteContracts(envs *Envs, contracts []*entitygen.Account, blockNum uint64, skipChangeSets bool, stats *generator.Stats) error {
 	var (
 		localAccountBytes uint64
 		localStorageBytes uint64
@@ -106,7 +106,7 @@ func WriteContracts(envs *Envs, contracts []*entitygen.Account, blockNum uint64,
 				return fmt.Errorf("AccountsHistory %s: %w", contract.Address.Hex(), err)
 			}
 
-			storBytes, err := WriteContractStorage(txn, envs.MdbxDBIs, contract, blockNum)
+			storBytes, err := WriteContractStorage(txn, envs.MdbxDBIs, contract, blockNum, skipChangeSets)
 			if err != nil {
 				return fmt.Errorf("WriteContracts: WriteContractStorage %s: %w", contract.Address.Hex(), err)
 			}

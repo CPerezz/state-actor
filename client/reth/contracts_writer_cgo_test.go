@@ -33,7 +33,7 @@ func TestWriteContractsSmall(t *testing.T) {
 		contracts[i] = entitygen.GenerateContract(rng, 16, 3)
 	}
 
-	if err := WriteContracts(envs, contracts, 0, nil); err != nil {
+	if err := WriteContracts(envs, contracts, 0, false, nil); err != nil {
 		t.Fatalf("WriteContracts: %v", err)
 	}
 
@@ -90,7 +90,7 @@ func TestWriteContractsPopulatesStats(t *testing.T) {
 	}
 
 	var stats generator.Stats
-	if err := WriteContracts(envs, contracts, 0, &stats); err != nil {
+	if err := WriteContracts(envs, contracts, 0, false, &stats); err != nil {
 		t.Fatalf("WriteContracts: %v", err)
 	}
 
@@ -126,7 +126,7 @@ func TestWriteContractsDedupesCodeBytes(t *testing.T) {
 	b.CodeHash = a.CodeHash
 
 	var stats generator.Stats
-	if err := WriteContracts(envs, []*entitygen.Account{a, b}, 0, &stats); err != nil {
+	if err := WriteContracts(envs, []*entitygen.Account{a, b}, 0, false, &stats); err != nil {
 		t.Fatalf("WriteContracts: %v", err)
 	}
 
@@ -162,7 +162,7 @@ func TestWriteContractsRejectsZeroRoot(t *testing.T) {
 		Code:    nil,
 	}
 
-	err = WriteContracts(envs, []*entitygen.Account{bad}, 0, nil)
+	err = WriteContracts(envs, []*entitygen.Account{bad}, 0, false, nil)
 	if err == nil {
 		t.Fatal("WriteContracts: expected error for empty Storage + zero Root, got nil")
 	}

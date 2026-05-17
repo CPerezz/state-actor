@@ -41,7 +41,7 @@ func TestWriteContractStorageRoundtrip(t *testing.T) {
 	}
 
 	err = envs.Mdbx.Update(func(txn *mdbx.Txn) error {
-		_, err := WriteContractStorage(txn, envs.MdbxDBIs, contract, 0)
+		_, err := WriteContractStorage(txn, envs.MdbxDBIs, contract, 0, false)
 		return err
 	})
 	if err != nil {
@@ -112,5 +112,68 @@ func TestWriteContractStorageRoundtrip(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Errorf("verify StoragesHistory: %v", err)
+	}
+}
+
+// TestWriteContractStorage_SkipGenesisChangeSets: with skipChangeSets=true,
+// WriteContractStorage must elide StorageChangeSets writes while still
+// populating PlainStorageState, HashedStorages, and StoragesHistory.
+func TestWriteContractStorage_SkipGenesisChangeSets(t *testing.T) {
+	envs, err := OpenEnvs(t.TempDir(), true)
+	if err != nil {
+		t.Fatalf("OpenEnvs: %v", err)
+	}
+	defer envs.Close()
+
+	addr := common.HexToAddress("0xcafef00d")
+	contract := &entitygen.Account{
+		Address:  addr,
+		AddrHash: crypto.Keccak256Hash(addr[:]),
+		StateAccount: &types.StateAccount{
+			Nonce:   1,
+			Balance: uint256.NewInt(0),
+		},
+		Storage: []entitygen.StorageSlot{
+			{Key: common.HexToHash("0x01"), Value: common.HexToHash("0xa")},
+			{Key: common.HexToHash("0x02"), Value: common.HexToHash("0xb")},
+		},
+	}
+
+	err = envs.Mdbx.Update(func(txn *mdbx.Txn) error {
+		_, err := WriteContractStorage(txn, envs.MdbxDBIs, contract, 0, true)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("WriteContractStorage(skipChangeSets=true): %v", err)
+	}
+
+	countRows := func(t *testing.T, table string) int {
+		t.Helper()
+		var count int
+		_ = envs.Mdbx.View(func(txn *mdbx.Txn) error {
+			cur, err := txn.OpenCursor(envs.MdbxDBIs[table])
+			if err != nil {
+				return err
+			}
+			defer cur.Close()
+			for _, _, err := cur.Get(nil, nil, mdbx.First); err == nil; _, _, err = cur.Get(nil, nil, mdbx.Next) {
+				count++
+			}
+			return nil
+		})
+		return count
+	}
+
+	if got := countRows(t, "StorageChangeSets"); got != 0 {
+		t.Errorf("StorageChangeSets rows = %d, want 0 (skipped)", got)
+	}
+	if got := countRows(t, "PlainStorageState"); got != len(contract.Storage) {
+		t.Errorf("PlainStorageState rows = %d, want %d", got, len(contract.Storage))
+	}
+	if got := countRows(t, "HashedStorages"); got != len(contract.Storage) {
+		t.Errorf("HashedStorages rows = %d, want %d", got, len(contract.Storage))
+	}
+	if got := countRows(t, "StoragesHistory"); got != len(contract.Storage) {
+		t.Errorf("StoragesHistory rows = %d, want %d", got, len(contract.Storage))
 	}
 }
