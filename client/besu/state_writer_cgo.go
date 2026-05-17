@@ -59,15 +59,17 @@ func writeStateAndCollectRoot(
 		}
 		addr := pe.Address
 		addrHash := crypto.Keccak256Hash(addr[:])
-		sb := builder.BeginStorage(addrHash)
-		hb := &besuStorageHashBuilder{sb: sb}
+		// Streaming Bonsai storage-trie builder: O(depth) memory per entity.
+		// The non-streaming BeginStorage path retained the full per-account
+		// MPT in memory and OOM-killed state-actor at bloatnet scale.
+		sb := builder.BeginStreamingStorage(addrHash)
 		var entityStorageBytes uint64
 		streamSink := func(keyHash, _rawKey, value common.Hash) error {
 			trimmed := besurlp.TrimStorageValue(value)
 			entityStorageBytes += uint64(len(trimmed))
 			return sink.PutFlatStorage(addrHash, keyHash, trimmed)
 		}
-		root, err := streamingtrie.StorageRoot("", pe.Storage, hb, streamSink)
+		root, err := streamingtrie.StorageRoot("", pe.Storage, sb, streamSink)
 		if err != nil {
 			return common.Hash{}, nil, nil, fmt.Errorf("besu: stream spec storage[%d] %s: %w", i, addr.Hex(), err)
 		}
@@ -355,17 +357,3 @@ func decodeEntity(blob []byte) entity {
 	return e
 }
 
-// besuStorageHashBuilder adapts besutrie.StorageBuilder to
-// streamingtrie.HashBuilder. Root calls sb.Commit, finalising the
-// storage trie and emitting non-inline nodes via the bound NodeSink.
-type besuStorageHashBuilder struct {
-	sb *besutrie.StorageBuilder
-}
-
-func (b *besuStorageHashBuilder) AddLeaf(keyHash common.Hash, valueRLP []byte) error {
-	return b.sb.AddSlot(keyHash, valueRLP)
-}
-
-func (b *besuStorageHashBuilder) Root() (common.Hash, error) {
-	return b.sb.Commit()
-}
