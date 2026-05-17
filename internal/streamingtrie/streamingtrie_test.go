@@ -200,6 +200,29 @@ func TestStorageRoot_ReIterationDeterminism(t *testing.T) {
 	}
 }
 
+// TestDrainIterateRoot_EquivalenceWithStorageRoot: split-form must hash
+// to the same root as the one-shot helper.
+func TestDrainIterateRoot_EquivalenceWithStorageRoot(t *testing.T) {
+	pairs := fixturePairs100()
+	want, err := StorageRoot(t.TempDir(), iterFromPairs(pairs), newStackTrieBuilder(), nil)
+	if err != nil {
+		t.Fatalf("StorageRoot (oracle): %v", err)
+	}
+
+	d, err := Drain(t.TempDir(), iterFromPairs(pairs))
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	defer d.Close()
+	got, err := d.IterateRoot(newStackTrieBuilder(), nil)
+	if err != nil {
+		t.Fatalf("IterateRoot: %v", err)
+	}
+	if got != want {
+		t.Errorf("split-form root differs from one-shot: got %s, want %s", got.Hex(), want.Hex())
+	}
+}
+
 // TestStorageRoot_SinkReceivesAllPairs verifies the Sink contract: it
 // is called exactly once per non-zero (keyHash, rawKey, value) triple,
 // in keccak-sorted-by-keyHash order. Pairs the Sink with an
