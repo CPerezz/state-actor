@@ -55,10 +55,11 @@ func writeGenesisAllocAccounts(
 		storageRoot := besu.EmptyTrieNodeHash
 		codeHash := besu.EmptyCodeHash
 
-		// Per-account storage trie.
+		// Per-account storage trie via the streaming builder (O(depth) memory).
 		if len(e.acc.Storage) > 0 {
-			sb := builder.BeginStorage(e.addrHash)
-			// Sort slots by slotHash.
+			sb := builder.BeginStreamingStorage(e.addrHash)
+			// Sort slots by slotHash — the streaming builder requires
+			// keccak-ascending input.
 			type slotKV struct {
 				slotKey  common.Hash
 				slotHash common.Hash
