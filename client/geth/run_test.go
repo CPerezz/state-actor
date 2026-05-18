@@ -14,6 +14,7 @@ import (
 	"github.com/holiman/uint256"
 
 	"github.com/nerolation/state-actor/generator"
+	"github.com/nerolation/state-actor/internal/sizecal"
 )
 
 // TestPopulateReproducibility runs Populate twice with the same seed
@@ -122,9 +123,12 @@ func TestPopulateRootMatchesEntitygen(t *testing.T) {
 	}
 }
 
-// TestPopulateTargetSizeStopsAccurately verifies Phase 2's dirSize
-// sampling stops production-DB writes when cfg.TargetSize is reached,
-// landing the on-disk size within a reasonable tolerance of the target.
+// TestPopulateTargetSizeStopsAccurately verifies origin-scoped Phase 1
+// emission halts when the projected trie footprint reaches cfg.TargetSize.
+// The assertion measures projected trie bytes (sizecal-formula on the
+// stats counters), not dirSize — cfg.TargetSize is a trie-only budget,
+// so geth's flat-state + Pebble overhead inflate dirSize by ~50% on top
+// (by design, not a regression).
 //
 // Mirrors TestTargetSizeStopsAccurately_MPT in generator/, but runs
 // against client/geth.Populate directly so it's independent of the
@@ -134,11 +138,6 @@ func TestPopulateTargetSizeStopsAccurately(t *testing.T) {
 		t.Skip("skipping target-size accuracy test in -short mode")
 	}
 	dir := t.TempDir()
-	// 200 MiB is small enough to run quickly but large enough to
-	// amortise Pebble's fixed overhead (WAL + MANIFEST + SST metadata)
-	// to a small fraction of the target — keeps the 20% tolerance
-	// achievable. Smaller targets (e.g. 50 MiB) would need a
-	// proportionally tighter sample cadence to stay in band.
 	const target uint64 = 200 * 1024 * 1024 // 200 MiB
 	cfg := generator.Config{
 		DBPath:         filepath.Join(dir, "geth", "chaindata"),
@@ -162,21 +161,26 @@ func TestPopulateTargetSizeStopsAccurately(t *testing.T) {
 		t.Fatal("state root unexpectedly zero after target-size stop")
 	}
 
-	actual, err := dirSize(cfg.DBPath)
-	if err != nil {
-		t.Fatalf("dirSize: %v", err)
-	}
-	const tolerance = 0.20
-	diff := float64(actual) - float64(target)
+	// Projected trie bytes from the Phase 1 accumulator's formula.
+	// Tolerance ±5%: Phase 1 stops the moment projection >= target, so the
+	// worst-case overshoot is one entity (~7 KB for a max-slot contract
+	// at ~50 slots × 140 B + 175 B). Far inside the bound.
+	bAcct := sizecal.BytesPerAccount("")
+	bSlot := sizecal.BytesPerSlot("")
+	projected := uint64(stats.AccountsCreated+stats.ContractsCreated)*bAcct +
+		uint64(stats.StorageSlotsCreated)*bSlot
+	diff := float64(projected) - float64(target)
 	if diff < 0 {
 		diff = -diff
 	}
 	pct := diff / float64(target)
-	t.Logf("DB size: actual=%d target=%d diff=%.1f%% tolerance=%.1f%%",
-		actual, target, pct*100, tolerance*100)
+	const tolerance = 0.05
+	t.Logf("projected trie: accounts+contracts=%d slots=%d → %d B; target=%d diff=%.1f%% tol=%.1f%%",
+		stats.AccountsCreated+stats.ContractsCreated, stats.StorageSlotsCreated,
+		projected, target, pct*100, tolerance*100)
 	if pct > tolerance {
-		t.Errorf("DB size %.1f%% off target (%d vs %d), tolerance %.1f%%",
-			pct*100, actual, target, tolerance*100)
+		t.Errorf("projected trie %.1f%% off target (proj=%d target=%d), tol=%.1f%%",
+			pct*100, projected, target, tolerance*100)
 	}
 }
 
