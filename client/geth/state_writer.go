@@ -482,14 +482,69 @@ func newGethStorageHashBuilder(w *Writer, addrHash common.Hash) *gethStorageHash
 	return hb
 }
 
+// scratchBatchWriter owns a *pebble.Batch and auto-flushes when it crosses
+// `threshold` bytes. Owned by a single worker goroutine; not thread-safe.
+//
+// Why this exists: a single bloated EOA writes >30 GiB of slot snapshot
+// rows + storage-trie nodes during one streamingtrie.IterateRoot call.
+// Pebble's *Batch has a 4 GiB hard size limit (cockroachdb/pebble/batch.go
+// :maxBatchSize) and will panic if exceeded. A check after IterateRoot
+// returns is too late; flushing must happen mid-iteration. This wrapper
+// makes every Set check the size and rotate the batch when full.
+type scratchBatchWriter struct {
+	w         *Writer
+	batch     *pebble.Batch
+	threshold int
+}
+
+func newScratchBatchWriter(w *Writer, threshold int) *scratchBatchWriter {
+	return &scratchBatchWriter{w: w, batch: w.NewScratchBatch(), threshold: threshold}
+}
+
+// Set forwards to the current batch and rotates+commits when crossing
+// the size threshold. The returned error short-circuits any caller.
+func (sbw *scratchBatchWriter) Set(key, value []byte) error {
+	if err := sbw.batch.Set(key, value, nil); err != nil {
+		return err
+	}
+	if sbw.batch.Len() >= sbw.threshold {
+		if err := sbw.w.CommitScratchBatch(sbw.batch); err != nil {
+			return err
+		}
+		sbw.batch = sbw.w.NewScratchBatch()
+	}
+	return nil
+}
+
+// Flush commits any pending bytes. Idempotent; safe to call when empty.
+func (sbw *scratchBatchWriter) Flush() error {
+	if sbw.batch.Len() > 0 {
+		if err := sbw.w.CommitScratchBatch(sbw.batch); err != nil {
+			return err
+		}
+		sbw.batch = sbw.w.NewScratchBatch()
+	}
+	return nil
+}
+
+// Close commits any pending bytes and releases the current batch.
+func (sbw *scratchBatchWriter) Close() error {
+	if sbw.batch.Len() > 0 {
+		return sbw.w.CommitScratchBatch(sbw.batch)
+	}
+	return sbw.batch.Close()
+}
+
 // newScratchGethStorageHashBuilder builds a HashBuilder that writes
-// storage-trie nodes through a caller-supplied *pebble.Batch instead of
-// through the shared w.batch+batchMu hot path. Used by Phase 0's worker
-// pool so each worker writes without contending on the shared mutex.
+// storage-trie nodes through a *scratchBatchWriter (which rotates the
+// underlying *pebble.Batch when full). Used by Phase 0's worker pool
+// so each worker writes without contending on the shared w.batch+batchMu
+// AND without panicking when a bloated entity writes >4 GiB of trie
+// nodes in one IterateRoot call.
 //
 // The returned builder reuses gethStorageHashBuilder; only the callback
 // differs. err remains per-instance (per-worker).
-func newScratchGethStorageHashBuilder(batch *pebble.Batch, addrHash common.Hash) *gethStorageHashBuilder {
+func newScratchGethStorageHashBuilder(sbw *scratchBatchWriter, addrHash common.Hash) *gethStorageHashBuilder {
 	hb := &gethStorageHashBuilder{addrHash: addrHash}
 	cb := func(path []byte, hash common.Hash, blob []byte) {
 		if hb.err != nil {
@@ -501,7 +556,7 @@ func newScratchGethStorageHashBuilder(batch *pebble.Batch, addrHash common.Hash)
 		key = append(key, rawdb.TrieNodeStoragePrefix...)
 		key = append(key, hb.addrHash[:]...)
 		key = append(key, p...)
-		if err := batch.Set(key, b, nil); err != nil {
+		if err := sbw.Set(key, b); err != nil {
 			hb.err = fmt.Errorf("geth: scratch trie node Set for %s: %w", hb.addrHash.Hex(), err)
 		}
 	}
@@ -583,18 +638,10 @@ func runPhase0(ctx context.Context, cfg generator.Config, w *Writer) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			scratch := w.NewScratchBatch()
+			sbw := newScratchBatchWriter(w, scratchBatchFlushBytes)
 			defer func() {
-				// Final flush on exit (success or cancel). Errors during
-				// final flush surface through drainCtx — if we got here on
-				// cancel they're best-effort. Sync=false matches the
-				// per-entity path.
-				if scratch.Len() > 0 {
-					if err := w.CommitScratchBatch(scratch); err != nil {
-						cancelDrain(fmt.Errorf("geth phase0: final flush: %w", err))
-					}
-				} else {
-					_ = scratch.Close()
+				if err := sbw.Close(); err != nil {
+					cancelDrain(fmt.Errorf("geth phase0: final flush: %w", err))
 				}
 			}()
 
@@ -617,24 +664,14 @@ func runPhase0(ctx context.Context, cfg generator.Config, w *Writer) error {
 						return encErr
 					}
 					key := storageSnapshotKey(addrHash, keyHash)
-					return scratch.Set(key, valueRLP, nil)
+					return sbw.Set(key, valueRLP)
 				}
-				hb := newScratchGethStorageHashBuilder(scratch, addrHash)
+				hb := newScratchGethStorageHashBuilder(sbw, addrHash)
 				root, err := d.IterateRoot(hb, sink)
 				d.Close()
 				if err != nil {
 					cancelDrain(fmt.Errorf("geth: iterate spec storage[%d] %s: %w", i, addr.Hex(), err))
 					return
-				}
-				// Flush mid-stream to bound RAM. Crossing the threshold
-				// produces an Apply + fresh Batch; on commit failure the
-				// worker bails and signals via drainCtx.
-				if scratch.Len() >= scratchBatchFlushBytes {
-					if err := w.CommitScratchBatch(scratch); err != nil {
-						cancelDrain(fmt.Errorf("geth phase0: scratch flush: %w", err))
-						return
-					}
-					scratch = w.NewScratchBatch()
 				}
 				select {
 				case preparedCh <- preparedEntity{idx: i, addr: addr, root: root}:
