@@ -3,7 +3,6 @@ package geth
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	mrand "math/rand"
@@ -23,6 +22,7 @@ import (
 
 	"github.com/nerolation/state-actor/generator"
 	"github.com/nerolation/state-actor/internal/entitygen"
+	"github.com/nerolation/state-actor/internal/sizecal"
 	"github.com/nerolation/state-actor/internal/streamingtrie"
 	"github.com/nerolation/state-actor/internal/streamsort"
 )
@@ -94,19 +94,22 @@ func writeStateAndCollectRoot(
 
 	rng := mrand.New(mrand.NewSource(int64(cfg.Seed)))
 
-	// Phase 1 writes to the temp Pebble only, so dirSize sampling is
-	// misleading here. Cap raw entity bytes at 5× cfg.TargetSize as a
-	// safety net; Phase 2's accurate dirSize stop is the real bound.
-	// 5× headroom covers MPT + storage trie overhead (~3-4× empirical).
-	totalRawBytes := uint64(0)
+	// Origin-scoped target-size: accumulate projected on-disk trie bytes
+	// per entity using the same sizecal constants internal/specbuild uses.
+	// Stops emission once projection reaches cfg.TargetSize, so Phase 2
+	// processes every entity Phase 1 emits — no orphaned account-trie
+	// state. Replaces the prior 5x raw-bytes safety cap; the dirSize
+	// sampling that used to live in Phase 2 is gone.
+	bAcct := sizecal.BytesPerAccount("")
+	bSlot := sizecal.BytesPerSlot("")
+	var projectedTrieBytes uint64
 	targetReached := false
-	const phase1Phase1RawSafetyMultiplier = 5
-	checkTarget := func(blobLen int) bool {
-		totalRawBytes += uint64(32 + blobLen)
-		if cfg.TargetSize > 0 && totalRawBytes >= cfg.TargetSize*phase1Phase1RawSafetyMultiplier {
-			if cfg.Verbose {
-				log.Printf("geth MPT Phase 1 safety cap: raw bytes %d MiB >= 5× target %d MiB — stopping entity emission",
-					totalRawBytes>>20, (cfg.TargetSize*phase1Phase1RawSafetyMultiplier)>>20)
+	addProjection := func(slotCount int) bool {
+		projectedTrieBytes += bAcct + bSlot*uint64(slotCount)
+		if cfg.TargetSize > 0 && projectedTrieBytes >= cfg.TargetSize {
+			if cfg.Verbose && !targetReached {
+				log.Printf("geth MPT Phase 1: projected trie %d MiB >= target %d MiB — stopping entity emission",
+					projectedTrieBytes>>20, cfg.TargetSize>>20)
 			}
 			targetReached = true
 			return true
@@ -117,14 +120,6 @@ func writeStateAndCollectRoot(
 	// genesisAddrs prevents synthetic RNG addresses from colliding with
 	// pre-allocated genesis addresses.
 	genesisAddrs := make(map[common.Address]struct{}, len(cfg.GenesisAccounts))
-
-	writeBlob := func(addrHash common.Hash, blob []byte) error {
-		if err := sorter.Put(addrHash[:], blob); err != nil {
-			return err
-		}
-		checkTarget(len(blob))
-		return nil
-	}
 
 	for addr, acc := range cfg.GenesisAccounts {
 		genesisAddrs[addr] = struct{}{}
@@ -151,9 +146,10 @@ func writeStateAndCollectRoot(
 			blob = encodeEntityContract(acc.Nonce, acc.Balance, code, slots)
 			stats.ContractsCreated++
 		}
-		if err := writeBlob(addrHash, blob); err != nil {
+		if err := sorter.Put(addrHash[:], blob); err != nil {
 			return common.Hash{}, nil, fmt.Errorf("phase1 genesis alloc: %w", err)
 		}
+		addProjection(len(slots))
 	}
 
 	for i := 0; i < cfg.NumAccounts && !targetReached; i++ {
@@ -166,13 +162,14 @@ func writeStateAndCollectRoot(
 			_, dup = genesisAddrs[acc.Address]
 		}
 		blob := encodeEntityEOA(acc.StateAccount.Nonce, acc.StateAccount.Balance)
-		if err := writeBlob(acc.AddrHash, blob); err != nil {
+		if err := sorter.Put(acc.AddrHash[:], blob); err != nil {
 			return common.Hash{}, nil, fmt.Errorf("phase1 EOA #%d: %w", i, err)
 		}
 		stats.AccountsCreated++
 		if len(stats.SampleEOAs) < 3 {
 			stats.SampleEOAs = append(stats.SampleEOAs, acc.Address)
 		}
+		addProjection(0)
 	}
 
 	codeSize := cfg.CodeSize
@@ -200,7 +197,7 @@ func writeStateAndCollectRoot(
 			contract.Code,
 			slots,
 		)
-		if err := writeBlob(contract.AddrHash, blob); err != nil {
+		if err := sorter.Put(contract.AddrHash[:], blob); err != nil {
 			return common.Hash{}, nil, fmt.Errorf("phase1 contract #%d: %w", i, err)
 		}
 		stats.ContractsCreated++
@@ -208,6 +205,7 @@ func writeStateAndCollectRoot(
 		if len(stats.SampleContracts) < 3 {
 			stats.SampleContracts = append(stats.SampleContracts, contract.Address)
 		}
+		addProjection(len(contract.Storage))
 	}
 
 	stats.GenerationTime = time.Since(start)
@@ -242,7 +240,6 @@ func writeStateAndCollectRoot(
 	codeSeen := make(map[common.Hash]struct{}, cfg.NumContracts)
 
 	count := 0
-	earlyStop := errors.New("geth phase2: target size reached")
 	iterErr := sorter.Iterate(func(key, value []byte) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -310,23 +307,9 @@ func writeStateAndCollectRoot(
 		}
 
 		count++
-
-		// Sample dirSize every 1024 entities (~600 KiB at ~600 B/entity).
-		if cfg.TargetSize > 0 && count%1024 == 0 {
-			if err := w.FlushBatch(); err != nil {
-				return fmt.Errorf("phase2 target-size flush: %w", err)
-			}
-			if size, err := dirSize(cfg.DBPath); err == nil && size >= cfg.TargetSize {
-				if cfg.Verbose {
-					log.Printf("geth MPT Phase 2: dirSize %d MiB >= target %d MiB — stopping iteration",
-						size>>20, cfg.TargetSize>>20)
-				}
-				return earlyStop
-			}
-		}
 		return nil
 	})
-	if iterErr != nil && !errors.Is(iterErr, earlyStop) {
+	if iterErr != nil {
 		return common.Hash{}, nil, iterErr
 	}
 	if accountTrieErr != nil {
