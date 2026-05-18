@@ -4,11 +4,47 @@ package nethermind
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"github.com/linxGnu/grocksdb"
 )
+
+// bulkBackgroundJobs caps RocksDB's background compaction/flush thread
+// pool per-DB during bulk import. Matches geth's MaxConcurrentCompactions
+// cap (commit aa0bfcb) and besu's bulkBackgroundJobs (commit 4847945).
+const bulkBackgroundJobs = 8
+
+// perDBWriteBufferBytes is the per-DB memtable size during bulk import.
+// 256 MiB matches geth's prodPebbleOptions.MemTableSize and besu's
+// perCFWriteBufferBytes. Defaults were 2 MiB.
+const perDBWriteBufferBytes = 256 * 1024 * 1024
+
+// bulkRocksOptions returns a fresh *grocksdb.Options tuned for the
+// nethermind bulk-import path. Defers compaction (Level0*Trigger =
+// MaxInt32) so the bulk write isn't interrupted by L0 stalls; the
+// final CompactRange in Close() pays the LSM-flattening cost once,
+// parallelised across MaxBackgroundJobs. Mirrors besu commit 4847945.
+func bulkRocksOptions() *grocksdb.Options {
+	opts := grocksdb.NewDefaultOptions()
+	opts.SetCreateIfMissing(true)
+	opts.SetCreateIfMissingColumnFamilies(true)
+	opts.SetWriteBufferSize(perDBWriteBufferBytes)
+	opts.SetMaxWriteBufferNumber(4)
+	opts.SetLevel0FileNumCompactionTrigger(math.MaxInt32)
+	opts.SetLevel0SlowdownWritesTrigger(math.MaxInt32)
+	opts.SetLevel0StopWritesTrigger(math.MaxInt32)
+	opts.SetMaxBytesForLevelBase(2 * 1024 * 1024 * 1024)
+	parallelism := runtime.NumCPU()
+	if parallelism > bulkBackgroundJobs {
+		parallelism = bulkBackgroundJobs
+	}
+	opts.IncreaseParallelism(parallelism)
+	opts.SetMaxBackgroundJobs(parallelism)
+	return opts
+}
 
 // nethDBNames mirrors the Nethermind.Db/DbNames.cs constants we need for
 // genesis-bootability. State, Code, Blocks, Headers, BlockNumbers, and
@@ -117,11 +153,14 @@ func openNethDBs(dataDir string) (*nethDBs, error) {
 		dbs.Close()
 	}
 
-	// Helper: open a single-CF database with create-if-missing.
+	// Helper: open a single-CF database with bulk-import tuning.
+	// All defaults were 2 MiB memtable, 1 background thread, L0 trigger 4
+	// — those defaults caused the May-17 nethermind run's 2:42 wall time.
+	// bulkRocksOptions raises memtable to 256 MiB and defers all L0
+	// compactions; Close()'s CompactRange pays the flattening cost once.
 	open := func(name string) (*grocksdb.DB, error) {
 		path := filepath.Join(dbRoot, name)
-		opts := grocksdb.NewDefaultOptions()
-		opts.SetCreateIfMissing(true)
+		opts := bulkRocksOptions()
 		dbs.openedOpts = append(dbs.openedOpts, opts)
 
 		db, err := grocksdb.OpenDb(opts, path)
@@ -157,19 +196,17 @@ func openNethDBs(dataDir string) (*nethDBs, error) {
 		return nil, err
 	}
 
-	// Receipts: 3 column families. grocksdb requires per-CF Options;
-	// passing the same default for each is fine for state-actor's
-	// genesis-only writes (we don't tune compaction etc. — Nethermind
-	// rewrites those metadata files itself on first read).
+	// Receipts: 3 column families. Use bulk-import tuning for parity with
+	// the single-CF DBs even though receipts sees few writes at genesis
+	// (one empty receipts list at the genesis row) — the cost of tuned
+	// options on a near-empty DB is negligible.
 	receiptsPath := filepath.Join(dbRoot, dbNameReceipts)
-	receiptsOpts := grocksdb.NewDefaultOptions()
-	receiptsOpts.SetCreateIfMissing(true)
-	receiptsOpts.SetCreateIfMissingColumnFamilies(true)
+	receiptsOpts := bulkRocksOptions()
 	dbs.openedOpts = append(dbs.openedOpts, receiptsOpts)
 
 	cfOpts := make([]*grocksdb.Options, len(receiptsCFNames))
 	for i := range cfOpts {
-		cfOpts[i] = grocksdb.NewDefaultOptions()
+		cfOpts[i] = bulkRocksOptions()
 		dbs.openedOpts = append(dbs.openedOpts, cfOpts[i])
 	}
 
@@ -189,7 +226,35 @@ func openNethDBs(dataDir string) (*nethDBs, error) {
 
 // Close releases all open grocksdb resources. Safe to call multiple times
 // and on partially-opened structs.
+//
+// Before closing each DB, runs a full-range CompactRange so the LSM tree
+// is flat when Nethermind later opens it. We suppressed auto-compactions
+// during the bulk write via bulkRocksOptions (Level0FileNumCompactionTrigger
+// = MaxInt32) — this is where we pay that deferred cost, parallelised
+// across MaxBackgroundJobs threads. Mirrors geth commit 32ac564 and besu
+// commit 4847945.
 func (d *nethDBs) Close() {
+	emptyRange := grocksdb.Range{Start: nil, Limit: nil}
+
+	// Compact the high-volume DBs (state, code) before close. Tiny DBs
+	// like headers/blockNumbers are no-ops in practice but the call is
+	// cheap on a near-empty DB.
+	for _, db := range []*grocksdb.DB{
+		d.state, d.code, d.blocks, d.headers,
+		d.blockNumbers, d.blockInfos,
+	} {
+		if db != nil {
+			db.CompactRange(emptyRange)
+		}
+	}
+	if d.receipts != nil {
+		for _, cf := range d.receiptsCFs {
+			if cf != nil {
+				d.receipts.CompactRangeCF(cf, emptyRange)
+			}
+		}
+	}
+
 	for _, h := range d.receiptsCFs {
 		if h != nil {
 			h.Destroy()
