@@ -20,15 +20,15 @@ import (
 )
 
 // maxStreamSpecStorageWorkers caps the drain-phase worker count. Matches
-// geth's maxPhase0Workers (client/geth/state_writer.go) so both clients
-// use the same upper bound.
+// geth's maxPhase0Workers — both clients use the same upper bound.
 //
-// Per-worker memory is dominated by streamsort.MemTableSize (2 GiB upper
-// bound) — but the 2 GiB ceiling only binds when a worker is draining a
-// multi-million-slot entity. Most entities (bulk contracts at ~3,500
-// slots each) stay well under that cap, so peak RAM is bounded by the
-// COUNT of bloated entities, not by maxStreamSpecStorageWorkers.
-const maxStreamSpecStorageWorkers = 32
+// Each worker owns a streamsort.Store with a 2 GiB MemTable cap plus
+// Pebble's per-flush queue (MemTableStopWritesThreshold = 16). On the
+// bloatnet workload at 32 workers, geth's analogous code OOM-killed
+// state-actor at 127 GiB anon-RSS on a 125 GiB box. 8 keeps the
+// worst-case under ~32 GiB while still giving 5+ parallel
+// bloated-EOA drains.
+const maxStreamSpecStorageWorkers = 8
 
 // streamSpecStorage writes each PreAlloc entity's Storage into reth's
 // four storage tables, computes the storage MPT root, and splices it

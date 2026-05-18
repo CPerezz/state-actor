@@ -35,16 +35,15 @@ const phase1FlushBytes = 64 * 1024 * 1024
 const parallelKeccakThreshold = 64
 
 // maxPhase0Workers caps Phase 0's drain-and-compute parallelism. Matches
-// reth's maxStreamSpecStorageWorkers (client/reth/spec_storage_streaming_cgo.go:23)
-// so both clients use the same upper bound.
+// reth's maxStreamSpecStorageWorkers — both clients use the same upper
+// bound.
 //
-// Per-worker memory is dominated by streamsort.MemTableSize (2 GiB upper
-// bound) PLUS a 64 MiB scratch batch — but the 2 GiB ceiling only binds
-// when a worker is draining a multi-million-slot entity. The 200 K+ bulk
-// contracts in the bloatnet spec stay well under that cap (~200 KiB
-// temp each), so peak RAM is bounded by the COUNT of bloated entities,
-// not by maxPhase0Workers: 5 bloated × 2 GiB + (workers-5) × 64 MiB.
-const maxPhase0Workers = 32
+// Each worker owns a streamsort.Store with a 2 GiB MemTable cap plus
+// Pebble's per-flush queue (MemTableStopWritesThreshold = 16). On the
+// bloatnet workload at 32 workers, this OOM-killed state-actor at 127
+// GiB anon-RSS on a 125 GiB box. 8 keeps the worst-case under ~32 GiB
+// while still giving 5+ parallel bloated-EOA drains.
+const maxPhase0Workers = 8
 
 // scratchBatchFlushBytes is the per-worker batch flush threshold during
 // Phase 0. Matches defaultFlushBytes in writer.go (64 MiB).
