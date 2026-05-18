@@ -1,18 +1,22 @@
 package specbuild
 
 import (
+	"fmt"
 	"iter"
 	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
 
+	"github.com/nerolation/state-actor/internal/sizecal"
 	"github.com/nerolation/state-actor/internal/spec"
 	"github.com/nerolation/state-actor/internal/templates"
 )
 
-// fixedSizer is a SizeApproximator stub for tests. The real one lives in
-// internal/sizecal/, but specbuild tests deliberately don't depend on it.
+// fixedSizer is a SizeApproximator stub for tests that drive
+// approximate_size_bytes expansion deterministically. The truncation
+// tests (TestBuild_TargetSize*) read sizecal.BytesPerAccount directly
+// because that constant lives at the production specbuild↔sizecal seam.
 type fixedSizer struct{ bytesPerSlot uint64 }
 
 func (s fixedSizer) SlotsForBytes(client string, bytes uint64) int {
@@ -321,6 +325,95 @@ func TestBuildDeterminismEndToEnd(t *testing.T) {
 			if va != vb {
 				t.Errorf("entity[%d] key %s: run A %s, run B %s", i, k.Hex(), va.Hex(), vb.Hex())
 			}
+		}
+	}
+}
+
+// TestBuild_TargetSizeTruncatesSpec pins the cross-client invariance-safe
+// truncation: when the projected trie cost of the spec would exceed
+// opts.TargetSize, Build returns the longest prefix that fits. Same
+// truncation logic runs on every client because BytesPerAccount and
+// BytesPerSlot are global constants.
+func TestBuild_TargetSizeTruncatesSpec(t *testing.T) {
+	// Each EOA entity has ApproximateSizeBytes=0 (no storage), so its
+	// projected cost is exactly sizecal.BytesPerAccount. Reading the
+	// constant at runtime keeps the test robust to calibration updates.
+	const numEntities = 10
+	const fitCount = 4
+	perEntity := sizecal.BytesPerAccount("geth")
+	targetSize := perEntity * fitCount
+
+	var sb strings.Builder
+	sb.WriteString("entities:\n")
+	for i := 0; i < numEntities; i++ {
+		sb.WriteString("  - kind: eoa\n")
+		sb.WriteString(fmt.Sprintf("    name: e%d\n", i))
+	}
+	s := parseSpec(t, sb.String())
+
+	opts := defaultOpts
+	opts.TargetSize = targetSize
+
+	pre, diag, err := Build(s, opts)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if got, want := len(pre), fitCount; got != want {
+		t.Fatalf("entity count after truncation: got %d, want %d", got, want)
+	}
+	if len(diag.Warnings) == 0 {
+		t.Errorf("expected diagnostics warning about truncation; got none")
+	}
+	foundTrunc := false
+	for _, w := range diag.Warnings {
+		if strings.Contains(w, "truncated") {
+			foundTrunc = true
+			break
+		}
+	}
+	if !foundTrunc {
+		t.Errorf("expected 'truncated' in diagnostics; got %v", diag.Warnings)
+	}
+
+	// Cross-client invariance: every client name truncates at the same index.
+	clients := []string{"geth", "reth", "nethermind", "besu"}
+	prevLen := -1
+	for _, c := range clients {
+		o := opts
+		o.ClientName = c
+		got, _, err := Build(s, o)
+		if err != nil {
+			t.Fatalf("Build(%s): %v", c, err)
+		}
+		if prevLen >= 0 && len(got) != prevLen {
+			t.Errorf("truncation diverged across clients: prev=%d, %s=%d", prevLen, c, len(got))
+		}
+		prevLen = len(got)
+	}
+}
+
+// TestBuild_TargetSizeZeroIsUnlimited pins the contract that TargetSize=0
+// means "no truncation" — the default for callers that haven't opted in.
+func TestBuild_TargetSizeZeroIsUnlimited(t *testing.T) {
+	var sb strings.Builder
+	sb.WriteString("entities:\n")
+	for i := 0; i < 10; i++ {
+		sb.WriteString("  - kind: eoa\n")
+		sb.WriteString(fmt.Sprintf("    name: u%d\n", i))
+	}
+	s := parseSpec(t, sb.String())
+
+	opts := defaultOpts // TargetSize defaults to 0
+	pre, diag, err := Build(s, opts)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(pre) != 10 {
+		t.Errorf("with TargetSize=0 expected all 10 entities, got %d", len(pre))
+	}
+	for _, w := range diag.Warnings {
+		if strings.Contains(w, "truncated") {
+			t.Errorf("unexpected truncation warning with TargetSize=0: %s", w)
 		}
 	}
 }

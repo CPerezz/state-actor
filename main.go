@@ -158,6 +158,7 @@ func main() {
 			Seed:       *seed,
 			ClientName: *client,
 			Sizer:      sizecal.Default(),
+			TargetSize: config.TargetSize,
 		})
 		if err != nil {
 			log.Fatalf("--spec build: %v", err)

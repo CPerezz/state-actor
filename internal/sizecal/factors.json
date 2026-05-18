@@ -1,7 +1,0 @@
-{
-  "_comment": "Empirical bytes-per-slot factor per client.",
-  "geth": 64,
-  "besu": 64,
-  "nethermind": 80,
-  "reth": 60
-}
