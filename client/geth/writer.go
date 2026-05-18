@@ -1,16 +1,21 @@
 package geth
 
 import (
+	"bytes"
 	"fmt"
+	"math"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rlp"
 
 	"github.com/nerolation/state-actor/generator"
@@ -87,23 +92,28 @@ func NewWriter(dbPath string) (*Writer, error) {
 }
 
 // prodPebbleOptions returns pebble.Options tuned for state-actor's
-// write-heavy bulk-import workload on the production geth DB. WAL stays
-// enabled (durability for the metadata writes); other knobs are nudged
-// from pebble defaults toward bulk-import friendliness:
-//   - MemTableSize 128 MiB — fewer L0 flushes during a fresh import.
-//   - L0CompactionThreshold 8 — postpones compactions until enough L0
-//     files exist that a multi-file compaction is more efficient.
-//   - MaxConcurrentCompactions 4 — keep up with import throughput.
+// one-shot bulk-import workload on the production geth DB. The DB is
+// write-only during generation (geth reads it only later, after the
+// process exits), so we suppress auto-compactions entirely and force
+// a single big compaction at Close — this matches the streamsort temp
+// DB's "no compactions while writing" model. Without this, Pebble's
+// default L0 thresholds trigger ~6x throughput collapse mid-import
+// once L0 reaches 24 SSTs (writes stall waiting for compactors).
 //
-// All values stay within Pebble's documented safe ranges and produce a DB
-// that geth opens with no special flags.
+//   - L0CompactionThreshold = MaxInt32 → no auto-compaction kicks in.
+//   - L0StopWritesThreshold = MaxInt32 → no L0 stall on writes.
+//   - MemTableSize 256 MiB → fewer (and larger) L0 flushes.
+//   - MaxConcurrentCompactions = NumCPU → the final compact() at Close
+//     parallelises across all cores (it's the only compaction we run).
+//   - WAL stays on for the post-import metadata writes (PathDB markers,
+//     genesis block) — those are tiny, no point disabling.
 func prodPebbleOptions() *pebble.Options {
 	return &pebble.Options{
-		MemTableSize:                64 * 1024 * 1024,
+		MemTableSize:                256 * 1024 * 1024,
 		MemTableStopWritesThreshold: 8,
-		L0CompactionThreshold:       8,
-		L0StopWritesThreshold:       24,
-		MaxConcurrentCompactions:    func() int { return 4 },
+		L0CompactionThreshold:       math.MaxInt32,
+		L0StopWritesThreshold:       math.MaxInt32,
+		MaxConcurrentCompactions:    func() int { return runtime.NumCPU() },
 	}
 }
 
@@ -197,14 +207,28 @@ func (w *Writer) FlushBatch() error {
 	return w.flushBatch(true)
 }
 
-// Close closes the writer and the underlying pebble DB.
+// Close closes the writer and the underlying pebble DB. Before closing,
+// it forces a single full-range Compact across every level so the DB
+// geth opens later has a flat LSM shape — the auto-compaction we
+// suppressed during the import is paid here, parallelised across cores.
+// Skipping this would leave a forest of L0 SSTs that geth would
+// compact at boot anyway, plus permanent read-amp until that finishes.
 func (w *Writer) Close() error {
 	if err := w.flushBatch(true); err != nil {
-		// Best-effort flush before close — surface the error but still try
-		// to close the DB so resources don't leak.
 		_ = w.db.Close()
 		return fmt.Errorf("final flush: %w", err)
 	}
+	// Compact the entire keyspace. Pebble's Compact is inclusive-start,
+	// exclusive-end; 64 bytes of 0xff is comfortably above any state-actor
+	// key (rawdb prefixes start at 0x41 'A', PathDB markers at 0x76 'v').
+	start := []byte{0x00}
+	end := bytes.Repeat([]byte{0xff}, 64)
+	t0 := time.Now()
+	if err := w.db.Compact(start, end, true /* parallelize */); err != nil {
+		_ = w.db.Close()
+		return fmt.Errorf("final compact: %w", err)
+	}
+	log.Info("geth Pebble final compaction complete", "duration", time.Since(t0).Round(time.Millisecond))
 	return w.db.Close()
 }
 
