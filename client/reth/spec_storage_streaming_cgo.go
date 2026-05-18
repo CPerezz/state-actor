@@ -19,25 +19,69 @@ import (
 	"github.com/nerolation/state-actor/internal/streamingtrie"
 )
 
-// maxStreamSpecStorageWorkers caps the drain-phase worker count. Matches
-// geth's maxPhase0Workers — both clients use the same upper bound.
-//
-// Each worker owns a streamsort.Store with a 2 GiB MemTable cap plus
-// Pebble's per-flush queue (MemTableStopWritesThreshold = 16). On the
-// bloatnet workload at 32 workers, geth's analogous code OOM-killed
-// state-actor at 127 GiB anon-RSS on a 125 GiB box. 8 keeps the
-// worst-case under ~32 GiB while still giving 5+ parallel
-// bloated-EOA drains.
+// maxStreamSpecStorageWorkers caps the drain-and-compute worker count.
+// Matches geth's maxPhase0Workers — both clients use the same upper
+// bound. Each worker owns a streamsort.Store; at 8 workers RAM stays
+// under the 32 GiB target after the streamsort memtable downsizing
+// (commit aa0bfcb).
 const maxStreamSpecStorageWorkers = 8
+
+// chunkSlots is the slot-batch size workers emit to the consumer.
+// Bounds in-flight memory per entity: chunkSlots × ~250 B/slot ×
+// chunkChanCap = ~1 MiB peak across all 8 workers. Chunking lets a
+// worker make progress on IterateRoot while the consumer drains
+// earlier chunks.
+const chunkSlots = 1024
+
+// chunkChanCap is the per-entity chunk-channel buffer depth. With
+// cap=4, the worker can produce 4 chunks ahead before blocking on the
+// consumer — enough to hide the consumer's per-Mdbx.Update commit
+// latency without unbounded RAM growth.
+const chunkChanCap = 4
+
+// slotPrepared holds the four pre-encoded byte buffers a single slot
+// contributes to MDBX. Produced on the worker goroutine, consumed on
+// the main goroutine inside Mdbx.Update — no encoding work in the
+// hot write path.
+type slotPrepared struct {
+	plainEntry  []byte // PlainStorageState value (encoded rawKey || value)
+	hashedEntry []byte // HashedStorages value (encoded keyHash || value)
+	changeEntry []byte // StorageChangeSets value (encoded rawKey || 0); nil if SkipGenesisChangeSets
+	sskKey      []byte // StoragesHistory key (StorageShardedKey-encoded)
+}
+
+// preparedEntity carries everything the consumer needs to commit one
+// entity's storage to MDBX. The worker fills chunkCh in keccak-
+// ascending order, then sends the computed root via rootCh and closes
+// chunkCh. errCh carries any IterateRoot failure surfacing on the
+// worker side.
+type preparedEntity struct {
+	idx        int
+	addr       common.Address
+	addrHash   common.Hash
+	blockKey   []byte         // BlockNumberAddress-encoded
+	historyVal []byte         // EncodeIntegerList([0]) — fixed per entity for genesis pre-state
+	chunkCh    chan []slotPrepared
+	rootCh     chan common.Hash
+	errCh      chan error
+}
 
 // streamSpecStorage writes each PreAlloc entity's Storage into reth's
 // four storage tables, computes the storage MPT root, and splices it
 // into cfg.GenesisAccounts[addr].Root for the alloc handler.
 //
-// Per-entity Mdbx.Update — not one global txn. A single Update wrapping
-// the bloatnet's ~1.5B Puts degrades MDBX's dirty-page tree non-
-// linearly. Drain runs in N parallel workers; the write phase
-// serialises one Update per entity on the calling goroutine.
+// Architecture: N parallel workers each (a) drain their entity's iter
+// into a per-call streamsort.Store, (b) walk the sorted store driving
+// the HashBuilder and pre-encoding all 4 per-slot byte buffers into
+// chunks. The single consumer goroutine opens one Mdbx.Update per
+// entity and does just the 4 txn.Put calls per slot — the encoding,
+// keccak, and HashBuilder work happens on the workers.
+//
+// Per-entity Mdbx.Update — not one global txn — because a single
+// global txn wrapping ~1.5B Puts degrades MDBX's dirty-page tree non-
+// linearly. MDBX enforces single-writer-per-env so the commits run
+// serially anyway; the win is offloading every cycle of CPU work to
+// the workers so the consumer is pure I/O.
 func streamSpecStorage(ctx context.Context, envs *Envs, cfg *generator.Config, stats *generator.Stats) error {
 	if len(cfg.PreAlloc) == 0 {
 		return nil
@@ -63,17 +107,22 @@ func streamSpecStorage(ctx context.Context, envs *Envs, cfg *generator.Config, s
 		workers = len(indices)
 	}
 
-	type drainedEntity struct {
-		idx     int
-		addr    common.Address
-		drained *streamingtrie.Drained
-	}
-
 	drainCtx, cancelDrain := context.WithCancelCause(ctx)
 	defer cancelDrain(nil)
 
 	entityCh := make(chan int, workers*2)
-	drainedCh := make(chan drainedEntity, workers)
+	// drainedCh is unbuffered — the consumer applies back-pressure on
+	// the workers (only one entity in flight on the writer side beyond
+	// the workers' local chunk buffers). Buffer of workers*2 to absorb
+	// small latency spikes.
+	preparedCh := make(chan *preparedEntity, workers*2)
+
+	// EncodeIntegerList([0]) is identical for every slot in a genesis
+	// pre-state import — encode once on the caller goroutine, reuse
+	// across all workers.
+	var sharedHistoryBuf bytes.Buffer
+	iReth.EncodeIntegerList(&sharedHistoryBuf, []uint64{0})
+	historyVal := sharedHistoryBuf.Bytes()
 
 	var wg sync.WaitGroup
 	for w := 0; w < workers; w++ {
@@ -84,16 +133,8 @@ func streamSpecStorage(ctx context.Context, envs *Envs, cfg *generator.Config, s
 				if drainCtx.Err() != nil {
 					return
 				}
-				pe := &cfg.PreAlloc[i]
-				d, err := streamingtrie.Drain(cfg.DBPath, pe.Storage)
-				if err != nil {
-					cancelDrain(fmt.Errorf("reth: drain spec storage[%d] %s: %w", i, pe.Address.Hex(), err))
-					return
-				}
-				select {
-				case drainedCh <- drainedEntity{idx: i, addr: pe.Address, drained: d}:
-				case <-drainCtx.Done():
-					d.Close()
+				if err := drainAndEncodeEntity(drainCtx, cfg, i, historyVal, preparedCh); err != nil {
+					cancelDrain(err)
 					return
 				}
 			}
@@ -113,102 +154,45 @@ func streamSpecStorage(ctx context.Context, envs *Envs, cfg *generator.Config, s
 
 	go func() {
 		wg.Wait()
-		close(drainedCh)
+		close(preparedCh)
 	}()
 
 	var totalStorageBytes uint64
 	var writeErr error
-	for entry := range drainedCh {
+	for ent := range preparedCh {
 		if writeErr != nil {
-			entry.drained.Close()
+			// Drain remaining chunks so the worker doesn't block on send.
+			for range ent.chunkCh {
+			}
 			continue
 		}
-		addr := entry.addr
-		addrHash := crypto.Keccak256Hash(addr[:])
-		blockKey := iReth.BlockNumberAddress{BlockNumber: 0, Address: addr}
-		var blockKeyBuf bytes.Buffer
-		blockKey.EncodeKey(&blockKeyBuf)
-		blockKeyBytes := blockKeyBuf.Bytes()
-
-		var localBytes uint64
-		var root common.Hash
-
-		err := envs.Mdbx.Update(func(txn *mdbx.Txn) error {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-
-			sink := func(keyHash, rawKey, value common.Hash) error {
-				slotValueU256 := uint256.NewInt(0).SetBytes(value[:])
-
-				plainEntry := iReth.StorageEntry{Key: rawKey, Value: slotValueU256}
-				var plainBuf bytes.Buffer
-				plainEntry.EncodeCompact(&plainBuf)
-				plainEntryBytes := plainBuf.Bytes()
-				if err := txn.Put(envs.MdbxDBIs["PlainStorageState"], addr[:], plainEntryBytes, 0); err != nil {
-					return fmt.Errorf("PlainStorageState %s slot %s: %w", addr.Hex(), rawKey.Hex(), err)
-				}
-
-				hashedEntry := iReth.StorageEntry{Key: keyHash, Value: slotValueU256}
-				var hashedBuf bytes.Buffer
-				hashedEntry.EncodeCompact(&hashedBuf)
-				if err := txn.Put(envs.MdbxDBIs["HashedStorages"], addrHash[:], hashedBuf.Bytes(), 0); err != nil {
-					return fmt.Errorf("HashedStorages %s slot %s: %w", addrHash.Hex(), rawKey.Hex(), err)
-				}
-
-				if !cfg.SkipGenesisChangeSets {
-					changeEntry := iReth.StorageEntry{Key: rawKey, Value: uint256.NewInt(0)}
-					var changeBuf bytes.Buffer
-					changeEntry.EncodeCompact(&changeBuf)
-					if err := txn.Put(envs.MdbxDBIs["StorageChangeSets"], blockKeyBytes, changeBuf.Bytes(), 0); err != nil {
-						return fmt.Errorf("StorageChangeSets %s slot %s: %w", addr.Hex(), rawKey.Hex(), err)
-					}
-				}
-
-				ssk := iReth.StorageShardedKey{
-					Address:     addr,
-					StorageKey:  rawKey,
-					BlockNumber: ^uint64(0),
-				}
-				var sskBuf bytes.Buffer
-				ssk.EncodeKey(&sskBuf)
-				var listBuf bytes.Buffer
-				iReth.EncodeIntegerList(&listBuf, []uint64{0})
-				if err := txn.Put(envs.MdbxDBIs["StoragesHistory"], sskBuf.Bytes(), listBuf.Bytes(), 0); err != nil {
-					return fmt.Errorf("StoragesHistory %s slot %s: %w", addr.Hex(), rawKey.Hex(), err)
-				}
-				localBytes += uint64(len(plainEntryBytes))
-				return nil
-			}
-
-			hb := newRethStorageHashBuilder()
-			r, err := entry.drained.IterateRoot(hb, sink)
-			if err != nil {
-				return fmt.Errorf("reth: spec storage[%d] %s: %w", entry.idx, addr.Hex(), err)
-			}
-			root = r
-			return nil
-		})
-		entry.drained.Close()
+		bytesWritten, err := consumeEntity(ctx, envs, cfg, ent)
 		if err != nil {
 			writeErr = err
 			cancelDrain(err)
 			continue
 		}
-
-		if acc, ok := cfg.GenesisAccounts[addr]; ok && acc != nil {
-			acc.Root = root
+		if acc, ok := cfg.GenesisAccounts[ent.addr]; ok && acc != nil {
+			// Wait for the worker's computed root. By the time chunkCh
+			// closed (consumeEntity returns), exactly one of {rootCh,
+			// errCh} has a value.
+			select {
+			case root := <-ent.rootCh:
+				acc.Root = root
+			case err := <-ent.errCh:
+				writeErr = err
+				cancelDrain(err)
+				continue
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		}
-		totalStorageBytes += localBytes
+		totalStorageBytes += bytesWritten
 	}
 
 	if writeErr != nil {
 		return writeErr
 	}
-	// Surface drain-phase errors AND parent ctx cancellations. With
-	// WithCancelCause, a parent ctx cancellation propagates as cause ==
-	// ctx.Err() — we still want to return it rather than silently
-	// reporting success on a cancelled caller.
 	if cause := context.Cause(drainCtx); cause != nil {
 		return cause
 	}
@@ -217,6 +201,167 @@ func streamSpecStorage(ctx context.Context, envs *Envs, cfg *generator.Config, s
 		stats.StorageBytes += totalStorageBytes
 	}
 	return nil
+}
+
+// drainAndEncodeEntity runs on a worker goroutine. It drains the
+// entity's storage iter into a streamsort, then walks the sorted store
+// driving the HashBuilder AND pre-encoding all 4 per-slot byte buffers
+// into chunks sent to the consumer via ent.chunkCh.
+func drainAndEncodeEntity(
+	drainCtx context.Context,
+	cfg *generator.Config,
+	idx int,
+	historyVal []byte,
+	preparedCh chan<- *preparedEntity,
+) error {
+	pe := &cfg.PreAlloc[idx]
+	addr := pe.Address
+	addrHash := crypto.Keccak256Hash(addr[:])
+
+	d, err := streamingtrie.Drain(cfg.DBPath, pe.Storage)
+	if err != nil {
+		return fmt.Errorf("reth: drain spec storage[%d] %s: %w", idx, addr.Hex(), err)
+	}
+
+	blockKey := iReth.BlockNumberAddress{BlockNumber: 0, Address: addr}
+	var blockKeyBuf bytes.Buffer
+	blockKey.EncodeKey(&blockKeyBuf)
+
+	ent := &preparedEntity{
+		idx:        idx,
+		addr:       addr,
+		addrHash:   addrHash,
+		blockKey:   blockKeyBuf.Bytes(),
+		historyVal: historyVal,
+		chunkCh:    make(chan []slotPrepared, chunkChanCap),
+		rootCh:     make(chan common.Hash, 1),
+		errCh:      make(chan error, 1),
+	}
+
+	// Hand the preparedEntity to the consumer BEFORE starting iteration
+	// so the consumer can begin draining chunks as soon as the first one
+	// is ready. The consumer is responsible for closing the Drained
+	// indirectly by waiting for chunkCh to close.
+	select {
+	case preparedCh <- ent:
+	case <-drainCtx.Done():
+		d.Close()
+		return drainCtx.Err()
+	}
+
+	skipChangeSets := cfg.SkipGenesisChangeSets
+	hb := newRethStorageHashBuilder()
+	pending := make([]slotPrepared, 0, chunkSlots)
+
+	flushPending := func() error {
+		if len(pending) == 0 {
+			return nil
+		}
+		select {
+		case ent.chunkCh <- pending:
+			pending = make([]slotPrepared, 0, chunkSlots)
+			return nil
+		case <-drainCtx.Done():
+			return drainCtx.Err()
+		}
+	}
+
+	sink := func(keyHash, rawKey, value common.Hash) error {
+		slotValueU256 := uint256.NewInt(0).SetBytes(value[:])
+
+		prep := slotPrepared{}
+
+		plainEntry := iReth.StorageEntry{Key: rawKey, Value: slotValueU256}
+		var plainBuf bytes.Buffer
+		plainEntry.EncodeCompact(&plainBuf)
+		prep.plainEntry = plainBuf.Bytes()
+
+		hashedEntry := iReth.StorageEntry{Key: keyHash, Value: slotValueU256}
+		var hashedBuf bytes.Buffer
+		hashedEntry.EncodeCompact(&hashedBuf)
+		prep.hashedEntry = hashedBuf.Bytes()
+
+		if !skipChangeSets {
+			changeEntry := iReth.StorageEntry{Key: rawKey, Value: uint256.NewInt(0)}
+			var changeBuf bytes.Buffer
+			changeEntry.EncodeCompact(&changeBuf)
+			prep.changeEntry = changeBuf.Bytes()
+		}
+
+		ssk := iReth.StorageShardedKey{
+			Address:     addr,
+			StorageKey:  rawKey,
+			BlockNumber: ^uint64(0),
+		}
+		var sskBuf bytes.Buffer
+		ssk.EncodeKey(&sskBuf)
+		prep.sskKey = sskBuf.Bytes()
+
+		pending = append(pending, prep)
+		if len(pending) >= chunkSlots {
+			return flushPending()
+		}
+		return nil
+	}
+
+	root, err := d.IterateRoot(hb, sink)
+	d.Close()
+	if err != nil {
+		ent.errCh <- fmt.Errorf("reth: iterate spec storage[%d] %s: %w", idx, addr.Hex(), err)
+		close(ent.chunkCh)
+		return nil
+	}
+
+	// Flush trailing chunk (if any) before closing the channel.
+	if err := flushPending(); err != nil {
+		ent.errCh <- err
+		close(ent.chunkCh)
+		return nil
+	}
+	close(ent.chunkCh)
+	ent.rootCh <- root
+	return nil
+}
+
+// consumeEntity runs on the main goroutine. Opens one Mdbx.Update per
+// entity and drains the worker's chunks into 4 txn.Put calls per slot.
+// All bytes are pre-encoded by the worker; this function does pure I/O.
+func consumeEntity(
+	ctx context.Context,
+	envs *Envs,
+	cfg *generator.Config,
+	ent *preparedEntity,
+) (uint64, error) {
+	var localBytes uint64
+	err := envs.Mdbx.Update(func(txn *mdbx.Txn) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		for chunk := range ent.chunkCh {
+			for _, prep := range chunk {
+				if err := txn.Put(envs.MdbxDBIs["PlainStorageState"], ent.addr[:], prep.plainEntry, 0); err != nil {
+					return fmt.Errorf("PlainStorageState %s: %w", ent.addr.Hex(), err)
+				}
+				if err := txn.Put(envs.MdbxDBIs["HashedStorages"], ent.addrHash[:], prep.hashedEntry, 0); err != nil {
+					return fmt.Errorf("HashedStorages %s: %w", ent.addrHash.Hex(), err)
+				}
+				if prep.changeEntry != nil {
+					if err := txn.Put(envs.MdbxDBIs["StorageChangeSets"], ent.blockKey, prep.changeEntry, 0); err != nil {
+						return fmt.Errorf("StorageChangeSets %s: %w", ent.addr.Hex(), err)
+					}
+				}
+				if err := txn.Put(envs.MdbxDBIs["StoragesHistory"], prep.sskKey, ent.historyVal, 0); err != nil {
+					return fmt.Errorf("StoragesHistory %s: %w", ent.addr.Hex(), err)
+				}
+				localBytes += uint64(len(prep.plainEntry))
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return localBytes, nil
 }
 
 // rethStorageHashBuilder adapts iReth.HashBuilder to streamingtrie.HashBuilder.
