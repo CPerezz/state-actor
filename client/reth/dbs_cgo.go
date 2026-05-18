@@ -111,7 +111,16 @@ func OpenEnvs(dataDir string, freshDir bool) (*Envs, error) {
 		return nil, fmt.Errorf("mdbx.SetOption(OptMaxDB): %w", err)
 	}
 
-	if err := env.Open(dbDir, 0, 0o644); err != nil {
+	// MDBX_WRITEMAP + MDBX_SAFE_NOSYNC turn per-txn.Put cost from
+	// O(log N) + periodic O(N) (in-process dirty-page list with a radixsort
+	// at mdbx.c:6897-6951) into kernel-managed O(1) writeback via mmap.
+	// This is what reth's own MDBX env does (reth's mdbx/mod.rs:411 —
+	// inner_env.write_map()). Without these flags, a single Mdbx.Update
+	// with hundreds of millions of Puts (one bloatnet bloated EOA)
+	// thrashes the L2/L3 cache and degrades from ~3 MB/s to <0.3 MB/s.
+	// Durability is owed at Envs.Close — see the explicit Sync there.
+	const envFlags = mdbx.WriteMap | mdbx.SafeNoSync
+	if err := env.Open(dbDir, envFlags, 0o644); err != nil {
 		env.Close()
 		return nil, fmt.Errorf("mdbx.Open(%s): %w", dbDir, err)
 	}
@@ -179,11 +188,17 @@ func requireFreshDir(dataDir string) error {
 }
 
 // Close tears down the MDBX and RocksDB environments. Idempotent.
+//
+// On the MDBX side, an explicit Sync runs before Close so that
+// MDBX_SAFE_NOSYNC deferred writes are flushed to disk on a clean
+// process exit. force=true requests synchronous fdatasync;
+// nonblock=false waits for completion.
 func (e *Envs) Close() error {
 	if e == nil || e.closed {
 		return nil
 	}
 	e.closed = true
+	var firstErr error
 	if e.RocksDB != nil {
 		for _, cf := range e.RocksCFs {
 			cf.Destroy()
@@ -191,7 +206,10 @@ func (e *Envs) Close() error {
 		e.RocksDB.Close()
 	}
 	if e.Mdbx != nil {
+		if err := e.Mdbx.Sync(true, false); err != nil {
+			firstErr = fmt.Errorf("mdbx.Sync: %w", err)
+		}
 		e.Mdbx.Close()
 	}
-	return nil
+	return firstErr
 }
