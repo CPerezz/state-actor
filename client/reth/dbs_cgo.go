@@ -119,7 +119,13 @@ func OpenEnvs(dataDir string, freshDir bool) (*Envs, error) {
 	// with hundreds of millions of Puts (one bloatnet bloated EOA)
 	// thrashes the L2/L3 cache and degrades from ~3 MB/s to <0.3 MB/s.
 	// Durability is owed at Envs.Close — see the explicit Sync there.
-	const envFlags = mdbx.WriteMap | mdbx.SafeNoSync
+	//
+	// MDBX_NOMEMINIT skips the zero-fill on freshly-allocated pages
+	// (we overwrite them immediately on the bulk-write path). MDBX_LIFORECLAIM
+	// makes free-page reclamation LIFO instead of FIFO — better cache
+	// locality for sequential writes. Both are used in production by Erigon
+	// (where mdbx-go originates) and are safe for our one-shot genesis use.
+	const envFlags = mdbx.WriteMap | mdbx.SafeNoSync | mdbx.NoMemInit | mdbx.LifoReclaim
 	if err := env.Open(dbDir, envFlags, 0o644); err != nil {
 		env.Close()
 		return nil, fmt.Errorf("mdbx.Open(%s): %w", dbDir, err)
