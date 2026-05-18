@@ -19,11 +19,16 @@ import (
 	"github.com/nerolation/state-actor/internal/streamingtrie"
 )
 
-// maxStreamSpecStorageWorkers caps the drain-phase worker count: each
-// worker owns a streamsort.Store with a 64 MiB Pebble block cache and a
-// MemTable that can grow to 2 GiB for huge entities. 16 workers ⇒ worst-
-// case ~16 × (64 MiB + entity-dependent MemTable) of resident memory.
-const maxStreamSpecStorageWorkers = 16
+// maxStreamSpecStorageWorkers caps the drain-phase worker count. Matches
+// geth's maxPhase0Workers (client/geth/state_writer.go) so both clients
+// use the same upper bound.
+//
+// Per-worker memory is dominated by streamsort.MemTableSize (2 GiB upper
+// bound) — but the 2 GiB ceiling only binds when a worker is draining a
+// multi-million-slot entity. Most entities (bulk contracts at ~3,500
+// slots each) stay well under that cap, so peak RAM is bounded by the
+// COUNT of bloated entities, not by maxStreamSpecStorageWorkers.
+const maxStreamSpecStorageWorkers = 32
 
 // streamSpecStorage writes each PreAlloc entity's Storage into reth's
 // four storage tables, computes the storage MPT root, and splices it
@@ -47,7 +52,7 @@ func streamSpecStorage(ctx context.Context, envs *Envs, cfg *generator.Config, s
 		return nil
 	}
 
-	workers := runtime.NumCPU() / 2
+	workers := runtime.NumCPU()
 	if workers < 1 {
 		workers = 1
 	}
