@@ -207,6 +207,32 @@ func (w *Writer) FlushBatch() error {
 	return w.flushBatch(true)
 }
 
+// NewScratchBatch returns a fresh *pebble.Batch owned by the caller.
+// Bypasses the shared w.batch + batchMu so a Phase 0 worker can write
+// independently of other goroutines. Caller MUST eventually pass it
+// to CommitScratchBatch (or db.Apply directly + Close).
+//
+// Use ONLY from a goroutine that does not also drive the shared hot
+// path (state_writer.go's Phase 0 workers do this; Phase 1/Phase 2
+// keep using the single-batch model).
+func (w *Writer) NewScratchBatch() *pebble.Batch {
+	return w.db.NewBatch()
+}
+
+// CommitScratchBatch applies b to the underlying DB. Pebble's WAL
+// pipeline coalesces parallel Apply calls; multiple workers calling
+// this concurrently is safe. Bytes accounted under storageBytes
+// (rough — trie nodes + slot snapshots commingled, same as the
+// shared-batch hot path; LiveStats cares about gross magnitude).
+func (w *Writer) CommitScratchBatch(b *pebble.Batch) error {
+	n := uint64(b.Len())
+	if err := w.db.Apply(b, &pebble.WriteOptions{Sync: false}); err != nil {
+		return fmt.Errorf("CommitScratchBatch.Apply: %w", err)
+	}
+	w.storageBytes.Add(n)
+	return b.Close()
+}
+
 // Close closes the writer and the underlying pebble DB. Before closing,
 // it forces a single full-range Compact across every level so the DB
 // geth opens later has a flat LSM shape — the auto-compaction we

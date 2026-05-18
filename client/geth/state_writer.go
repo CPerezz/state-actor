@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cockroachdb/pebble"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -32,6 +33,22 @@ const phase1FlushBytes = 64 * 1024 * 1024
 // parallelKeccakThreshold is the slot count above which a contract's
 // keccak hashing is parallelised across cores.
 const parallelKeccakThreshold = 64
+
+// maxPhase0Workers caps Phase 0's drain-and-compute parallelism. Matches
+// reth's maxStreamSpecStorageWorkers (client/reth/spec_storage_streaming_cgo.go:23)
+// so both clients use the same upper bound.
+//
+// Per-worker memory is dominated by streamsort.MemTableSize (2 GiB upper
+// bound) PLUS a 64 MiB scratch batch — but the 2 GiB ceiling only binds
+// when a worker is draining a multi-million-slot entity. The 200 K+ bulk
+// contracts in the bloatnet spec stay well under that cap (~200 KiB
+// temp each), so peak RAM is bounded by the COUNT of bloated entities,
+// not by maxPhase0Workers: 5 bloated × 2 GiB + (workers-5) × 64 MiB.
+const maxPhase0Workers = 32
+
+// scratchBatchFlushBytes is the per-worker batch flush threshold during
+// Phase 0. Matches defaultFlushBytes in writer.go (64 MiB).
+const scratchBatchFlushBytes = 64 * 1024 * 1024
 
 // writeStateAndCollectRoot drives the two-phase MPT pipeline.
 //
@@ -66,30 +83,8 @@ func writeStateAndCollectRoot(
 		hashToAddr[crypto.Keccak256Hash(addr[:])] = addr
 	}
 
-	for i, pe := range cfg.PreAlloc {
-		if pe.Storage == nil {
-			continue
-		}
-		if err := ctx.Err(); err != nil {
-			return common.Hash{}, nil, err
-		}
-		addr := pe.Address
-		addrHash := crypto.Keccak256Hash(addr[:])
-		hb := newGethStorageHashBuilder(w, addrHash)
-		streamSink := func(keyHash, _rawKey, value common.Hash) error {
-			valueRLP, encErr := encodeStorageValue(value)
-			if encErr != nil {
-				return encErr
-			}
-			return w.WriteStorageRLP(addrHash, keyHash, valueRLP)
-		}
-		root, err := streamingtrie.StorageRoot("", pe.Storage, hb, streamSink)
-		if err != nil {
-			return common.Hash{}, nil, fmt.Errorf("geth: stream spec storage[%d] %s: %w", i, addr.Hex(), err)
-		}
-		if acc, ok := cfg.GenesisAccounts[addr]; ok && acc != nil {
-			acc.Root = root
-		}
+	if err := runPhase0(ctx, cfg, w); err != nil {
+		return common.Hash{}, nil, err
 	}
 
 	rng := mrand.New(mrand.NewSource(int64(cfg.Seed)))
@@ -488,6 +483,33 @@ func newGethStorageHashBuilder(w *Writer, addrHash common.Hash) *gethStorageHash
 	return hb
 }
 
+// newScratchGethStorageHashBuilder builds a HashBuilder that writes
+// storage-trie nodes through a caller-supplied *pebble.Batch instead of
+// through the shared w.batch+batchMu hot path. Used by Phase 0's worker
+// pool so each worker writes without contending on the shared mutex.
+//
+// The returned builder reuses gethStorageHashBuilder; only the callback
+// differs. err remains per-instance (per-worker).
+func newScratchGethStorageHashBuilder(batch *pebble.Batch, addrHash common.Hash) *gethStorageHashBuilder {
+	hb := &gethStorageHashBuilder{addrHash: addrHash}
+	cb := func(path []byte, hash common.Hash, blob []byte) {
+		if hb.err != nil {
+			return
+		}
+		p := append([]byte(nil), path...)
+		b := append([]byte(nil), blob...)
+		key := make([]byte, 0, len(rawdb.TrieNodeStoragePrefix)+common.HashLength+len(p))
+		key = append(key, rawdb.TrieNodeStoragePrefix...)
+		key = append(key, hb.addrHash[:]...)
+		key = append(key, p...)
+		if err := batch.Set(key, b, nil); err != nil {
+			hb.err = fmt.Errorf("geth: scratch trie node Set for %s: %w", hb.addrHash.Hex(), err)
+		}
+	}
+	hb.t = trie.NewStackTrie(cb)
+	return hb
+}
+
 func (g *gethStorageHashBuilder) AddLeaf(keyHash common.Hash, valueRLP []byte) error {
 	if g.err != nil {
 		return g.err
@@ -501,4 +523,152 @@ func (g *gethStorageHashBuilder) Root() (common.Hash, error) {
 		return common.Hash{}, g.err
 	}
 	return root, nil
+}
+
+// runPhase0 drives the spec-PreAlloc streaming-trie phase in parallel.
+//
+// For every cfg.PreAlloc entity with pe.Storage != nil, a worker:
+//   1. Drains the entity's storage iter into a per-call streamsort.Store
+//      (rooted under cfg.DBPath so the temp lives on the production
+//      filesystem, not the docker container's /tmp overlay).
+//   2. Iterates the sorted store, building a per-account storage MPT
+//      via a scratch-batch HashBuilder. Per-slot snapshot rows and
+//      per-storage-trie-node writes go to the worker's own *pebble.Batch
+//      — no contention on the shared w.batch+batchMu hot path.
+//   3. Flushes its batch via w.CommitScratchBatch when it crosses
+//      scratchBatchFlushBytes, and one final flush at worker exit.
+//   4. Reports the computed storage root through preparedCh to the main
+//      goroutine, which assigns it to cfg.GenesisAccounts[addr].Root.
+//
+// Root assignment is single-writer on the main goroutine; workers
+// never touch cfg.GenesisAccounts. Across-entity Pebble keyspaces are
+// disjoint (every key is addrHash-prefixed), so parallel db.Apply
+// calls don't conflict at the storage layer; they coalesce in
+// Pebble's WAL pipeline.
+func runPhase0(ctx context.Context, cfg generator.Config, w *Writer) error {
+	indices := make([]int, 0, len(cfg.PreAlloc))
+	for i := range cfg.PreAlloc {
+		if cfg.PreAlloc[i].Storage != nil {
+			indices = append(indices, i)
+		}
+	}
+	if len(indices) == 0 {
+		return nil
+	}
+
+	workers := runtime.NumCPU()
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > maxPhase0Workers {
+		workers = maxPhase0Workers
+	}
+	if workers > len(indices) {
+		workers = len(indices)
+	}
+
+	type preparedEntity struct {
+		idx  int
+		addr common.Address
+		root common.Hash
+	}
+
+	drainCtx, cancelDrain := context.WithCancelCause(ctx)
+	defer cancelDrain(nil)
+
+	drainCh := make(chan int, workers*2)
+	preparedCh := make(chan preparedEntity, workers*4)
+
+	var wg sync.WaitGroup
+	for k := 0; k < workers; k++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			scratch := w.NewScratchBatch()
+			defer func() {
+				// Final flush on exit (success or cancel). Errors during
+				// final flush surface through drainCtx — if we got here on
+				// cancel they're best-effort. Sync=false matches the
+				// per-entity path.
+				if scratch.Len() > 0 {
+					if err := w.CommitScratchBatch(scratch); err != nil {
+						cancelDrain(fmt.Errorf("geth phase0: final flush: %w", err))
+					}
+				} else {
+					_ = scratch.Close()
+				}
+			}()
+
+			for i := range drainCh {
+				if drainCtx.Err() != nil {
+					return
+				}
+				pe := &cfg.PreAlloc[i]
+				addr := pe.Address
+				addrHash := crypto.Keccak256Hash(addr[:])
+
+				d, err := streamingtrie.Drain(cfg.DBPath, pe.Storage)
+				if err != nil {
+					cancelDrain(fmt.Errorf("geth: drain spec storage[%d] %s: %w", i, addr.Hex(), err))
+					return
+				}
+				sink := func(keyHash, _rawKey, value common.Hash) error {
+					valueRLP, encErr := encodeStorageValue(value)
+					if encErr != nil {
+						return encErr
+					}
+					key := storageSnapshotKey(addrHash, keyHash)
+					return scratch.Set(key, valueRLP, nil)
+				}
+				hb := newScratchGethStorageHashBuilder(scratch, addrHash)
+				root, err := d.IterateRoot(hb, sink)
+				d.Close()
+				if err != nil {
+					cancelDrain(fmt.Errorf("geth: iterate spec storage[%d] %s: %w", i, addr.Hex(), err))
+					return
+				}
+				// Flush mid-stream to bound RAM. Crossing the threshold
+				// produces an Apply + fresh Batch; on commit failure the
+				// worker bails and signals via drainCtx.
+				if scratch.Len() >= scratchBatchFlushBytes {
+					if err := w.CommitScratchBatch(scratch); err != nil {
+						cancelDrain(fmt.Errorf("geth phase0: scratch flush: %w", err))
+						return
+					}
+					scratch = w.NewScratchBatch()
+				}
+				select {
+				case preparedCh <- preparedEntity{idx: i, addr: addr, root: root}:
+				case <-drainCtx.Done():
+					return
+				}
+			}
+		}()
+	}
+
+	go func() {
+		defer close(drainCh)
+		for _, i := range indices {
+			select {
+			case drainCh <- i:
+			case <-drainCtx.Done():
+				return
+			}
+		}
+	}()
+
+	go func() {
+		wg.Wait()
+		close(preparedCh)
+	}()
+
+	for entry := range preparedCh {
+		if acc, ok := cfg.GenesisAccounts[entry.addr]; ok && acc != nil {
+			acc.Root = entry.root
+		}
+	}
+	if cause := context.Cause(drainCtx); cause != nil && cause != context.Canceled {
+		return cause
+	}
+	return nil
 }
