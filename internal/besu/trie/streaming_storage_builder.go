@@ -56,6 +56,22 @@ type StreamingStorageBuilder struct {
 	leafCount int
 }
 
+// NewStreamingStorageBuilder constructs a streaming builder that emits
+// trie nodes through the caller-supplied sink. Use this when parallel
+// workers each need their own builder pointing at their own per-worker
+// node sink — `Builder.BeginStreamingStorage` is fine for the single-
+// goroutine path, but its returned builder writes through the parent
+// Builder's shared sink and is unsafe under concurrent use.
+//
+// addrHash must be the keccak256(address) the storage trie belongs to;
+// it's used as the prefix on every emitted trie-node write.
+func NewStreamingStorageBuilder(sink NodeSink, addrHash common.Hash) *StreamingStorageBuilder {
+	return &StreamingStorageBuilder{
+		addrHash: addrHash,
+		sink:     sink,
+	}
+}
+
 // AddSlot inserts (slotHash → valueRLP) into the streaming Bonsai
 // storage trie. slotHash MUST be strictly greater than the previous
 // call's slotHash; out-of-order input returns ErrSlotsOutOfOrder.
