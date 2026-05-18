@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"log"
 	mrand "math/rand"
+	"runtime"
 	"sort"
+	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -22,6 +24,13 @@ import (
 	"github.com/nerolation/state-actor/internal/streamingtrie"
 	"github.com/nerolation/state-actor/internal/streamsort"
 )
+
+// maxPhase0Workers caps Phase 0's drain-and-compute parallelism, mirroring
+// geth's maxPhase0Workers and reth's maxStreamSpecStorageWorkers. Each
+// worker owns its own streamsort.Store and grocksdb.WriteBatch; 8 keeps
+// peak RAM under the 32 GiB target after the streamsort downsizing
+// (commit aa0bfcb).
+const maxPhase0Workers = 8
 
 // writeStateAndCollectRoot drives the two-phase streaming pipeline:
 // Phase 0 streams spec-PreAlloc storage into Bonsai per-account storage
@@ -50,33 +59,8 @@ func writeStateAndCollectRoot(
 		hashToAddr[crypto.Keccak256Hash(addr[:])] = addr
 	}
 
-	for i, pe := range cfg.PreAlloc {
-		if pe.Storage == nil {
-			continue
-		}
-		if err := ctx.Err(); err != nil {
-			return common.Hash{}, nil, nil, err
-		}
-		addr := pe.Address
-		addrHash := crypto.Keccak256Hash(addr[:])
-		// Streaming Bonsai storage-trie builder: O(depth) memory per entity.
-		// The non-streaming BeginStorage path retained the full per-account
-		// MPT in memory and OOM-killed state-actor at bloatnet scale.
-		sb := builder.BeginStreamingStorage(addrHash)
-		var entityStorageBytes uint64
-		streamSink := func(keyHash, _rawKey, value common.Hash) error {
-			trimmed := besurlp.TrimStorageValue(value)
-			entityStorageBytes += uint64(len(trimmed))
-			return sink.PutFlatStorage(addrHash, keyHash, trimmed)
-		}
-		root, err := streamingtrie.StorageRoot("", pe.Storage, sb, streamSink)
-		if err != nil {
-			return common.Hash{}, nil, nil, fmt.Errorf("besu: stream spec storage[%d] %s: %w", i, addr.Hex(), err)
-		}
-		if acc, ok := cfg.GenesisAccounts[addr]; ok && acc != nil {
-			acc.Root = root
-		}
-		stats.StorageBytes += entityStorageBytes
+	if err := runPhase0(ctx, cfg, db, stats); err != nil {
+		return common.Hash{}, nil, nil, err
 	}
 
 	sorter, err := streamsort.New("")
@@ -319,6 +303,132 @@ func encodeEntityContract(nonce uint64, balance *uint256.Int, code []byte, slots
 		out = append(out, v[:]...)
 	}
 	return out
+}
+
+// runPhase0 drives the spec-PreAlloc streaming-trie phase in parallel.
+//
+// For every entity with pe.Storage != nil, a worker:
+//   1. Owns its own *nodeSink wrapping a per-worker *grocksdb.WriteBatch.
+//      Flushes at flushThresholdBytes (64 MiB) via db.db.Write — Pebble's
+//      WAL is disabled on the bulk path, and grocksdb's Write is safe to
+//      call concurrently across workers (RocksDB serialises the commit
+//      pipeline internally).
+//   2. Constructs its own besutrie.StreamingStorageBuilder via
+//      NewStreamingStorageBuilder so trie-node writes route through the
+//      per-worker sink, not the shared outer-builder sink.
+//   3. Calls streamingtrie.StorageRoot to drain the iter into a per-call
+//      streamsort.Store (rooted under cfg.DBPath, not /tmp), walk it
+//      sorted, drive the streaming builder, and emit flat-state writes
+//      via a closure that calls workerSink.PutFlatStorage.
+//   4. Reports the computed storage root to the main goroutine via
+//      preparedCh; main assigns cfg.GenesisAccounts[addr].Root.
+//
+// Across-entity Bonsai keyspaces are disjoint (every key prefixed by
+// addrHash for trie + flat), so parallel writes don't conflict.
+func runPhase0(ctx context.Context, cfg generator.Config, db *besuDB, stats *generator.Stats) error {
+	indices := make([]int, 0, len(cfg.PreAlloc))
+	for i := range cfg.PreAlloc {
+		if cfg.PreAlloc[i].Storage != nil {
+			indices = append(indices, i)
+		}
+	}
+	if len(indices) == 0 {
+		return nil
+	}
+
+	workers := runtime.NumCPU()
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > maxPhase0Workers {
+		workers = maxPhase0Workers
+	}
+	if workers > len(indices) {
+		workers = len(indices)
+	}
+
+	type preparedEntity struct {
+		idx          int
+		addr         common.Address
+		root         common.Hash
+		storageBytes uint64
+	}
+
+	drainCtx, cancelDrain := context.WithCancelCause(ctx)
+	defer cancelDrain(nil)
+
+	drainCh := make(chan int, workers*2)
+	preparedCh := make(chan preparedEntity, workers*4)
+
+	var wg sync.WaitGroup
+	for k := 0; k < workers; k++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			workerSink := newNodeSink(db)
+			defer func() {
+				// Best-effort flush at worker exit. Errors surface through
+				// drainCtx; the main goroutine returns the cause.
+				if err := workerSink.Close(); err != nil {
+					cancelDrain(fmt.Errorf("besu phase0: worker sink close: %w", err))
+				}
+			}()
+
+			for i := range drainCh {
+				if drainCtx.Err() != nil {
+					return
+				}
+				pe := &cfg.PreAlloc[i]
+				addr := pe.Address
+				addrHash := crypto.Keccak256Hash(addr[:])
+
+				sb := besutrie.NewStreamingStorageBuilder(workerSink, addrHash)
+				var entityStorageBytes uint64
+				streamSink := func(keyHash, _rawKey, value common.Hash) error {
+					trimmed := besurlp.TrimStorageValue(value)
+					entityStorageBytes += uint64(len(trimmed))
+					return workerSink.PutFlatStorage(addrHash, keyHash, trimmed)
+				}
+				root, err := streamingtrie.StorageRoot(cfg.DBPath, pe.Storage, sb, streamSink)
+				if err != nil {
+					cancelDrain(fmt.Errorf("besu: stream spec storage[%d] %s: %w", i, addr.Hex(), err))
+					return
+				}
+				select {
+				case preparedCh <- preparedEntity{idx: i, addr: addr, root: root, storageBytes: entityStorageBytes}:
+				case <-drainCtx.Done():
+					return
+				}
+			}
+		}()
+	}
+
+	go func() {
+		defer close(drainCh)
+		for _, i := range indices {
+			select {
+			case drainCh <- i:
+			case <-drainCtx.Done():
+				return
+			}
+		}
+	}()
+
+	go func() {
+		wg.Wait()
+		close(preparedCh)
+	}()
+
+	for entry := range preparedCh {
+		if acc, ok := cfg.GenesisAccounts[entry.addr]; ok && acc != nil {
+			acc.Root = entry.root
+		}
+		stats.StorageBytes += entry.storageBytes
+	}
+	if cause := context.Cause(drainCtx); cause != nil && cause != context.Canceled {
+		return cause
+	}
+	return nil
 }
 
 func decodeEntity(blob []byte) entity {
