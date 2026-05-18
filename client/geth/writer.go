@@ -110,10 +110,21 @@ func NewWriter(dbPath string) (*Writer, error) {
 func prodPebbleOptions() *pebble.Options {
 	return &pebble.Options{
 		MemTableSize:                256 * 1024 * 1024,
-		MemTableStopWritesThreshold: 8,
+		MemTableStopWritesThreshold: 2,
 		L0CompactionThreshold:       math.MaxInt32,
 		L0StopWritesThreshold:       math.MaxInt32,
-		MaxConcurrentCompactions:    func() int { return runtime.NumCPU() },
+		MaxConcurrentCompactions: func() int {
+			// Cap at 8 — on the 96-core bench box, NumCPU() spawned ~96
+			// background goroutines, each with per-compactor allocations
+			// that contributed to the v5 run's 82 GiB peak RAM. 8 is
+			// enough to drive the final db.Compact() at Close in parallel
+			// without ballooning RAM during the import.
+			n := runtime.NumCPU()
+			if n > 8 {
+				n = 8
+			}
+			return n
+		},
 	}
 }
 
