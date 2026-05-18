@@ -4,13 +4,27 @@ package besu
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"github.com/linxGnu/grocksdb"
 
 	"github.com/nerolation/state-actor/internal/besu/keys"
 )
+
+// bulkBackgroundJobs caps RocksDB's background compaction/flush thread
+// pool during bulk import. Matches geth's MaxConcurrentCompactions cap
+// (commit aa0bfcb) — 8 threads is enough to drive the final
+// CompactRange in parallel without ballooning RAM.
+const bulkBackgroundJobs = 8
+
+// perCFWriteBufferBytes is the per-column-family memtable size during
+// bulk import. 256 MiB matches geth's prodPebbleOptions.MemTableSize;
+// it dictates the flush granularity (smaller -> more L0 SSTs, larger
+// -> larger RAM footprint per CF).
+const perCFWriteBufferBytes = 256 * 1024 * 1024
 
 // Besu opens ONE RocksDB instance under <datadir>/database/ with all 8 column
 // families declared. Even TRIE_LOG_STORAGE (no genesis-time writes) must be
@@ -110,6 +124,19 @@ func openBesuDB(datadir string) (*besuDB, error) {
 		opts := grocksdb.NewDefaultOptions()
 		opts.SetCompression(grocksdb.LZ4Compression)
 		opts.SetLevelCompactionDynamicLevelBytes(true)
+		// Bulk-import tuning per the v5 bench analysis: with default
+		// 64 MiB memtables + Level0FileNumCompactionTrigger=4, besu
+		// hit a ~9 min L0-stall plateau at 32 GB. Raising the memtable
+		// to 256 MiB plus pinning all three L0 triggers to MaxInt32
+		// suppresses auto-compaction during the import; the final
+		// CompactRange at Close pays the LSM-flattening cost once,
+		// parallelised. Mirrors geth's commit 32ac564 model.
+		opts.SetWriteBufferSize(perCFWriteBufferBytes)
+		opts.SetMaxWriteBufferNumber(4)
+		opts.SetLevel0FileNumCompactionTrigger(math.MaxInt32)
+		opts.SetLevel0SlowdownWritesTrigger(math.MaxInt32)
+		opts.SetLevel0StopWritesTrigger(math.MaxInt32)
+		opts.SetMaxBytesForLevelBase(2 * 1024 * 1024 * 1024) // 2 GiB L1 target
 		t := mkTable()
 		opts.SetBlockBasedTableFactory(t)
 		if i == cfIdxBlockchain || i == cfIdxTrieLogStorage {
@@ -130,6 +157,16 @@ func openBesuDB(datadir string) (*besuDB, error) {
 	dbOpts.SetCreateIfMissingColumnFamilies(true)
 	dbOpts.SetMaxTotalWalSize(1 << 30) // 1 GB — Besu's default
 	dbOpts.SetKeepLogFileNum(7)        // 1 week of daily rotation
+	// Use multiple background threads for parallel CF flushes during
+	// the bulk import and parallel CompactRange at Close. Capped at
+	// bulkBackgroundJobs (8) — on the 96-core bench box, the default
+	// of 1 was a real bottleneck.
+	parallelism := runtime.NumCPU()
+	if parallelism > bulkBackgroundJobs {
+		parallelism = bulkBackgroundJobs
+	}
+	dbOpts.IncreaseParallelism(parallelism)
+	dbOpts.SetMaxBackgroundJobs(parallelism)
 
 	db, cfHandles, err := grocksdb.OpenDbColumnFamilies(
 		dbOpts, dbPath, cfNames, cfOpts,
@@ -160,7 +197,32 @@ func openBesuDB(datadir string) (*besuDB, error) {
 
 // Close releases all open grocksdb resources. Safe to call multiple times
 // and on partially-initialized structs.
+//
+// Before closing, runs a full-range CompactRange on every user CF so the
+// LSM tree is flat when Besu later opens this DB. We suppressed auto-
+// compactions during the bulk write (Level0FileNumCompactionTrigger =
+// MaxInt32) — this is where we pay that deferred cost, parallelised
+// across MaxBackgroundJobs threads. Mirrors geth's commit 32ac564.
 func (b *besuDB) Close() {
+	if b.db != nil {
+		// CompactRange the user CFs only. The Default CF is empty in our
+		// usage; the Blockchain + TRIE_LOG_STORAGE CFs receive few writes
+		// at genesis and a CompactRange on them is near-instant.
+		emptyRange := grocksdb.Range{Start: nil, Limit: nil}
+		for _, idx := range []int{
+			cfIdxAccountInfoState,
+			cfIdxCodeStorage,
+			cfIdxAccountStorageStorage,
+			cfIdxTrieBranchStorage,
+			cfIdxBlockchain,
+			cfIdxVariables,
+		} {
+			if idx < len(b.cfs) && b.cfs[idx] != nil {
+				b.db.CompactRangeCF(b.cfs[idx], emptyRange)
+			}
+		}
+	}
+
 	for _, h := range b.cfs {
 		if h != nil {
 			h.Destroy()

@@ -11,12 +11,13 @@ import (
 	"github.com/nerolation/state-actor/internal/besu/keys"
 )
 
-// flushThresholdBytes mirrors nethermind's stateBatchFlushBytes (16 MiB).
-// Tuned to balance per-flush syscall overhead (small batches → many fsyncs)
-// vs. peak memory (we accumulate trie + flat-state writes in a single
-// in-memory WriteBatch). Sourced from nethermind's e4722af tuning at
-// genesis_alloc_cgo.go:43-44.
-const flushThresholdBytes = 16 * 1024 * 1024
+// flushThresholdBytes is the WriteBatch flush threshold during bulk
+// import. 64 MiB matches geth's defaultFlushBytes — at 16 MiB the v5
+// bench paid 4× the per-flush RocksDB commit overhead, contributing
+// materially to the 1:55 wall-time. Raising it to 64 MiB cuts the
+// commit count to ~1/4 with no observable memory pressure (peak in-
+// flight WriteBatch stays well under 128 MiB).
+const flushThresholdBytes = 64 * 1024 * 1024
 
 // nodeSink implements internal/besu/trie.NodeSink and is also the central
 // sink for flat-state writes from state_writer_cgo.go's Phase 2 loop.
@@ -148,6 +149,13 @@ func (s *nodeSink) maybeFlush() error {
 func (s *nodeSink) flushAsync() error {
 	wo := grocksdb.NewDefaultWriteOptions()
 	defer wo.Destroy()
+	// Disable WAL on the bulk-flush path. Genesis is one-shot; the
+	// world-state sentinels (SaveWorldState) and chainHeadHash both
+	// go through flushSync / putSync, which fsync independently and
+	// guarantee durability of the final consistent on-disk state.
+	// Skipping WAL on the intermediate flushes saves ~50% of RocksDB's
+	// write amplification during the bulk phase.
+	wo.DisableWAL(true)
 	if err := s.db.db.Write(wo, s.batch); err != nil {
 		return fmt.Errorf("besu: flush batch: %w", err)
 	}
