@@ -29,16 +29,21 @@ type stateDBSink struct {
 	pendingBytes int
 }
 
-// stateBatchFlushBytes is the WriteBatch flush threshold. 16 MiB hits a
-// good balance between per-flush overhead (small batches → many fsyncs)
-// and peak memory (large batches → big in-memory queue). Tune by
-// benchmarking write throughput vs. memory headroom on the host.
-const stateBatchFlushBytes = 16 * 1024 * 1024
+// stateBatchFlushBytes is the WriteBatch flush threshold. 64 MiB matches
+// geth's defaultFlushBytes and besu's flushThresholdBytes — at 16 MiB
+// (the pre-tuning value) the v5 bench paid 4x the per-flush RocksDB
+// commit overhead, contributing materially to the 2:42 wall time.
+const stateBatchFlushBytes = 64 * 1024 * 1024
 
 func newStateDBSink(db *grocksdb.DB) *stateDBSink {
+	wo := grocksdb.NewDefaultWriteOptions()
+	// Genesis is one-shot; durability comes from the final CompactRange
+	// + Close. Skipping WAL on the bulk-flush path saves ~50% of
+	// RocksDB's write amplification (matches besu commit 4847945).
+	wo.DisableWAL(true)
 	return &stateDBSink{
 		db: db,
-		wo: grocksdb.NewDefaultWriteOptions(),
+		wo: wo,
 		wb: grocksdb.NewWriteBatch(),
 	}
 }
