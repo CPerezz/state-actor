@@ -11,16 +11,16 @@ import (
 )
 
 // FixedBytesPerSlot is the calibration factor passed to sizecal.NewFixed
-// by every per-client TestE2ESuite. Hardcoded (not per-client) so the
+// by every per-client TestE2ESuite. Same value on every client so the
 // same YAML produces byte-identical PreAlloc across geth/besu/nethermind/
 // reth — which is the contract `cross-client-genesis-root` enforces for
 // the spec-driven invariant.
 //
-// 64 B/slot is the geth+besu default in `internal/sizecal/factors.json`;
-// reth (60) and nethermind (80) would diverge with sizecal.Default(). For
-// CI purposes the calibration value doesn't need to be accurate — it
-// just needs to be IDENTICAL across the four clients running the same
-// YAML.
+// Post-refactor (single global sizecal constant), sizecal.Default() is
+// ALSO invariance-safe — it returns the same value on every client. CI
+// keeps NewFixed(64) on purpose: an explicit decoupling from the
+// production calibration so a future drift in Default() can't silently
+// mask a writer regression at unit-test level.
 const FixedBytesPerSlot uint64 = 64
 
 // CISpecSeed is the seed used by every per-client TestE2ESuite when

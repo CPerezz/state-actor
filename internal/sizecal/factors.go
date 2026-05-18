@@ -1,89 +1,89 @@
 package sizecal
 
-import (
-	_ "embed"
-	"encoding/json"
-	"fmt"
-)
-
 // SizeApproximator translates a target on-disk byte budget into a synthetic
-// storage-slot count. Implementations are looked up by client name.
+// storage-slot count. Implementations no longer branch on client name —
+// the parameter is preserved for forward-compatibility with a future opt-in
+// that lets a caller override per-client.
 //
 // The interface is duplicated (in shape) in internal/templates/template.go
-// to avoid an import cycle — templates needs the interface to plumb through
-// Template.Expand; sizecal owns the implementation. Both interfaces are
-// trivially compatible by signature.
+// to avoid an import cycle. Both interfaces are signature-compatible.
 type SizeApproximator interface {
 	SlotsForBytes(client string, targetBytes uint64) int
 }
 
-// factors is the package-level table loaded from factors.json at init.
-// Unknown clients return the fallback ratio.
-var factors map[string]uint64
+// bytesPerSlot is the on-disk TRIE-only byte cost per storage slot, calibrated
+// to geth's empirical 136 B/slot from the May-17 bloatnet run.
+//
+// Empirical derivation from `geth db inspect`:
+//
+//	Path trie storage nodes   : 261.94 GiB / 2,261,206,613 items (uncompressed)
+//	Storage snapshot (flat)   : 149.92 GiB / 1,643,328,993 items
+//	Total uncompressed        : 411.86 GiB
+//	On-disk (du -sh)          : 334 GiB  ⇒ Pebble compression ratio ≈ 0.81
+//
+// Trie on disk = 261.94 × 0.81 ≈ 212 GB / 1.56 B slots ≈ 136 B/slot.
+// Rounded up to 140 for safety against trie-depth growth at deeper scales
+// + Pebble compaction variance.
+//
+// IMPORTANT: this is TRIE-only. Flat-state (Pebble `o` snapshot rows on geth,
+// Bonsai flat rows on besu, reth's 4 MDBX flat tables) is ADDITIONAL on-disk
+// bytes and NOT counted toward target_bytes. Per-client snapshot adds-on:
+// geth ~78 B, besu ~74 B, reth ~70-100 B, nethermind 0 (no flat state).
+//
+// Cross-client cross-check: nethermind has no flat state, so its entire
+// 186 GB / 1.56 B = 119 B/slot is trie-only. Two independent measurements
+// (Pebble Path-trie vs RocksDB HalfPath) converging on ~120-140 is strong
+// empirical evidence.
+const bytesPerSlot uint64 = 140
 
-//go:embed factors.json
-var factorsJSON []byte
+// bytesPerAccount is the on-disk TRIE-only byte cost per account, calibrated
+// to geth's account-trie cost. Empirical anchor from May-17 `db inspect`'s
+// path-trie-account-nodes table (165 KiB / 1414 nodes ≈ 120 B/account in the
+// truncated run), rounded up to 175 for safety since that bench was capped by
+// Bug A — a real-world wider account-trie amortises slightly higher.
+const bytesPerAccount uint64 = 175
 
-// fallbackBytesPerSlot is used when a client name isn't in factors.json.
-// Conservative — picks the larger end of observed ratios so an unknown
-// client over-allocates (better than under-allocating and busting the
-// target-size budget).
-const fallbackBytesPerSlot uint64 = 100
-
-func init() {
-	var raw map[string]any
-	if err := json.Unmarshal(factorsJSON, &raw); err != nil {
-		panic(fmt.Sprintf("sizecal: failed to decode embedded factors.json: %v", err))
-	}
-	factors = make(map[string]uint64, len(raw))
-	for k, v := range raw {
-		// Skip JSON _comment keys and any non-numeric entries.
-		switch n := v.(type) {
-		case float64:
-			factors[k] = uint64(n)
-		case int:
-			factors[k] = uint64(n)
-		}
-	}
-}
-
-// Default returns the package-level SizeApproximator backed by the embedded
-// factors.json. Callers should generally use this; tests that need a
-// specific factor can use NewFixed instead.
+// Default returns the package-level SizeApproximator backed by the single
+// global trie-only constant. Same value for every client — preserves the
+// cross-client genesis-root invariance gate (same YAML → same slot count →
+// same state root).
 func Default() SizeApproximator {
-	return &defaultSizer{}
+	return defaultSizer{}
 }
 
 // NewFixed returns a SizeApproximator that always uses the given bytes-per-
-// slot ratio, regardless of client. Useful in tests and as a fallback when
-// a user supplies their own --bytes-per-slot override (a future CLI knob).
+// slot ratio regardless of client. Used by the cross-client CI invariance
+// suite (sizecal.NewFixed(64)) to force byte-identical PreAlloc across the
+// four clients in tests; that calibration is explicitly decoupled from the
+// production value so production-sizing drift can't mask a writer regression.
 func NewFixed(bytesPerSlot uint64) SizeApproximator {
-	return &fixedSizer{bytesPerSlot: bytesPerSlot}
+	return fixedSizer{bytesPerSlot: bytesPerSlot}
 }
 
-// BytesPerSlot is the calibrated ratio for a client. Returns the fallback
-// when the client isn't in the table. Exported so tests + diagnostics can
-// inspect the factor without going through SlotsForBytes math.
-func BytesPerSlot(client string) uint64 {
-	if v, ok := factors[client]; ok {
-		return v
-	}
-	return fallbackBytesPerSlot
+// BytesPerSlot returns the global trie-only on-disk B/slot cost. The client
+// parameter is ignored — kept for API stability.
+func BytesPerSlot(_ string) uint64 {
+	return bytesPerSlot
+}
+
+// BytesPerAccount returns the global trie-only on-disk B/account cost. The
+// client parameter is ignored — kept for API stability.
+func BytesPerAccount(_ string) uint64 {
+	return bytesPerAccount
 }
 
 type defaultSizer struct{}
 
-func (defaultSizer) SlotsForBytes(client string, targetBytes uint64) int {
-	bps := BytesPerSlot(client)
-	if bps == 0 {
+func (defaultSizer) SlotsForBytes(_ string, targetBytes uint64) int {
+	if bytesPerSlot == 0 {
 		return 0
 	}
-	return int(targetBytes / bps)
+	return int(targetBytes / bytesPerSlot)
 }
 
 type fixedSizer struct{ bytesPerSlot uint64 }
 
-func (s fixedSizer) SlotsForBytes(client string, targetBytes uint64) int {
+func (s fixedSizer) SlotsForBytes(_ string, targetBytes uint64) int {
 	if s.bytesPerSlot == 0 {
 		return 0
 	}
