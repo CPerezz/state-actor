@@ -87,7 +87,7 @@ func TestSetStateRootMPT(t *testing.T) {
 	defer w.Close()
 
 	root := common.HexToHash("0xabababababababababababababababababababababababababababababababab")
-	if err := w.SetStateRoot(root, false); err != nil {
+	if err := w.SetStateRoot(root, false /* binaryTrie */, false /* archive */); err != nil {
 		t.Fatalf("SetStateRoot: %v", err)
 	}
 
@@ -130,7 +130,7 @@ func TestSetStateRootBinaryTrie(t *testing.T) {
 	defer w.Close()
 
 	root := common.HexToHash("0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd")
-	if err := w.SetStateRoot(root, true); err != nil {
+	if err := w.SetStateRoot(root, true /* binaryTrie */, false /* archive */); err != nil {
 		t.Fatalf("SetStateRoot: %v", err)
 	}
 

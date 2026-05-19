@@ -41,7 +41,7 @@ func TestWriteContractStorageRoundtrip(t *testing.T) {
 	}
 
 	err = envs.Mdbx.Update(func(txn *mdbx.Txn) error {
-		_, err := WriteContractStorage(txn, envs.MdbxDBIs, contract, 0, false)
+		_, err := WriteContractStorage(txn, envs.MdbxDBIs, contract, 0, true /* archive */)
 		return err
 	})
 	if err != nil {
@@ -115,10 +115,11 @@ func TestWriteContractStorageRoundtrip(t *testing.T) {
 	}
 }
 
-// TestWriteContractStorage_SkipGenesisChangeSets: with skipChangeSets=true,
-// WriteContractStorage must elide StorageChangeSets writes while still
-// populating PlainStorageState, HashedStorages, and StoragesHistory.
-func TestWriteContractStorage_SkipGenesisChangeSets(t *testing.T) {
+// TestWriteContractStorage_FullMode: with archive=false (full mode, the
+// default), WriteContractStorage must populate PlainStorageState and
+// HashedStorages but elide BOTH archive-only tables (StorageChangeSets
+// and StoragesHistory).
+func TestWriteContractStorage_FullMode(t *testing.T) {
 	envs, err := OpenEnvs(t.TempDir(), true)
 	if err != nil {
 		t.Fatalf("OpenEnvs: %v", err)
@@ -140,11 +141,11 @@ func TestWriteContractStorage_SkipGenesisChangeSets(t *testing.T) {
 	}
 
 	err = envs.Mdbx.Update(func(txn *mdbx.Txn) error {
-		_, err := WriteContractStorage(txn, envs.MdbxDBIs, contract, 0, true)
+		_, err := WriteContractStorage(txn, envs.MdbxDBIs, contract, 0, false /* archive */)
 		return err
 	})
 	if err != nil {
-		t.Fatalf("WriteContractStorage(skipChangeSets=true): %v", err)
+		t.Fatalf("WriteContractStorage(archive=false): %v", err)
 	}
 
 	countRows := func(t *testing.T, table string) int {
@@ -165,7 +166,10 @@ func TestWriteContractStorage_SkipGenesisChangeSets(t *testing.T) {
 	}
 
 	if got := countRows(t, "StorageChangeSets"); got != 0 {
-		t.Errorf("StorageChangeSets rows = %d, want 0 (skipped)", got)
+		t.Errorf("StorageChangeSets rows = %d, want 0 (full mode skips)", got)
+	}
+	if got := countRows(t, "StoragesHistory"); got != 0 {
+		t.Errorf("StoragesHistory rows = %d, want 0 (full mode skips)", got)
 	}
 	if got := countRows(t, "PlainStorageState"); got != len(contract.Storage) {
 		t.Errorf("PlainStorageState rows = %d, want %d", got, len(contract.Storage))
@@ -173,7 +177,60 @@ func TestWriteContractStorage_SkipGenesisChangeSets(t *testing.T) {
 	if got := countRows(t, "HashedStorages"); got != len(contract.Storage) {
 		t.Errorf("HashedStorages rows = %d, want %d", got, len(contract.Storage))
 	}
-	if got := countRows(t, "StoragesHistory"); got != len(contract.Storage) {
-		t.Errorf("StoragesHistory rows = %d, want %d", got, len(contract.Storage))
+}
+
+// TestWriteContractStorage_Archive: with archive=true, all four tables
+// populate at the expected counts. Mirror of _FullMode for the opt-in
+// archive-mode path.
+func TestWriteContractStorage_Archive(t *testing.T) {
+	envs, err := OpenEnvs(t.TempDir(), true)
+	if err != nil {
+		t.Fatalf("OpenEnvs: %v", err)
+	}
+	defer envs.Close()
+
+	addr := common.HexToAddress("0xcafef00d")
+	contract := &entitygen.Account{
+		Address:  addr,
+		AddrHash: crypto.Keccak256Hash(addr[:]),
+		StateAccount: &types.StateAccount{
+			Nonce:   1,
+			Balance: uint256.NewInt(0),
+		},
+		Storage: []entitygen.StorageSlot{
+			{Key: common.HexToHash("0x01"), Value: common.HexToHash("0xa")},
+			{Key: common.HexToHash("0x02"), Value: common.HexToHash("0xb")},
+		},
+	}
+
+	err = envs.Mdbx.Update(func(txn *mdbx.Txn) error {
+		_, err := WriteContractStorage(txn, envs.MdbxDBIs, contract, 0, true /* archive */)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("WriteContractStorage(archive=true): %v", err)
+	}
+
+	countRows := func(t *testing.T, table string) int {
+		t.Helper()
+		var count int
+		_ = envs.Mdbx.View(func(txn *mdbx.Txn) error {
+			cur, err := txn.OpenCursor(envs.MdbxDBIs[table])
+			if err != nil {
+				return err
+			}
+			defer cur.Close()
+			for _, _, err := cur.Get(nil, nil, mdbx.First); err == nil; _, _, err = cur.Get(nil, nil, mdbx.Next) {
+				count++
+			}
+			return nil
+		})
+		return count
+	}
+
+	for _, table := range []string{"PlainStorageState", "HashedStorages", "StorageChangeSets", "StoragesHistory"} {
+		if got := countRows(t, table); got != len(contract.Storage) {
+			t.Errorf("%s rows = %d, want %d", table, got, len(contract.Storage))
+		}
 	}
 }

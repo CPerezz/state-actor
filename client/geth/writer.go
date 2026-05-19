@@ -191,14 +191,18 @@ func (w *Writer) WriteCode(codeHash common.Hash, code []byte) error {
 // entries; doing it here too is idempotent and ensures non-genesis DBs
 // also boot cleanly.
 //
+// archive plumbs through to WritePathDBMetadata; see its docstring for
+// the on-disk effect. The substantive --archive plumbing for geth runs
+// from the bench script (--gcmode=archive on the docker boot).
+//
 // Drains the in-flight bulk-import batch first so the metadata write lands
 // after all snapshot/trie data — critical for SnapshotGenerator's "Done"
 // flag to reflect a fully-populated state.
-func (w *Writer) SetStateRoot(root common.Hash, binaryTrie bool) error {
+func (w *Writer) SetStateRoot(root common.Hash, binaryTrie bool, archive bool) error {
 	if err := w.flushBatch(true); err != nil {
 		return fmt.Errorf("drain batch before SetStateRoot: %w", err)
 	}
-	if err := WritePathDBMetadata(w.kv, root, binaryTrie); err != nil {
+	if err := WritePathDBMetadata(w.kv, root, binaryTrie, archive); err != nil {
 		return fmt.Errorf("write pathdb metadata: %w", err)
 	}
 	return nil
@@ -279,7 +283,8 @@ func (w *Writer) Stats() generator.WriterStats {
 }
 
 // WriteGenesisBlockFull writes the genesis block with full genesis config.
-func (w *Writer) WriteGenesisBlockFull(genesisConfig *genesis.Genesis, stateRoot common.Hash, binaryTrie bool) error {
+// archive plumbs to WriteGenesisBlock → WritePathDBMetadata.
+func (w *Writer) WriteGenesisBlockFull(genesisConfig *genesis.Genesis, stateRoot common.Hash, binaryTrie bool, archive bool) error {
 	// The genesis block writer touches the DB through the kv adapter; flush
 	// the hot-path batch first so its writes are visible to the metadata
 	// path.
@@ -287,7 +292,7 @@ func (w *Writer) WriteGenesisBlockFull(genesisConfig *genesis.Genesis, stateRoot
 		return fmt.Errorf("drain batch before genesis block: %w", err)
 	}
 	ancientDir := filepath.Join(w.dbPath, "ancient")
-	_, err := WriteGenesisBlock(w.kv, genesisConfig, stateRoot, binaryTrie, ancientDir)
+	_, err := WriteGenesisBlock(w.kv, genesisConfig, stateRoot, binaryTrie, archive, ancientDir)
 	return err
 }
 

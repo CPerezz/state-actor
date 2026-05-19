@@ -37,15 +37,17 @@ import (
 // Caller is responsible for transferring the returned count to *generator.Stats
 // only after the enclosing MDBX transaction commits.
 //
-// skipChangeSets elides the StorageChangeSets write (table 3). Safe for
-// genesis (blockNum == 0) per the runtime audit — block 0 changesets are
-// never consulted by any reth read path. MUST be false for blockNum != 0.
+// archive controls writes to the two archive-only tables (StorageChangeSets,
+// StoragesHistory). When archive=false (full mode, default), both are
+// skipped — a full-mode reth node prunes them past the pruning window,
+// and at block 0 there's no history to preserve. When archive=true,
+// both are written matching the original reth schema for archive nodes.
 func WriteContractStorage(
 	txn *mdbx.Txn,
 	dbis map[string]mdbx.DBI,
 	contract *entitygen.Account,
 	blockNum uint64,
-	skipChangeSets bool,
+	archive bool,
 ) (uint64, error) {
 	blockKey := iReth.BlockNumberAddress{BlockNumber: blockNum, Address: contract.Address}
 	var blockKeyBuf bytes.Buffer
@@ -76,9 +78,9 @@ func WriteContractStorage(
 				contract.AddrHash.Hex(), slot.Key.Hex(), err)
 		}
 
-		// 3. StorageChangeSets: BlockNumberAddress → StorageEntry{slot_key, prev_value=0}
-		// For genesis (block 0), the "before" value is 0 — slot was newly set.
-		if !skipChangeSets {
+		if archive {
+			// 3. StorageChangeSets: BlockNumberAddress → StorageEntry{slot_key, prev_value=0}
+			// For genesis (block 0), the "before" value is 0 — slot was newly set.
 			changeEntry := iReth.StorageEntry{Key: slot.Key, Value: uint256.NewInt(0)}
 			var changeBuf bytes.Buffer
 			changeEntry.EncodeCompact(&changeBuf)
@@ -86,23 +88,23 @@ func WriteContractStorage(
 				return 0, fmt.Errorf("StorageChangeSets %s slot %s: %w",
 					contract.Address.Hex(), slot.Key.Hex(), err)
 			}
-		}
 
-		// 4. StoragesHistory: StorageShardedKey{addr, slot_key, u64::MAX} → IntegerList([block])
-		// u64::MAX marks the latest (open) shard; the bitmap contains the block
-		// numbers at which this slot was first touched.
-		ssk := iReth.StorageShardedKey{
-			Address:     contract.Address,
-			StorageKey:  slot.Key,
-			BlockNumber: ^uint64(0),
-		}
-		var sskBuf bytes.Buffer
-		ssk.EncodeKey(&sskBuf)
-		var listBuf bytes.Buffer
-		iReth.EncodeIntegerList(&listBuf, []uint64{blockNum})
-		if err := txn.Put(dbis["StoragesHistory"], sskBuf.Bytes(), listBuf.Bytes(), 0); err != nil {
-			return 0, fmt.Errorf("StoragesHistory %s slot %s: %w",
-				contract.Address.Hex(), slot.Key.Hex(), err)
+			// 4. StoragesHistory: StorageShardedKey{addr, slot_key, u64::MAX} → IntegerList([block])
+			// u64::MAX marks the latest (open) shard; the bitmap contains the block
+			// numbers at which this slot was first touched.
+			ssk := iReth.StorageShardedKey{
+				Address:     contract.Address,
+				StorageKey:  slot.Key,
+				BlockNumber: ^uint64(0),
+			}
+			var sskBuf bytes.Buffer
+			ssk.EncodeKey(&sskBuf)
+			var listBuf bytes.Buffer
+			iReth.EncodeIntegerList(&listBuf, []uint64{blockNum})
+			if err := txn.Put(dbis["StoragesHistory"], sskBuf.Bytes(), listBuf.Bytes(), 0); err != nil {
+				return 0, fmt.Errorf("StoragesHistory %s slot %s: %w",
+					contract.Address.Hex(), slot.Key.Hex(), err)
+			}
 		}
 		storageBytes += uint64(len(plainEntryBytes))
 	}

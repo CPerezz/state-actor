@@ -49,7 +49,18 @@ func (pw *prefixWriter) Delete(key []byte) error {
 // SnapshotRoot, and SnapshotGenerator must be written under that prefix.
 // DatabaseVersion is read by geth before pathdb is constructed, so it
 // always lives at the raw key.
-func WritePathDBMetadata(w ethdb.KeyValueWriter, stateRoot common.Hash, binaryTrie bool) error {
+//
+// archive controls whether the DB carries the archive-anchor recovery
+// marker. Geth's --gcmode=archive is purely a runtime flag (sets
+// cfg.NoPruning=true; see go-ethereum cmd/utils/flags.go:1799); the
+// genesis state-trie content is byte-identical between full and archive
+// modes. The marker we write here (SnapshotRecoveryNumber=0) signals to
+// geth's pathdb-recovery path that there is no in-flight snapshot
+// generation to resume — harmless in full mode, defensible at an
+// archive anchor. The substantive --archive plumbing for geth lives in
+// scripts/run-bloatnet.sh, which propagates the flag to geth's docker
+// boot as --gcmode=archive.
+func WritePathDBMetadata(w ethdb.KeyValueWriter, stateRoot common.Hash, binaryTrie bool, archive bool) error {
 	pathdbWriter := w
 	if binaryTrie {
 		pathdbWriter = &prefixWriter{prefix: []byte("v"), w: w}
@@ -59,6 +70,9 @@ func WritePathDBMetadata(w ethdb.KeyValueWriter, stateRoot common.Hash, binaryTr
 	rawdb.WriteSnapshotRoot(pathdbWriter, stateRoot)
 	if err := WriteCompletedSnapshotGenerator(pathdbWriter, binaryTrie); err != nil {
 		return fmt.Errorf("failed to write snapshot generator: %w", err)
+	}
+	if archive {
+		rawdb.WriteSnapshotRecoveryNumber(pathdbWriter, 0)
 	}
 	rawdb.WriteDatabaseVersion(w, pathdbSchemaVersion)
 	return nil
@@ -73,7 +87,12 @@ func WritePathDBMetadata(w ethdb.KeyValueWriter, stateRoot common.Hash, binaryTr
 // This is geth-specific and lives in client/geth/. The genesis package retains
 // only client-neutral parsers (LoadGenesis, ToStateAccounts, GetAllocStorage,
 // GetAllocCode).
-func WriteGenesisBlock(db ethdb.KeyValueStore, gen *genesis.Genesis, stateRoot common.Hash, binaryTrie bool, ancientDir string) (*types.Block, error) {
+//
+// archive selects the PathDB metadata variant: when true, an extra
+// SnapshotRecoveryNumber=0 anchor is written so geth's archive-mode
+// boot finds a clean recovery cursor. See WritePathDBMetadata for the
+// full archive contract.
+func WriteGenesisBlock(db ethdb.KeyValueStore, gen *genesis.Genesis, stateRoot common.Hash, binaryTrie bool, archive bool, ancientDir string) (*types.Block, error) {
 	if gen.Config == nil {
 		return nil, fmt.Errorf("genesis has no chain config")
 	}
@@ -134,7 +153,7 @@ func WriteGenesisBlock(db ethdb.KeyValueStore, gen *genesis.Genesis, stateRoot c
 	rawdb.WriteHeadHeaderHash(batch, block.Hash())
 	rawdb.WriteChainConfig(batch, block.Hash(), chainCfg)
 
-	if err := WritePathDBMetadata(batch, stateRoot, binaryTrie); err != nil {
+	if err := WritePathDBMetadata(batch, stateRoot, binaryTrie, archive); err != nil {
 		return nil, err
 	}
 

@@ -14,16 +14,21 @@ import (
 )
 
 // WriteEOAs writes data-table rows for each account: PlainAccountState,
-// HashedAccounts, AccountChangeSets (block blockNum), AccountsHistory.
+// HashedAccounts, and (in archive mode) AccountChangeSets at blockNum
+// + AccountsHistory.
 //
 // All writes happen in ONE MDBX write transaction. Atomic; on error no
 // partial state is committed.
 //
 // Tables written per EOA:
-//   - PlainAccountState (Address → Account)
-//   - HashedAccounts (keccak(Address) → Account)
-//   - AccountChangeSets (DupSort: BE_u64(block) → AccountBeforeTx{addr, nil})
-//   - AccountsHistory (ShardedKey(addr, u64::MAX) → IntegerList([blockNum]))
+//   - PlainAccountState (Address → Account) — always
+//   - HashedAccounts (keccak(Address) → Account) — always
+//   - AccountChangeSets (DupSort: BE_u64(block) → AccountBeforeTx{addr, nil}) — archive only
+//   - AccountsHistory (ShardedKey(addr, u64::MAX) → IntegerList([blockNum])) — archive only
+//
+// In full mode (archive=false), the two archive-only tables are skipped:
+// at block 0 there's no history to preserve, and a full-mode reth node
+// prunes them once past the pruning window.
 //
 // Accounts are written in input order (caller is responsible for ordering).
 // Uses tx.Put (not cursor.Append) for safety regardless of input ordering.
@@ -32,7 +37,7 @@ import (
 // size for every account written. Pass nil to skip accounting. The
 // accumulator is applied to stats only after the MDBX transaction commits;
 // a write that rolls back leaves stats untouched.
-func WriteEOAs(envs *Envs, accounts []*entitygen.Account, blockNum uint64, stats *generator.Stats) error {
+func WriteEOAs(envs *Envs, accounts []*entitygen.Account, blockNum uint64, archive bool, stats *generator.Stats) error {
 	var localAccountBytes uint64
 	err := envs.Mdbx.Update(func(txn *mdbx.Txn) error {
 		blockKey := beU64(blockNum)
@@ -61,31 +66,33 @@ func WriteEOAs(envs *Envs, accounts []*entitygen.Account, blockNum uint64, stats
 				return fmt.Errorf("HashedAccounts %s: %w", acc.Address.Hex(), err)
 			}
 
-			// 3. AccountChangeSets — DupSort: BE_u64(block) → AccountBeforeTx{addr, nil}
-			// Address is the DupSort SubKey (encoded first in AccountBeforeTx.EncodeCompact).
-			// Info=nil: account had no prior state (genesis creation).
-			abt := iReth.AccountBeforeTx{Address: acc.Address, Info: nil}
-			var abtBuf bytes.Buffer
-			abt.EncodeCompact(&abtBuf)
-			if err := txn.Put(envs.MdbxDBIs["AccountChangeSets"], blockKey[:], abtBuf.Bytes(), 0); err != nil {
-				return fmt.Errorf("AccountChangeSets %s: %w", acc.Address.Hex(), err)
+			if archive {
+				// 3. AccountChangeSets — DupSort: BE_u64(block) → AccountBeforeTx{addr, nil}
+				// Address is the DupSort SubKey (encoded first in AccountBeforeTx.EncodeCompact).
+				// Info=nil: account had no prior state (genesis creation).
+				abt := iReth.AccountBeforeTx{Address: acc.Address, Info: nil}
+				var abtBuf bytes.Buffer
+				abt.EncodeCompact(&abtBuf)
+				if err := txn.Put(envs.MdbxDBIs["AccountChangeSets"], blockKey[:], abtBuf.Bytes(), 0); err != nil {
+					return fmt.Errorf("AccountChangeSets %s: %w", acc.Address.Hex(), err)
+				}
+
+				// 4. AccountsHistory — ShardedKey(addr, u64::MAX) → IntegerList([blockNum])
+				// u64::MAX marks the latest (open) shard; the bitmap contains the block
+				// numbers at which this account was first touched.
+				shardedKey := iReth.ShardedKeyAddress{Address: acc.Address, BlockNumber: ^uint64(0)}
+				var keyBuf bytes.Buffer
+				shardedKey.EncodeKey(&keyBuf)
+				var listBuf bytes.Buffer
+				iReth.EncodeIntegerList(&listBuf, []uint64{blockNum})
+				if err := txn.Put(envs.MdbxDBIs["AccountsHistory"], keyBuf.Bytes(), listBuf.Bytes(), 0); err != nil {
+					return fmt.Errorf("AccountsHistory %s: %w", acc.Address.Hex(), err)
+				}
 			}
 
-			// 4. AccountsHistory — ShardedKey(addr, u64::MAX) → IntegerList([blockNum])
-			// u64::MAX marks the latest (open) shard; the bitmap contains the block
-			// numbers at which this account was first touched.
-			shardedKey := iReth.ShardedKeyAddress{Address: acc.Address, BlockNumber: ^uint64(0)}
-			var keyBuf bytes.Buffer
-			shardedKey.EncodeKey(&keyBuf)
-			var listBuf bytes.Buffer
-			iReth.EncodeIntegerList(&listBuf, []uint64{blockNum})
-			if err := txn.Put(envs.MdbxDBIs["AccountsHistory"], keyBuf.Bytes(), listBuf.Bytes(), 0); err != nil {
-				return fmt.Errorf("AccountsHistory %s: %w", acc.Address.Hex(), err)
-			}
-
-			// All four Puts succeeded — bank the row's bytes locally. The
-			// local accumulator is transferred to stats only if Update
-			// returns nil below.
+			// Plain + Hashed writes always succeed; archive-only writes
+			// inside the if-block fall through to here. Bank the row's
+			// bytes locally; transferred to stats only if Update succeeds.
 			localAccountBytes += uint64(len(accountBytes))
 		}
 		return nil
