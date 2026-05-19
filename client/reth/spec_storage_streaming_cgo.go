@@ -388,21 +388,21 @@ func consumeEntity(
 		}
 		// Drain pre-encoded trie rows into StoragesTrie under the
 		// DupSort main key keccak(address). Worker emitted them in
-		// path-lex order; cursor.AppendDup writes sequentially without
-		// the B-tree-locate cost. Without these rows reth's payload
-		// builder falls back to a linear HashedStorages walk per block.
+		// path-lex order WITHIN each entity, but entities themselves
+		// are processed in PreAlloc index order (not addrHash-sorted),
+		// so AppendDup's "main key >= last key in DB" precondition
+		// fails on cross-entity boundaries (MDBX_EKEYMISMATCH).
+		// Plain Put is correct: the sub-key (path) is encoded inside
+		// the row's first 33 bytes and stays in DupSort order via
+		// MDBX's own dup-set sorting. Without these rows reth's
+		// payload builder falls back to a linear HashedStorages walk
+		// per block.
 		if len(ent.trieRows) > 0 {
-			cur, cerr := txn.OpenCursor(envs.MdbxDBIs["StoragesTrie"])
-			if cerr != nil {
-				return fmt.Errorf("open StoragesTrie cursor %s: %w", ent.addr.Hex(), cerr)
-			}
 			for _, row := range ent.trieRows {
-				if err := cur.Put(ent.addrHash[:], row, mdbx.AppendDup); err != nil {
-					cur.Close()
+				if err := txn.Put(envs.MdbxDBIs["StoragesTrie"], ent.addrHash[:], row, 0); err != nil {
 					return fmt.Errorf("StoragesTrie %s: %w", ent.addr.Hex(), err)
 				}
 			}
-			cur.Close()
 		}
 		return nil
 	})
