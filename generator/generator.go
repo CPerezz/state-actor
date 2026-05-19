@@ -510,7 +510,7 @@ func (g *Generator) generateStreamingBinary() (retStats *Stats, retErr error) {
 	stats.StateRoot = stateRoot
 
 	// Write state root via StateWriter
-	if err := g.writer.SetStateRoot(stateRoot, true); err != nil {
+	if err := g.writer.SetStateRoot(stateRoot, true /* binaryTrie */, g.config.Archive); err != nil {
 		return nil, fmt.Errorf("failed to write snapshot root: %w", err)
 	}
 

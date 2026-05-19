@@ -29,7 +29,7 @@ func TestWriteEOAsRoundtrip(t *testing.T) {
 		accounts[i] = entitygen.GenerateEOA(rng)
 	}
 
-	if err := WriteEOAs(envs, accounts, 0, nil); err != nil {
+	if err := WriteEOAs(envs, accounts, 0, true /* archive */, nil); err != nil {
 		t.Fatalf("WriteEOAs: %v", err)
 	}
 
@@ -115,7 +115,7 @@ func TestWriteEOAsPopulatesStats(t *testing.T) {
 	}
 
 	var stats generator.Stats
-	if err := WriteEOAs(envs, accounts, 0, &stats); err != nil {
+	if err := WriteEOAs(envs, accounts, 0, false /* archive */, &stats); err != nil {
 		t.Fatalf("WriteEOAs: %v", err)
 	}
 

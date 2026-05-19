@@ -99,7 +99,7 @@ func TestRethDbStatsSyntheticEOAs(t *testing.T) {
 	dd, cleanup := e2e.AcquireDatadir(t, "RETH")
 	defer cleanup()
 
-	cfg := generator.Config{DBPath: dd.HostPath, NumAccounts: numAccounts, Seed: 12345}
+	cfg := generator.Config{DBPath: dd.HostPath, NumAccounts: numAccounts, Seed: 12345, Archive: true}
 	stats, err := RunCgo(context.Background(), cfg, Options{})
 	if err != nil {
 		t.Fatalf("RunCgo: %v", err)

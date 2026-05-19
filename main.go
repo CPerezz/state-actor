@@ -56,6 +56,11 @@ var (
 	groupDepth = flag.Int("group-depth", 8, "Binary trie group depth (1-8, default 8). Controls serialization unit size.")
 
 	client = flag.String("client", "geth", "Target Ethereum client: 'geth' (default), 'nethermind', 'besu', or 'reth'.")
+
+	archive = flag.Bool("archive", false, "Configure the generated DB for archive-mode operation.\n"+
+		"  reth: writes StoragesHistory + AccountsHistory + StorageChangeSets + AccountChangeSets at genesis (~80-130 GB at bloatnet scale; full mode skips them).\n"+
+		"  geth: writes PathDB archive-anchor metadata so geth boots cleanly under --gcmode=archive.\n"+
+		"Rejected for besu and nethermind which have no archive code path.")
 )
 
 func main() {
@@ -101,6 +106,19 @@ func main() {
 		}
 	}
 
+	// --archive validation: gate on per-client support. Only geth and
+	// reth have archive code paths; besu/nethermind would silently
+	// ignore. Fail fast at parse time so users don't burn a 30+ min
+	// gen on a flag that wouldn't take effect.
+	if *archive {
+		switch *client {
+		case "geth", "reth":
+			// supported — see client/{geth,reth} writer changes
+		default:
+			log.Fatalf("--archive is only supported on geth and reth; got --client=%s. Re-run without --archive.", *client)
+		}
+	}
+
 	config := generator.Config{
 		DBPath:         *dbPath,
 		NumAccounts:    *accounts,
@@ -116,6 +134,7 @@ func main() {
 		WriteTrieNodes: true, // PathDB requires trie nodes on disk
 		TargetSize:     parsedTargetSize,
 		GroupDepth:     *groupDepth,
+		Archive:        *archive,
 	}
 
 	extraDataBytes := []byte{}
@@ -228,7 +247,7 @@ func main() {
 				log.Printf("Writing genesis block with state root: %s", stats.StateRoot.Hex())
 			}
 			ancientDir := filepath.Join(config.DBPath, "ancient")
-			block, err := geth.WriteGenesisBlock(gen.DB(), genesisConfig, stats.StateRoot, true, ancientDir)
+			block, err := geth.WriteGenesisBlock(gen.DB(), genesisConfig, stats.StateRoot, true /* binaryTrie */, config.Archive, ancientDir)
 			if err != nil {
 				log.Fatalf("Failed to write genesis block: %v", err)
 			}

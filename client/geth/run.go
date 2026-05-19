@@ -60,8 +60,9 @@ func Populate(ctx context.Context, cfg generator.Config, opts Options) (*generat
 	}
 
 	// PathDB / snapshot metadata. Always written so a state-only DB can
-	// boot stock geth without `geth init`.
-	if err := w.SetStateRoot(stateRoot, false); err != nil {
+	// boot stock geth without `geth init`. cfg.Archive controls the
+	// archive-anchor recovery marker — see WritePathDBMetadata.
+	if err := w.SetStateRoot(stateRoot, false /* binaryTrie */, cfg.Archive); err != nil {
 		return nil, fmt.Errorf("client/geth.Populate: set state root: %w", err)
 	}
 
@@ -70,7 +71,7 @@ func Populate(ctx context.Context, cfg generator.Config, opts Options) (*generat
 	// get the default chainspec).
 	g := genesis.OrDefault(cfg.Genesis)
 	ancientDir := filepath.Join(cfg.DBPath, "ancient")
-	if _, err := WriteGenesisBlock(w.DB(), g, stateRoot, false, ancientDir); err != nil {
+	if _, err := WriteGenesisBlock(w.DB(), g, stateRoot, false /* binaryTrie */, cfg.Archive, ancientDir); err != nil {
 		return nil, fmt.Errorf("client/geth.Populate: write genesis block: %w", err)
 	}
 

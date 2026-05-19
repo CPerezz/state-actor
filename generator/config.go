@@ -123,18 +123,24 @@ type Config struct {
 	// streaming consumption by per-client writers).
 	PreAlloc []templates.PreAllocEntity
 
-	// SkipGenesisChangeSets, when true, omits writes to reth's
-	// StorageChangeSets table for block 0. Safe per the runtime audit
-	// at the head of ~/.claude/plans/on-the-meantime-i-proud-karp.md:
-	// block 0 changesets are never consulted by any read path
-	// (overlay revert range starts at anchor_number+1; historical
-	// lookups only seek InChangeset(N) with N>=1). Saves ~33 B per
-	// storage slot on disk on a bloatnet-scale run.
+	// Archive, when true, generates a DB sized for an archive-mode node.
 	//
-	// StoragesHistory is NOT affected by this flag — historical
-	// eth_getStorageAt would silently return zero for state-actor
-	// slots if it were missing.
-	SkipGenesisChangeSets bool
+	// For reth this means writing the four archive-only tables at genesis:
+	// StorageChangeSets, StoragesHistory, AccountChangeSets, AccountsHistory.
+	// A full-mode reth node prunes these after the pruning window; at
+	// block 0 there's no history to preserve, so the default (false)
+	// skips them. Saves ~80-130 GB at bloatnet scale (v6 measured 285 GB
+	// archive vs projected ~200 GB full-mode).
+	//
+	// For geth this means writing PathDB archive-anchor metadata so geth
+	// boots cleanly under --gcmode=archive. Negligible disk delta — the
+	// state-trie content at block 0 is identical between full and archive
+	// mode (no historical state to preserve yet).
+	//
+	// Not supported for besu or nethermind — their writers have no
+	// archive code path. main.go rejects --archive for those clients at
+	// CLI parse time.
+	Archive bool
 }
 
 // Validate materializes PreAlloc into the GenesisAccounts/Code maps

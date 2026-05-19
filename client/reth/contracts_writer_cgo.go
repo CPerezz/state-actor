@@ -28,7 +28,7 @@ import (
 // counts code that actually got written), and StorageBytes (sum of
 // PlainStorageState compact-encoded entries). Increments are applied
 // only after the MDBX transaction commits.
-func WriteContracts(envs *Envs, contracts []*entitygen.Account, blockNum uint64, skipChangeSets bool, stats *generator.Stats) error {
+func WriteContracts(envs *Envs, contracts []*entitygen.Account, blockNum uint64, archive bool, stats *generator.Stats) error {
 	var (
 		localAccountBytes uint64
 		localStorageBytes uint64
@@ -89,24 +89,26 @@ func WriteContracts(envs *Envs, contracts []*entitygen.Account, blockNum uint64,
 			if err := txn.Put(envs.MdbxDBIs["HashedAccounts"], contract.AddrHash[:], accountBytes, 0); err != nil {
 				return fmt.Errorf("HashedAccounts %s: %w", contract.Address.Hex(), err)
 			}
-			// AccountChangeSets: DupSort BE_u64(block) → AccountBeforeTx{addr, nil}
-			abt := iReth.AccountBeforeTx{Address: contract.Address, Info: nil}
-			var abtBuf bytes.Buffer
-			abt.EncodeCompact(&abtBuf)
-			if err := txn.Put(envs.MdbxDBIs["AccountChangeSets"], blockKey[:], abtBuf.Bytes(), 0); err != nil {
-				return fmt.Errorf("AccountChangeSets %s: %w", contract.Address.Hex(), err)
-			}
-			// AccountsHistory: ShardedKey(addr, u64::MAX) → IntegerList([blockNum])
-			shardedKey := iReth.ShardedKeyAddress{Address: contract.Address, BlockNumber: ^uint64(0)}
-			var keyBuf bytes.Buffer
-			shardedKey.EncodeKey(&keyBuf)
-			var listBuf bytes.Buffer
-			iReth.EncodeIntegerList(&listBuf, []uint64{blockNum})
-			if err := txn.Put(envs.MdbxDBIs["AccountsHistory"], keyBuf.Bytes(), listBuf.Bytes(), 0); err != nil {
-				return fmt.Errorf("AccountsHistory %s: %w", contract.Address.Hex(), err)
+			if archive {
+				// AccountChangeSets: DupSort BE_u64(block) → AccountBeforeTx{addr, nil}
+				abt := iReth.AccountBeforeTx{Address: contract.Address, Info: nil}
+				var abtBuf bytes.Buffer
+				abt.EncodeCompact(&abtBuf)
+				if err := txn.Put(envs.MdbxDBIs["AccountChangeSets"], blockKey[:], abtBuf.Bytes(), 0); err != nil {
+					return fmt.Errorf("AccountChangeSets %s: %w", contract.Address.Hex(), err)
+				}
+				// AccountsHistory: ShardedKey(addr, u64::MAX) → IntegerList([blockNum])
+				shardedKey := iReth.ShardedKeyAddress{Address: contract.Address, BlockNumber: ^uint64(0)}
+				var keyBuf bytes.Buffer
+				shardedKey.EncodeKey(&keyBuf)
+				var listBuf bytes.Buffer
+				iReth.EncodeIntegerList(&listBuf, []uint64{blockNum})
+				if err := txn.Put(envs.MdbxDBIs["AccountsHistory"], keyBuf.Bytes(), listBuf.Bytes(), 0); err != nil {
+					return fmt.Errorf("AccountsHistory %s: %w", contract.Address.Hex(), err)
+				}
 			}
 
-			storBytes, err := WriteContractStorage(txn, envs.MdbxDBIs, contract, blockNum, skipChangeSets)
+			storBytes, err := WriteContractStorage(txn, envs.MdbxDBIs, contract, blockNum, archive)
 			if err != nil {
 				return fmt.Errorf("WriteContracts: WriteContractStorage %s: %w", contract.Address.Hex(), err)
 			}

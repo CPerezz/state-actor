@@ -46,8 +46,8 @@ const chunkChanCap = 4
 type slotPrepared struct {
 	plainEntry  []byte // PlainStorageState value (encoded rawKey || value)
 	hashedEntry []byte // HashedStorages value (encoded keyHash || value)
-	changeEntry []byte // StorageChangeSets value (encoded rawKey || 0); nil if SkipGenesisChangeSets
-	sskKey      []byte // StoragesHistory key (StorageShardedKey-encoded)
+	changeEntry []byte // StorageChangeSets value (encoded rawKey || 0); nil in full mode
+	sskKey      []byte // StoragesHistory key (StorageShardedKey-encoded); nil in full mode
 }
 
 // preparedEntity carries everything the consumer needs to commit one
@@ -249,7 +249,7 @@ func drainAndEncodeEntity(
 		return drainCtx.Err()
 	}
 
-	skipChangeSets := cfg.SkipGenesisChangeSets
+	archive := cfg.Archive
 	hb := newRethStorageHashBuilder()
 	pending := make([]slotPrepared, 0, chunkSlots)
 
@@ -281,21 +281,23 @@ func drainAndEncodeEntity(
 		hashedEntry.EncodeCompact(&hashedBuf)
 		prep.hashedEntry = hashedBuf.Bytes()
 
-		if !skipChangeSets {
+		if archive {
 			changeEntry := iReth.StorageEntry{Key: rawKey, Value: uint256.NewInt(0)}
 			var changeBuf bytes.Buffer
 			changeEntry.EncodeCompact(&changeBuf)
 			prep.changeEntry = changeBuf.Bytes()
-		}
 
-		ssk := iReth.StorageShardedKey{
-			Address:     addr,
-			StorageKey:  rawKey,
-			BlockNumber: ^uint64(0),
+			// StoragesHistory key is only built in archive mode; in full
+			// mode the consumer skips the Put entirely.
+			ssk := iReth.StorageShardedKey{
+				Address:     addr,
+				StorageKey:  rawKey,
+				BlockNumber: ^uint64(0),
+			}
+			var sskBuf bytes.Buffer
+			ssk.EncodeKey(&sskBuf)
+			prep.sskKey = sskBuf.Bytes()
 		}
-		var sskBuf bytes.Buffer
-		ssk.EncodeKey(&sskBuf)
-		prep.sskKey = sskBuf.Bytes()
 
 		pending = append(pending, prep)
 		if len(pending) >= chunkSlots {
@@ -346,12 +348,16 @@ func consumeEntity(
 					return fmt.Errorf("HashedStorages %s: %w", ent.addrHash.Hex(), err)
 				}
 				if prep.changeEntry != nil {
+					// Archive mode: write the StorageChangeSets row.
 					if err := txn.Put(envs.MdbxDBIs["StorageChangeSets"], ent.blockKey, prep.changeEntry, 0); err != nil {
 						return fmt.Errorf("StorageChangeSets %s: %w", ent.addr.Hex(), err)
 					}
 				}
-				if err := txn.Put(envs.MdbxDBIs["StoragesHistory"], prep.sskKey, ent.historyVal, 0); err != nil {
-					return fmt.Errorf("StoragesHistory %s: %w", ent.addr.Hex(), err)
+				if prep.sskKey != nil {
+					// Archive mode: write the StoragesHistory row.
+					if err := txn.Put(envs.MdbxDBIs["StoragesHistory"], prep.sskKey, ent.historyVal, 0); err != nil {
+						return fmt.Errorf("StoragesHistory %s: %w", ent.addr.Hex(), err)
+					}
 				}
 				localBytes += uint64(len(prep.plainEntry))
 			}

@@ -51,7 +51,10 @@ type Writer interface {
 	// binaryTrie selects the on-disk namespace for clients whose pathdb wraps
 	// its diskdb under a prefix in bintrie mode (geth uses "v"); backends that
 	// do not care may ignore the flag.
-	SetStateRoot(root common.Hash, binaryTrie bool) error
+	// archive plumbs the --archive CLI flag; backends with no archive code
+	// path (besu, nethermind) ignore it. Geth writes an extra
+	// SnapshotRecoveryNumber=0 anchor marker when set.
+	SetStateRoot(root common.Hash, binaryTrie bool, archive bool) error
 
 	// Flush commits all pending writes and tears down the async pipeline.
 	// Shutdown-once: do not call mid-run.
