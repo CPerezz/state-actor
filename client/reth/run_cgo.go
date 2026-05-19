@@ -3,6 +3,7 @@
 package reth
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
@@ -10,12 +11,14 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/erigontech/mdbx-go/mdbx"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/rlp"
 
 	"github.com/nerolation/state-actor/generator"
 	"github.com/nerolation/state-actor/genesis"
 	"github.com/nerolation/state-actor/internal/entitygen"
+	iReth "github.com/nerolation/state-actor/internal/reth"
 	"github.com/nerolation/state-actor/internal/streamsort"
 )
 
@@ -192,9 +195,34 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 	}
 
 	if accountsCreated+contractsCreated > 0 {
-		root, err := ComputeStateRootStreaming(sorter.Iterate)
+		// Wrap state-root computation in an MDBX write txn so the
+		// per-branch emissions populate AccountsTrie. Without this,
+		// reth's payload-builder state-root computation falls back to a
+		// linear HashedAccounts walk on every block (project memory:
+		// project_reth_trie_cache.md). Emissions arrive in path-lex
+		// order, so cursor.Append takes the sequential-write fast path.
+		var root common.Hash
+		err := envs.Mdbx.Update(func(txn *mdbx.Txn) error {
+			cur, cerr := txn.OpenCursor(envs.MdbxDBIs["AccountsTrie"])
+			if cerr != nil {
+				return fmt.Errorf("open AccountsTrie cursor: %w", cerr)
+			}
+			defer cur.Close()
+			emit := func(path iReth.StoredNibbles, node iReth.BranchNodeCompact) error {
+				var keyBuf, valBuf bytes.Buffer
+				path.EncodeKey(&keyBuf)
+				node.EncodeCompact(&valBuf)
+				return cur.Put(keyBuf.Bytes(), valBuf.Bytes(), mdbx.Append)
+			}
+			r, rerr := ComputeStateRootStreaming(sorter.Iterate, emit)
+			if rerr != nil {
+				return rerr
+			}
+			root = r
+			return nil
+		})
 		if err != nil {
-			return nil, fmt.Errorf("RunCgo: ComputeStateRootStreaming: %w", err)
+			return nil, fmt.Errorf("RunCgo: ComputeStateRootStreaming + AccountsTrie emit: %w", err)
 		}
 		stateRoot = root
 	}

@@ -108,7 +108,7 @@ func TestE2ESuite(t *testing.T) {
 	// addresses — required for the cross-client genesis-root invariant
 	// (besu refuses to boot without them; geth/neth/reth tolerate but
 	// would compute a different state root than besu without them).
-	oracle.AddPragueSystemContracts(&cfg)
+	oracle.AddCanonicalSystemContracts(&cfg)
 
 	if _, err := Populate(context.Background(), cfg, Options{}); err != nil {
 		t.Fatalf("Populate: %v", err)

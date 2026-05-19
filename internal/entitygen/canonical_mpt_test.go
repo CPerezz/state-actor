@@ -1,4 +1,4 @@
-package entitygen
+package entitygen_test
 
 import (
 	"bytes"
@@ -13,16 +13,19 @@ import (
 	gethrlp "github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/trie"
 	"github.com/holiman/uint256"
+
+	. "github.com/nerolation/state-actor/internal/entitygen"
+	"github.com/nerolation/state-actor/internal/oracle"
 )
 
 // TestCanonicalOsakaMPTRoot pins the canonical hexary-MPT state root for
-// the e2e config — entitygen synthetic entities PLUS the 4 EIP system
-// contracts (BeaconRoots/HistoryStorage/WithdrawalQueue/ConsolidationQueue)
-// at their canonical addresses. Every MPT-mode client adapter
-// (geth, nethermind, besu, reth) MUST match — same RNG draws + same
-// system contracts → same state → same root, regardless of on-disk node
-// layout. Drift here requires a coordinated update across all 4 client
-// adapter golden tests.
+// the e2e config — entitygen synthetic entities PLUS the 5 canonical
+// system contracts (BeaconRoots, HistoryStorage, WithdrawalQueue,
+// ConsolidationQueue, Beacon-chain DepositContract) at their canonical
+// addresses. Every MPT-mode client adapter (geth, nethermind, besu, reth)
+// MUST match — same RNG draws + same system contracts → same state →
+// same root, regardless of on-disk node layout. Drift here requires a
+// coordinated update across all 4 client adapter golden tests.
 //
 // The hash is exported as entitygen.CanonicalOsakaMPTRoot so all 4
 // client goldens + this test pin against a single source of truth.
@@ -98,12 +101,15 @@ func TestCanonicalOsakaMPTRoot(t *testing.T) {
 		accts = append(accts, acctEntry{c.AddrHash, buf})
 	}
 
-	// 4 EIP system contracts at canonical addresses — match
-	// oracle.AddPragueSystemContracts (Nonce=1, Balance=0,
+	// 5 canonical system contracts at canonical addresses — match
+	// oracle.AddCanonicalSystemContracts (Nonce=1, Balance=0,
 	// Root=EmptyRootHash, CodeHash=keccak256(code)). The 4 per-client
-	// golden tests also call AddPragueSystemContracts before computing
+	// golden tests also call AddCanonicalSystemContracts before computing
 	// state root, so this canonical hash matches what all 4 writers
-	// produce for the canonical config.
+	// produce for the canonical config. The DepositContract is sourced
+	// via the oracle package (Prysm-vendored bytecode) so the two
+	// packages don't drift — wire it in via a tiny indirection because
+	// internal/oracle imports internal/entitygen (cyclic if reversed).
 	sysContracts := []struct {
 		addr common.Address
 		code []byte
@@ -112,6 +118,7 @@ func TestCanonicalOsakaMPTRoot(t *testing.T) {
 		{params.HistoryStorageAddress, params.HistoryStorageCode},
 		{params.WithdrawalQueueAddress, params.WithdrawalQueueCode},
 		{params.ConsolidationQueueAddress, params.ConsolidationQueueCode},
+		{oracle.DepositContractAddress, oracle.DepositContractCode()},
 	}
 	for _, sc := range sysContracts {
 		sa := &types.StateAccount{

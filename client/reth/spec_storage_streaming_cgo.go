@@ -54,7 +54,11 @@ type slotPrepared struct {
 // entity's storage to MDBX. The worker fills chunkCh in keccak-
 // ascending order, then sends the computed root via rootCh and closes
 // chunkCh. errCh carries any IterateRoot failure surfacing on the
-// worker side.
+// worker side. trieRows are pre-encoded StoragesTrie DupSort values
+// (each entry = SubKey(33 bytes) || BranchNodeCompact bytes); the
+// consumer writes them under the DupSort main key ent.addrHash after
+// the per-slot rows land. Emitted in path-lex order so cursor.AppendDup
+// takes the fast path.
 type preparedEntity struct {
 	idx        int
 	addr       common.Address
@@ -64,6 +68,7 @@ type preparedEntity struct {
 	chunkCh    chan []slotPrepared
 	rootCh     chan common.Hash
 	errCh      chan error
+	trieRows   [][]byte
 }
 
 // streamSpecStorage writes each PreAlloc entity's Storage into reth's
@@ -250,7 +255,23 @@ func drainAndEncodeEntity(
 	}
 
 	archive := cfg.Archive
-	hb := newRethStorageHashBuilder()
+
+	// Per-entity trie emissions: HashBuilder emits in path-lex order as
+	// it walks the sorted slots. Worker pre-encodes each emission into a
+	// StorageTrieEntry value (SubKey||BNC) and accumulates into
+	// trieRows. The consumer drains trieRows into StoragesTrie within
+	// the same per-entity Mdbx.Update txn AFTER the slot rows land —
+	// keeping the cursor.AppendDup fast path intact for both sides.
+	// Memory per entity: O(trie nodes) ≈ small multiple of slot count.
+	trieRows := make([][]byte, 0, 64)
+	emit := func(path iReth.StoredNibbles, node iReth.BranchNodeCompact) error {
+		var valBuf bytes.Buffer
+		entry := iReth.StorageTrieEntry{SubKey: path, Node: node}
+		entry.EncodeCompact(&valBuf)
+		trieRows = append(trieRows, valBuf.Bytes())
+		return nil
+	}
+	hb := newRethStorageHashBuilderWithEmit(emit)
 	pending := make([]slotPrepared, 0, chunkSlots)
 
 	flushPending := func() error {
@@ -320,6 +341,9 @@ func drainAndEncodeEntity(
 		close(ent.chunkCh)
 		return nil
 	}
+	// Stash trie emissions on the preparedEntity BEFORE closing chunkCh
+	// so the consumer sees them when the for-range loop exits.
+	ent.trieRows = trieRows
 	close(ent.chunkCh)
 	ent.rootCh <- root
 	return nil
@@ -362,6 +386,24 @@ func consumeEntity(
 				localBytes += uint64(len(prep.plainEntry))
 			}
 		}
+		// Drain pre-encoded trie rows into StoragesTrie under the
+		// DupSort main key keccak(address). Worker emitted them in
+		// path-lex order; cursor.AppendDup writes sequentially without
+		// the B-tree-locate cost. Without these rows reth's payload
+		// builder falls back to a linear HashedStorages walk per block.
+		if len(ent.trieRows) > 0 {
+			cur, cerr := txn.OpenCursor(envs.MdbxDBIs["StoragesTrie"])
+			if cerr != nil {
+				return fmt.Errorf("open StoragesTrie cursor %s: %w", ent.addr.Hex(), cerr)
+			}
+			for _, row := range ent.trieRows {
+				if err := cur.Put(ent.addrHash[:], row, mdbx.AppendDup); err != nil {
+					cur.Close()
+					return fmt.Errorf("StoragesTrie %s: %w", ent.addr.Hex(), err)
+				}
+			}
+			cur.Close()
+		}
 		return nil
 	})
 	if err != nil {
@@ -380,6 +422,16 @@ func newRethStorageHashBuilder() *rethStorageHashBuilder {
 		hb: iReth.NewHashBuilder(func(_ iReth.StoredNibbles, _ iReth.BranchNodeCompact) error {
 			return nil
 		}),
+	}
+}
+
+// newRethStorageHashBuilderWithEmit returns a HashBuilder configured for
+// full-emissions mode: every branch with RLP ≥ 32 bytes triggers emit.
+// state-actor's spec-storage workers use this so each per-entity storage
+// trie populates StoragesTrie alongside the per-slot data rows.
+func newRethStorageHashBuilderWithEmit(emit iReth.NodeEmitter) *rethStorageHashBuilder {
+	return &rethStorageHashBuilder{
+		hb: iReth.NewHashBuilderFullEmissions(emit),
 	}
 }
 

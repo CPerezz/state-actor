@@ -17,9 +17,9 @@ import (
 )
 
 func TestComputeStateRootEmpty(t *testing.T) {
-	got, err := ComputeStateRoot(nil)
+	got, err := ComputeStateRoot(nil, nil)
 	if err != nil {
-		t.Fatalf("ComputeStateRoot(nil): %v", err)
+		t.Fatalf("ComputeStateRoot(nil, nil): %v", err)
 	}
 	want := common.HexToHash("0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421")
 	if got != want {
@@ -29,7 +29,7 @@ func TestComputeStateRootEmpty(t *testing.T) {
 
 func TestComputeStateRootSingleEOA(t *testing.T) {
 	acc := makeTestEOA(t, common.HexToAddress("0xaabb"), 100, 1)
-	got, err := ComputeStateRoot([]*entitygen.Account{acc})
+	got, err := ComputeStateRoot([]*entitygen.Account{acc}, nil)
 	if err != nil {
 		t.Fatalf("ComputeStateRoot: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestComputeStateRootManyEOAs(t *testing.T) {
 		accounts[i] = entitygen.GenerateEOA(rng)
 	}
 
-	got, err := ComputeStateRoot(accounts)
+	got, err := ComputeStateRoot(accounts, nil)
 	if err != nil {
 		t.Fatalf("ComputeStateRoot: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestComputeStorageRootSingleSlot(t *testing.T) {
 	val := common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
 	slots := []entitygen.StorageSlot{{Key: key, Value: val}}
 
-	got, err := computeStorageRoot(slots)
+	got, err := computeStorageRoot(slots, nil)
 	if err != nil {
 		t.Fatalf("computeStorageRoot: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestComputeStorageRootMultipleSlots(t *testing.T) {
 		{Key: common.HexToHash("0x05"), Value: common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000080")},
 	}
 
-	got, err := computeStorageRoot(slots)
+	got, err := computeStorageRoot(slots, nil)
 	if err != nil {
 		t.Fatalf("computeStorageRoot: %v", err)
 	}
@@ -215,7 +215,7 @@ func TestComputeStorageRootGeneratedContracts(t *testing.T) {
 		codeHash := crypto.Keccak256Hash(c.Code)
 		c.StateAccount.CodeHash = codeHash.Bytes()
 
-		got, err := computeStorageRoot(c.Storage)
+		got, err := computeStorageRoot(c.Storage, nil)
 		if err != nil {
 			t.Fatalf("contract %d: computeStorageRoot: %v", i, err)
 		}
@@ -249,7 +249,7 @@ func TestComputeStateRootWithContracts(t *testing.T) {
 	// Generate contracts and compute storage root inline.
 	for i := 0; i < nContracts; i++ {
 		c := entitygen.GenerateContract(rng, codeSize, slotCount)
-		storageRoot, err := computeStorageRoot(c.Storage)
+		storageRoot, err := computeStorageRoot(c.Storage, nil)
 		if err != nil {
 			t.Fatalf("contract %d: computeStorageRoot: %v", i, err)
 		}
@@ -260,7 +260,7 @@ func TestComputeStateRootWithContracts(t *testing.T) {
 	}
 
 	// Our implementation.
-	got, err := ComputeStateRoot(accounts)
+	got, err := ComputeStateRoot(accounts, nil)
 	if err != nil {
 		t.Fatalf("ComputeStateRoot: %v", err)
 	}
@@ -296,7 +296,7 @@ func TestComputeStateRootStreaming_MatchesLegacy(t *testing.T) {
 		accounts[i] = entitygen.GenerateEOA(rng)
 	}
 
-	legacyRoot, err := ComputeStateRoot(accounts)
+	legacyRoot, err := ComputeStateRoot(accounts, nil)
 	if err != nil {
 		t.Fatalf("ComputeStateRoot: %v", err)
 	}
@@ -314,7 +314,7 @@ func TestComputeStateRootStreaming_MatchesLegacy(t *testing.T) {
 			}
 		}
 		return nil
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("ComputeStateRootStreaming: %v", err)
 	}
@@ -330,7 +330,7 @@ func TestComputeStateRootStreaming_MatchesLegacy(t *testing.T) {
 func TestComputeStateRootStreaming_Empty(t *testing.T) {
 	got, err := ComputeStateRootStreaming(func(yield func(addrHash, accountRLP []byte) error) error {
 		return nil
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("ComputeStateRootStreaming: %v", err)
 	}
@@ -348,7 +348,7 @@ func TestComputeStateRootStreaming_IterErrorPropagates(t *testing.T) {
 	sentinel := errors.New("iter sentinel")
 	_, err := ComputeStateRootStreaming(func(yield func(addrHash, accountRLP []byte) error) error {
 		return sentinel
-	})
+	}, nil)
 	if err == nil {
 		t.Fatalf("expected error, got nil")
 	}
