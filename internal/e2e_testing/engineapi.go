@@ -3,6 +3,9 @@ package e2e_testing
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -43,8 +46,11 @@ import (
 //	        Osaka chains use V4 newPayload which covers [Prague, Amsterdam).
 //	        getPayloadV5 covers [Osaka, Amsterdam) — V4 stops at Osaka.
 //
-// JWT is NOT implemented. Tests boot the EL with --engine-jwt-disabled
-// (besu) or equivalent. Production engine API setups require JWT auth.
+// JWT is supported: set JWTSecret to the raw 32-byte HMAC key
+// (parsed from the 64-hex-char file the EL is configured against).
+// When non-empty, every callEngine builds a fresh HS256 token with
+// iat=now and attaches it as `Authorization: Bearer <token>`. When
+// empty, no auth header is set (use with --engine-jwt-disabled).
 type EngineDriver struct {
 	// EngineURL is the EL's engine-RPC endpoint, e.g. http://<host>:8551.
 	EngineURL string
@@ -66,6 +72,13 @@ type EngineDriver struct {
 	// Prague-style methods (back-compat), but new callers should use
 	// the typed constants to avoid the silent-default footgun.
 	Fork Fork
+
+	// JWTSecret is the raw 32-byte HMAC-SHA256 key the EL was booted
+	// with via --authrpc.jwtsecret (reth) or equivalent. When non-empty,
+	// every engine API call signs a fresh JWT (iat=now) and sets
+	// Authorization: Bearer. Empty disables JWT for ELs that boot with
+	// --engine-jwt-disabled (besu, nethermind).
+	JWTSecret []byte
 
 	// httpClient is lazily created with a 30s timeout on first call.
 	httpClient *http.Client
@@ -254,6 +267,34 @@ func (d *EngineDriver) blockTime() time.Duration {
 	return d.BlockTime
 }
 
+// engineJWT builds an HS256-signed engine-API token with iat=now.
+//
+// The engine-API spec (https://github.com/ethereum/execution-apis/blob/
+// main/src/engine/authentication.md) requires:
+//   - alg: HS256, typ: JWT (the only mandatory header claims)
+//   - iat: issued-at unix timestamp, within ±60 s of the EL's clock
+//   - secret: the raw 32-byte HMAC-SHA256 key (NOT hex-decoded inside
+//     the signer — the caller is responsible for parsing the 64-hex-
+//     char file the EL was configured against)
+//
+// Other JWT claims (exp, nbf, etc.) are not required and not set —
+// keeping the token small minimises wire overhead per engine call.
+func engineJWT(secret []byte) (string, error) {
+	header := []byte(`{"alg":"HS256","typ":"JWT"}`)
+	payload, err := json.Marshal(map[string]any{"iat": time.Now().Unix()})
+	if err != nil {
+		return "", err
+	}
+	enc := base64.RawURLEncoding
+	headerB64 := enc.EncodeToString(header)
+	payloadB64 := enc.EncodeToString(payload)
+	signingInput := headerB64 + "." + payloadB64
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte(signingInput))
+	sig := mac.Sum(nil)
+	return signingInput + "." + enc.EncodeToString(sig), nil
+}
+
 func (d *EngineDriver) ensureHTTPClient() {
 	if d.httpClient == nil {
 		d.httpClient = &http.Client{Timeout: 30 * time.Second}
@@ -278,6 +319,19 @@ func (d *EngineDriver) callEngine(ctx context.Context, method string, params []a
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+
+	// Engine-API JWT auth: when the EL is booted with --authrpc.jwtsecret
+	// (reth requires this), every engine call must carry an HS256 JWT
+	// signed with the raw secret. iat must be within ±60 s of the EL's
+	// clock per the spec — generate fresh per call so we never edge out
+	// of tolerance on slow consumers.
+	if len(d.JWTSecret) > 0 {
+		tok, terr := engineJWT(d.JWTSecret)
+		if terr != nil {
+			return nil, fmt.Errorf("engine jwt: %w", terr)
+		}
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
 
 	resp, err := d.httpClient.Do(req)
 	if err != nil {
