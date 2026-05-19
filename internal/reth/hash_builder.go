@@ -386,21 +386,44 @@ func (b *HashBuilder) pushBranchNode(current []byte, length int) {
 
 	// A branch is hashed (gets its own on-disk row) iff its RLP encoding is
 	// ≥ 32 bytes, which is exactly what rlpNodeFromRLP signals by returning
-	// the 33-byte (0xa0 || hash) form. In fullEmissions mode (state-actor
-	// genesis), we emit unconditionally for hashed branches; in default
-	// mode we preserve alloy_trie semantics (emit only when child masks
-	// are non-zero).
+	// the 33-byte (0xa0 || hash) form.
 	isHashed := len(rlpNode) == 33 && rlpNode[0] == 0xa0
-	storeFn := treeMask != 0 || hashMask != 0
-	if b.fullEmissions && isHashed {
-		storeFn = true
-	}
-	if storeFn {
+
+	// Two-gate decision, mirroring alloy_trie::HashBuilder::store_branch_node
+	// (hash_builder/mod.rs:429-457):
+	//
+	//   - storeInDbTrie: Rust's `store_in_db_trie` — true iff this branch
+	//     has child rows or hashed children of its own. This is the gate
+	//     that controls the PARENT's tree_mask write below; it's also the
+	//     condition under which alloy_trie's structural invariant
+	//     `tree_mask ⊆ state_mask` holds by construction (the prior
+	//     update()-iteration that set state_masks[parentIdx] with this
+	//     same nibble also serves as the precondition for setting
+	//     tree_masks[parentIdx]). Pure-leaf builds never satisfy this gate
+	//     (tree/hash masks stay 0), so the parent-tree-mask write never
+	//     fires — invariant holds vacuously.
+	//
+	//   - shouldEmit: state-actor's genesis full-emissions opt-in. When
+	//     fullEmissions is set we ALSO emit any hashed branch (RLP ≥ 32)
+	//     so the on-disk AccountsTrie/StoragesTrie tables are populated
+	//     for reth's payload-builder cache. This is purely additive on
+	//     the emission count — it MUST NOT widen the parent-mask write
+	//     gate, otherwise tree_mask bits leak across iterations and
+	//     violate the invariant.
+	storeInDbTrie := treeMask != 0 || hashMask != 0
+	shouldEmit := storeInDbTrie || (b.fullEmissions && isHashed)
+
+	if storeInDbTrie {
+		// Parent-tree-mask write — gated on Rust's structural condition
+		// only. This is what keeps tree_mask ⊆ state_mask invariant in
+		// emitted BranchNodeCompact rows.
 		if length > 0 {
 			parentIdx := length - 1
 			b.treeMasks[parentIdx] |= nibbleMask(current[parentIdx])
 		}
+	}
 
+	if shouldEmit {
 		// Collect the hashes for hashed children.
 		var hashes []common.Hash
 		childIdx := 0
@@ -452,6 +475,16 @@ func (b *HashBuilder) computeRootFromRlpNode(node []byte) common.Hash {
 
 // updateMasks clears the hash_mask bit for the current position and propagates
 // tree_mask if needed. Called before wrapping a node in an extension.
+//
+// The tree-mask propagation is structurally gated on state_mask having the
+// same bit set (`b.stateMasks[lenFrom-1] & flag != 0`). Mirrors the precise
+// invariant that holds in alloy_trie by construction: a tree-mask bit only
+// makes sense at a slot where the parent branch actually has a child. The
+// gate prevents stale tree-mask bits — set by deeper-branch processing under
+// fullEmissions opt-in — from leaking into shallower-depth tree_masks
+// without a matching state_mask presence, which would violate the
+// `tree_mask ⊆ state_mask` invariant that reth's `BranchNodeCompact::new`
+// asserts (alloy-trie/src/nodes/branch.rs:298).
 func (b *HashBuilder) updateMasks(current []byte, lenFrom int) {
 	if lenFrom > 0 {
 		flag := nibbleMask(current[lenFrom-1])
@@ -459,7 +492,8 @@ func (b *HashBuilder) updateMasks(current []byte, lenFrom int) {
 			b.hashMasks[lenFrom-1] &^= flag
 		}
 		if len(current)-1 < len(b.treeMasks) && b.treeMasks[len(current)-1] != 0 {
-			if lenFrom-1 < len(b.treeMasks) {
+			if lenFrom-1 < len(b.treeMasks) && lenFrom-1 < len(b.stateMasks) &&
+				b.stateMasks[lenFrom-1]&flag != 0 {
 				b.treeMasks[lenFrom-1] |= flag
 			}
 		}

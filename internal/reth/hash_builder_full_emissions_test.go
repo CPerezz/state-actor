@@ -129,4 +129,85 @@ func TestHashBuilderFullEmissions_PathsInLexicographicOrder(t *testing.T) {
 	}
 }
 
+// TestHashBuilderFullEmissions_TreeMaskSubsetOfStateMask is the
+// deterministic regression test for the bloatnet-scale BNC mask invariant
+// violation that bench v8 surfaced. With a 32-leaf fixture engineered to
+// produce two levels of hashed branches, every emitted BranchNodeCompact
+// must satisfy reth's structural invariant `tree_mask ⊆ state_mask` AND
+// `hash_mask ⊆ state_mask` (the same condition alloy_trie's
+// `BranchNodeCompact::new` asserts at branch.rs:298).
+//
+// The 16-leaf test above doesn't trigger the violation because all leaves
+// fan out at depth 0 — there are no level-2 hashed branches to propagate
+// stale mask bits upward. This 32-leaf fixture engineers exactly that
+// structure:
+//   - key[0] = (i / 4) << 4   → 8 distinct top-nibble groups
+//   - key[1] = (i % 4) << 4   → 4 sub-branches per group
+// resulting in a branch at depth 0 (8 children) and 8 branches at depth 1
+// (4 children each). With 32-byte values, every leaf+branch RLP exceeds 32
+// bytes, so every branch is hashed — exactly the case where the old
+// conflated `storeFn` gate would have leaked tree-mask bits across
+// iterations.
+func TestHashBuilderFullEmissions_TreeMaskSubsetOfStateMask(t *testing.T) {
+	leaves := make([]struct {
+		key   []byte
+		value []byte
+	}, 0, 32)
+	for i := 0; i < 32; i++ {
+		key := make([]byte, 32)
+		key[0] = byte((i / 4) << 4)
+		key[1] = byte((i % 4) << 4)
+		for j := 2; j < 32; j++ {
+			key[j] = byte(0x10 + i + j)
+		}
+		val := make([]byte, 32)
+		for j := range val {
+			val[j] = byte(0xa0 + i + j)
+		}
+		leaves = append(leaves, struct {
+			key   []byte
+			value []byte
+		}{key: key, value: val})
+	}
+
+	var emissions []struct {
+		path StoredNibbles
+		node BranchNodeCompact
+	}
+	emit := func(path StoredNibbles, node BranchNodeCompact) error {
+		emissions = append(emissions, struct {
+			path StoredNibbles
+			node BranchNodeCompact
+		}{path: path, node: node})
+		return nil
+	}
+
+	hb := NewHashBuilderFullEmissions(emit)
+	for _, l := range leaves {
+		nibbles := unpackNibbles(l.key)
+		if err := hb.AddLeaf(nibbles, l.value); err != nil {
+			t.Fatalf("AddLeaf: %v", err)
+		}
+	}
+	hb.Root()
+
+	if len(emissions) < 2 {
+		t.Fatalf("expected ≥ 2 emissions (root + at least one sub-branch), got %d", len(emissions))
+	}
+
+	// Per-emission structural invariants. Violation here = the
+	// gate-split fix in pushBranchNode has regressed and stale tree/hash
+	// mask bits are leaking past the state_mask membership check.
+	for i, e := range emissions {
+		if leftover := e.node.TreeMask & ^e.node.StateMask; leftover != 0 {
+			t.Errorf("emission[%d] (path Length=%d) tree_mask has bits not in state_mask: state=0x%04x tree=0x%04x leftover=0x%04x",
+				i, e.path.Length, e.node.StateMask, e.node.TreeMask, leftover)
+		}
+		if leftover := e.node.HashMask & ^e.node.StateMask; leftover != 0 {
+			t.Errorf("emission[%d] (path Length=%d) hash_mask has bits not in state_mask: state=0x%04x hash=0x%04x leftover=0x%04x",
+				i, e.path.Length, e.node.StateMask, e.node.HashMask, leftover)
+		}
+	}
+}
+
 var _ = common.Hash{} // keep import alive if pruned
