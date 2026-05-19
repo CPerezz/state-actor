@@ -47,8 +47,28 @@ func WriteContracts(envs *Envs, contracts []*entitygen.Account, blockNum uint64,
 
 			var storageRoot common.Hash
 			if len(contract.Storage) > 0 {
+				// Per-contract StoragesTrie emit: writes the intermediate
+				// branch-node cache reth's payload builder reads during
+				// state-root computation. Keyed under contract.AddrHash as
+				// the DupSort main key; SubKey + BNC are co-encoded into
+				// the value via StorageTrieEntry. Emissions arrive in
+				// path-lex order — cursor.PutAppendDup takes the fast
+				// path. See project_reth_trie_cache.md for the motivation.
+				contractAddrHash := contract.AddrHash
+				cur, cerr := txn.OpenCursor(envs.MdbxDBIs["StoragesTrie"])
+				if cerr != nil {
+					return fmt.Errorf("WriteContracts: open StoragesTrie cursor %s: %w", contract.Address.Hex(), cerr)
+				}
+				emit := func(path iReth.StoredNibbles, node iReth.BranchNodeCompact) error {
+					var valBuf bytes.Buffer
+					entry := iReth.StorageTrieEntry{SubKey: path, Node: node}
+					entry.EncodeCompact(&valBuf)
+					// DupSort: main key = keccak(address); value = SubKey||BNC.
+					return cur.Put(contractAddrHash[:], valBuf.Bytes(), mdbx.AppendDup)
+				}
 				var err error
-				storageRoot, err = computeStorageRoot(contract.Storage)
+				storageRoot, err = computeStorageRoot(contract.Storage, emit)
+				cur.Close()
 				if err != nil {
 					return fmt.Errorf("WriteContracts: computeStorageRoot %s: %w", contract.Address.Hex(), err)
 				}

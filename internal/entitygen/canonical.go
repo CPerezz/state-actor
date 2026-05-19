@@ -5,10 +5,15 @@ import "github.com/ethereum/go-ethereum/common"
 // CanonicalOsakaMPTRoot is the cross-client MPT state root for the
 // canonical e2e config: 10 entitygen EOAs + 5 entitygen contracts
 // (seed=12345, PowerLaw, MinSlots=1, MaxSlots=100, CodeSize=256) PLUS
-// the 4 EIP system contracts (BeaconRoots, HistoryStorage,
-// WithdrawalQueue, ConsolidationQueue) deployed at their canonical
+// the 5 canonical system contracts deployed at their canonical
 // addresses (nonce=1, Balance=0, Root=EmptyRootHash, CodeHash=keccak256
-// of the bytecodes from go-ethereum/params/protocol_params.go).
+// of the bytecode):
+//   - BeaconRoots (EIP-4788) — params.BeaconRootsAddress
+//   - HistoryStorage (EIP-2935) — params.HistoryStorageAddress
+//   - WithdrawalQueue (EIP-7002) — params.WithdrawalQueueAddress
+//   - ConsolidationQueue (EIP-7251) — params.ConsolidationQueueAddress
+//   - Beacon-chain DepositContract — oracle.DepositContractAddress
+//     (0x00000000219ab540...05Fa); bytecode vendored from Prysm v6.0.5-rc.1.
 //
 // Every MPT-mode client adapter (geth, nethermind, besu, reth) MUST
 // produce exactly this hash when run with the matching config — same
@@ -26,4 +31,7 @@ import "github.com/ethereum/go-ethereum/common"
 // To update (when intentional): run any one client's golden test,
 // capture the new hash from the failure message, paste here. Then
 // all 4 client tests + canonical_mpt_test will agree on the new value.
-var CanonicalOsakaMPTRoot = common.HexToHash("0x015874dcec57915518fd4d98f98d8543ce2a8cbbee4bc8fa714e43ce055ed32a")
+//
+// Last rotated when the Beacon-chain Deposit Contract was added to the
+// canonical set (was 0x015874dcec...ed32a with 4 contracts only).
+var CanonicalOsakaMPTRoot = common.HexToHash("0xe6b20caec313a6e60502f3308371d4b9156400724a310947f7dce1b2ad1089b8")

@@ -88,7 +88,7 @@ func TestE2ESuite(t *testing.T) {
 	// addresses — besu refuses to boot a Prague-active chain without
 	// them ("Withdrawal Request Contract Address not found"), and on
 	// each block "Invalid system call address" if their code is missing.
-	oracle.AddPragueSystemContracts(&cfg)
+	oracle.AddCanonicalSystemContracts(&cfg)
 	if _, err := Run(context.Background(), cfg, Options{}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}

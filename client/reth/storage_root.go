@@ -28,7 +28,13 @@ import (
 // for TrieAccount which filters `.filter(|(_, value)| !value.is_zero())`.
 // (GenerateContract already guarantees non-zero values; this guard is present
 // for correctness when called with arbitrary slot sets.)
-func computeStorageRoot(slots []entitygen.StorageSlot) (common.Hash, error) {
+//
+// emit is the per-branch-node callback. Pass nil for compute-only (no
+// StoragesTrie persistence). Pass a non-nil callback when populating
+// reth's StoragesTrie for an account at genesis — the caller is expected
+// to forward the (path, BranchNodeCompact) tuple into MDBX under the
+// DupSort key `keccak(address) || StoredNibblesSubKey(path)`.
+func computeStorageRoot(slots []entitygen.StorageSlot, emit iReth.NodeEmitter) (common.Hash, error) {
 	if len(slots) == 0 {
 		// Canonical empty storage trie root: keccak256(rlp([])).
 		return common.HexToHash("0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421"), nil
@@ -59,9 +65,7 @@ func computeStorageRoot(slots []entitygen.StorageSlot) (common.Hash, error) {
 		return bytes.Compare(sorted[i].keyHash[:], sorted[j].keyHash[:]) < 0
 	})
 
-	hb := iReth.NewHashBuilder(func(_ iReth.StoredNibbles, _ iReth.BranchNodeCompact) error {
-		return nil // storage trie nodes aren't persisted here
-	})
+	hb := newAccountTrieBuilder(emit)
 
 	for _, s := range sorted {
 		// RLP-encode the value bytes with leading zeros stripped.

@@ -21,15 +21,18 @@ import (
 // Accounts must have AddrHash already populated; entitygen sets this
 // when generating EOAs/contracts.
 //
+// emit is the per-branch-node callback. Pass nil for compute-only (existing
+// behavior, no trie-table persistence). Pass a non-nil callback to populate
+// reth's AccountsTrie — see ComputeStateRootStreaming's docstring for the
+// emission contract and why it's needed for bench-scale DBs.
+//
 // Empty input returns the canonical empty-MPT hash (HashBuilder's empty case).
-func ComputeStateRoot(accounts []*entitygen.Account) (common.Hash, error) {
+func ComputeStateRoot(accounts []*entitygen.Account, emit iReth.NodeEmitter) (common.Hash, error) {
 	sorted := make([]*entitygen.Account, len(accounts))
 	copy(sorted, accounts)
 	sortAccountsByAddrHash(sorted)
 
-	hb := iReth.NewHashBuilder(func(p iReth.StoredNibbles, n iReth.BranchNodeCompact) error {
-		return nil // emissions go nowhere; we only want the root
-	})
+	hb := newAccountTrieBuilder(emit)
 
 	for _, acc := range sorted {
 		if acc.StateAccount == nil {
@@ -59,14 +62,26 @@ func ComputeStateRoot(accounts []*entitygen.Account) (common.Hash, error) {
 // ComputeStateRoot would produce over the same set, given the same
 // sort-by-AddrHash order.
 //
+// emit is the per-branch-node callback:
+//   - nil → compute-only mode (back-compat for callers that only want the
+//     root hash; no trie-table persistence).
+//   - non-nil → full-emissions mode: every branch with RLP ≥ 32 bytes is
+//     forwarded to emit in lexicographic path order. The caller is expected
+//     to persist these into reth's AccountsTrie table (via MDBX
+//     cursor.Append for the sequential-write fast-path).
+//
+// Without persisted AccountsTrie rows, reth's payload-builder state-root
+// computation falls back to a linear walk of HashedAccounts (and
+// HashedStorages per leaf) on every block, exceeding MDBX's 300 s read-txn
+// timeout on 100+ GB DBs. See project_reth_trie_cache.md memory for the
+// motivation.
+//
 // Memory bound: O(trie depth * 33 bytes) ≈ 2 KB regardless of how many
 // pairs the iterator emits. HashBuilder.AddLeaf copies its inputs, so the
 // caller's slices (e.g. Pebble's iter.Key()/iter.Value() which alias
 // internal buffers) can be safely reused after each yield call.
-func ComputeStateRootStreaming(iter func(yield func(addrHash, accountRLP []byte) error) error) (common.Hash, error) {
-	hb := iReth.NewHashBuilder(func(p iReth.StoredNibbles, n iReth.BranchNodeCompact) error {
-		return nil // emissions go nowhere; we only want the root
-	})
+func ComputeStateRootStreaming(iter func(yield func(addrHash, accountRLP []byte) error) error, emit iReth.NodeEmitter) (common.Hash, error) {
+	hb := newAccountTrieBuilder(emit)
 
 	err := iter(func(addrHash, accountRLP []byte) error {
 		nibbles := addrHashToNibbles(addrHash)
@@ -80,6 +95,20 @@ func ComputeStateRootStreaming(iter func(yield func(addrHash, accountRLP []byte)
 	}
 
 	return hb.Root(), nil
+}
+
+// newAccountTrieBuilder returns a HashBuilder configured for the account
+// trie. nil emit selects the alloy_trie-compatible constructor (compute-
+// only, no on-disk emissions). A non-nil emit selects the
+// full-emissions constructor so every ≥32-byte branch is persisted to
+// AccountsTrie via the caller's MDBX cursor write.
+func newAccountTrieBuilder(emit iReth.NodeEmitter) *iReth.HashBuilder {
+	if emit == nil {
+		return iReth.NewHashBuilder(func(iReth.StoredNibbles, iReth.BranchNodeCompact) error {
+			return nil
+		})
+	}
+	return iReth.NewHashBuilderFullEmissions(emit)
 }
 
 // sortAccountsByAddrHash sorts in place by AddrHash ascending.

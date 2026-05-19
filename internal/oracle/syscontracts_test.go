@@ -12,10 +12,11 @@ import (
 	"github.com/nerolation/state-actor/generator"
 )
 
-// expectedSysContracts enumerates the 4 EIP system contracts
-// AddPragueSystemContracts must deploy. Address + code pulled from
-// go-ethereum/params/protocol_params.go — the canonical source of
-// truth for EIP-4788/2935/7002/7251 system contracts.
+// expectedSysContracts enumerates the 5 canonical mainnet system contracts
+// AddCanonicalSystemContracts must deploy. Addresses + code pulled from
+// go-ethereum/params/protocol_params.go (Cancun/Prague pre-execution
+// contracts) and oracle.DepositContractCode() (Beacon Chain Deposit
+// Contract, vendored from Prysm — see deposit_contract.go).
 var expectedSysContracts = []struct {
 	name string
 	addr common.Address
@@ -25,9 +26,10 @@ var expectedSysContracts = []struct {
 	{"HistoryStorage (EIP-2935)", params.HistoryStorageAddress, params.HistoryStorageCode},
 	{"WithdrawalQueue (EIP-7002)", params.WithdrawalQueueAddress, params.WithdrawalQueueCode},
 	{"ConsolidationQueue (EIP-7251)", params.ConsolidationQueueAddress, params.ConsolidationQueueCode},
+	{"DepositContract (Beacon Chain)", DepositContractAddress, DepositContractCode()},
 }
 
-func TestAddPragueSystemContracts_PinsCanonicalAddresses(t *testing.T) {
+func TestAddCanonicalSystemContracts_PinsCanonicalAddresses(t *testing.T) {
 	// Sanity-check against literal mainnet values per the EIPs — a future
 	// params rename or upstream spec drift that silently swaps an address
 	// would land here in milliseconds instead of the 5-minute besu boot.
@@ -36,12 +38,14 @@ func TestAddPragueSystemContracts_PinsCanonicalAddresses(t *testing.T) {
 		"HistoryStorage":     "0x0000F90827F1C53a10cb7A02335B175320002935",
 		"WithdrawalQueue":    "0x00000961Ef480Eb55e80D19ad83579A64c007002",
 		"ConsolidationQueue": "0x0000BBdDc7CE488642fb579F8B00f3a590007251",
+		"DepositContract":    "0x00000000219ab540356cBB839Cbe05303d7705Fa",
 	}
 	gotAddrs := map[string]string{
 		"BeaconRoots":        params.BeaconRootsAddress.Hex(),
 		"HistoryStorage":     params.HistoryStorageAddress.Hex(),
 		"WithdrawalQueue":    params.WithdrawalQueueAddress.Hex(),
 		"ConsolidationQueue": params.ConsolidationQueueAddress.Hex(),
+		"DepositContract":    DepositContractAddress.Hex(),
 	}
 	for name, want := range wantAddrs {
 		if gotAddrs[name] != want {
@@ -50,9 +54,9 @@ func TestAddPragueSystemContracts_PinsCanonicalAddresses(t *testing.T) {
 	}
 }
 
-func TestAddPragueSystemContracts_DeploysAll4(t *testing.T) {
+func TestAddCanonicalSystemContracts_DeploysAll5(t *testing.T) {
 	cfg := &generator.Config{}
-	AddPragueSystemContracts(cfg)
+	AddCanonicalSystemContracts(cfg)
 
 	for _, sc := range expectedSysContracts {
 		acc, ok := cfg.GenesisAccounts[sc.addr]
@@ -84,32 +88,32 @@ func TestAddPragueSystemContracts_DeploysAll4(t *testing.T) {
 		}
 	}
 
-	if len(cfg.GenesisAccounts) != 4 {
-		t.Errorf("GenesisAccounts has %d entries, want exactly 4", len(cfg.GenesisAccounts))
+	if len(cfg.GenesisAccounts) != 5 {
+		t.Errorf("GenesisAccounts has %d entries, want exactly 5", len(cfg.GenesisAccounts))
 	}
-	if len(cfg.GenesisCode) != 4 {
-		t.Errorf("GenesisCode has %d entries, want exactly 4", len(cfg.GenesisCode))
+	if len(cfg.GenesisCode) != 5 {
+		t.Errorf("GenesisCode has %d entries, want exactly 5", len(cfg.GenesisCode))
 	}
 }
 
-func TestAddPragueSystemContracts_Idempotent(t *testing.T) {
+func TestAddCanonicalSystemContracts_Idempotent(t *testing.T) {
 	cfg := &generator.Config{}
-	AddPragueSystemContracts(cfg)
-	AddPragueSystemContracts(cfg)
+	AddCanonicalSystemContracts(cfg)
+	AddCanonicalSystemContracts(cfg)
 	// Calling twice should overwrite (not append duplicates).
-	if len(cfg.GenesisAccounts) != 4 {
-		t.Errorf("after 2× call: GenesisAccounts has %d entries, want 4", len(cfg.GenesisAccounts))
+	if len(cfg.GenesisAccounts) != 5 {
+		t.Errorf("after 2× call: GenesisAccounts has %d entries, want 5", len(cfg.GenesisAccounts))
 	}
 }
 
-func TestAddPragueSystemContracts_PreservesExistingEntries(t *testing.T) {
+func TestAddCanonicalSystemContracts_PreservesExistingEntries(t *testing.T) {
 	otherAddr := common.HexToAddress("0xAbcDef1234567890ABcDeF1234567890aBcDeF12")
 	cfg := &generator.Config{
 		GenesisAccounts: map[common.Address]*types.StateAccount{
 			otherAddr: {Nonce: 42},
 		},
 	}
-	AddPragueSystemContracts(cfg)
+	AddCanonicalSystemContracts(cfg)
 	if _, ok := cfg.GenesisAccounts[otherAddr]; !ok {
 		t.Errorf("existing GenesisAccounts entry dropped")
 	}
@@ -118,13 +122,27 @@ func TestAddPragueSystemContracts_PreservesExistingEntries(t *testing.T) {
 	}
 }
 
-func TestAddPragueSystemContracts_NilCfgSafe(t *testing.T) {
+func TestAddCanonicalSystemContracts_NilCfgSafe(t *testing.T) {
 	defer func() {
 		if r := recover(); r != nil {
-			t.Errorf("AddPragueSystemContracts(nil) panicked: %v", r)
+			t.Errorf("AddCanonicalSystemContracts(nil) panicked: %v", r)
 		}
 	}()
-	AddPragueSystemContracts(nil)
+	AddCanonicalSystemContracts(nil)
+}
+
+// TestAddPragueSystemContracts_DeprecatedAlias pins that the legacy entry
+// point still delegates to AddCanonicalSystemContracts so any in-flight
+// caller that hasn't migrated yet still gets the full 5-contract set.
+func TestAddPragueSystemContracts_DeprecatedAlias(t *testing.T) {
+	cfg := &generator.Config{}
+	AddPragueSystemContracts(cfg)
+	if len(cfg.GenesisAccounts) != 5 {
+		t.Errorf("AddPragueSystemContracts (deprecated alias) populated %d entries, want 5 (must delegate to canonical set)", len(cfg.GenesisAccounts))
+	}
+	if _, ok := cfg.GenesisAccounts[DepositContractAddress]; !ok {
+		t.Errorf("AddPragueSystemContracts (deprecated alias) missed the Deposit Contract")
+	}
 }
 
 func safePrefix(b []byte, n int) []byte {

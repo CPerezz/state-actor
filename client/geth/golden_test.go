@@ -13,7 +13,7 @@ import (
 // TestGethGoldenStateRoot pins the state root the full geth Populate
 // pipeline produces for the canonical Osaka-bootable config: 10 EOAs +
 // 5 contracts (seed=12345, PowerLaw, MaxSlots=100, CodeSize=256) + 4
-// EIP system contracts via oracle.AddPragueSystemContracts. The hash
+// EIP system contracts via oracle.AddCanonicalSystemContracts. The hash
 // MUST equal entitygen.CanonicalOsakaMPTRoot — every MPT-mode client
 // adapter (geth, nethermind, besu, reth) pins the same constant. Drift
 // requires a coordinated update across all 4 + the pure-Go
@@ -38,7 +38,7 @@ func TestGethGoldenStateRoot(t *testing.T) {
 	}
 	// Deploy EIP-4788/2935/7002/7251 system contracts — match the
 	// Osaka-bootable canonical.
-	oracle.AddPragueSystemContracts(&cfg)
+	oracle.AddCanonicalSystemContracts(&cfg)
 
 	stats, err := Populate(context.Background(), cfg, Options{})
 	if err != nil {
