@@ -447,10 +447,32 @@ func (b *HashBuilder) pushBranchNode(current []byte, length int) {
 		}
 
 		path := nibblestoStoredNibbles(current[:length])
+
+		// Defensive AND-mask before emit. The gate-split above + the
+		// updateMasks stateMask gate restore Rust's structural
+		// guarantee for the code paths we understand. Production
+		// experience with the 215K-entity bloatnet spec has shown that
+		// extension-node + deep-trie scenarios can still expose bnc
+		// rows where tree_mask or hash_mask carry bits outside
+		// state_mask — a violation of the invariant alloy_trie's
+		// BranchNodeCompact::new asserts at branch.rs:298 on decode,
+		// which crashes reth's payload builder.
+		//
+		// Masking here is defense in depth: it preserves correctness
+		// for downstream consumers (reth's TrieWalker AND's tree/hash
+		// reads through state_mask anyway — trie_cursor/subnode.rs:130-159
+		// — so masked-off bits are semantic no-ops) while shielding
+		// reth from the on-decode assertion failure. Each masked-off
+		// bit is, by definition, claiming a child at a slot state_mask
+		// says doesn't exist; the row would be orphan dead weight
+		// regardless of whether we include or strip the bit.
+		emittedTreeMask := treeMask & stateMask
+		emittedHashMask := hashMask & stateMask
+
 		bnc := BranchNodeCompact{
 			StateMask: stateMask,
-			TreeMask:  treeMask,
-			HashMask:  hashMask,
+			TreeMask:  emittedTreeMask,
+			HashMask:  emittedHashMask,
 			Hashes:    hashes,
 			RootHash:  rootHashPtr,
 		}
