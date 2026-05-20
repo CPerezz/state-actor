@@ -199,8 +199,12 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 		// per-branch emissions populate AccountsTrie. Without this,
 		// reth's payload-builder state-root computation falls back to a
 		// linear HashedAccounts walk on every block (project memory:
-		// project_reth_trie_cache.md). Emissions arrive in path-lex
-		// order, so cursor.Append takes the sequential-write fast path.
+		// project_reth_trie_cache.md). cursor.Put (flag=0) accepts any
+		// key order: HashBuilder emissions arrive in descending-depth
+		// order during unwinds, and the variable-length AccountsTrie
+		// key layout (see below) means shallow paths sort
+		// lexicographically smaller than deeper ones — cursor.Append
+		// would silently drop those shallow rows.
 		var root common.Hash
 		err := envs.Mdbx.Update(func(txn *mdbx.Txn) error {
 			cur, cerr := txn.OpenCursor(envs.MdbxDBIs["AccountsTrie"])
@@ -208,21 +212,18 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 				return fmt.Errorf("open AccountsTrie cursor: %w", cerr)
 			}
 			defer cur.Close()
-			// NOTE: mdbx.Append rejects keys < the cursor's last-written key.
-			// HashBuilder emissions happen during unwinds from deeper to
-			// shallower depths, so the SHALLOW emissions (depth 0..3) carry
-			// lexicographically smaller 65-byte StoredNibbles keys than the
-			// deeper emissions already written. Using Append silently drops
-			// those shallow rows (b.emit's error is swallowed inside
-			// HashBuilder by design), leaving reth's TrieWalker without
-			// breadcrumbs at the top of the trie — which then re-yields the
-			// same hashed_address twice at block-time state-root
-			// computation and trips alloy_trie's add_leaf assertion.
-			// Plain Put accepts any key order; we lose the sequential-write
-			// fast path but keep correctness.
+			// AccountsTrie key uses the VARIABLE-length StoredNibbles
+			// encoding (path.Nibbles[:path.Length], 0..=64 bytes, no
+			// padding, no length suffix). This matches reth's
+			// tables::AccountsTrie Key = StoredNibbles where
+			// Encode::Encoded = ArrayVec<u8, 64> (see
+			// reth/crates/storage/db-api/src/models/mod.rs:121-127).
+			// Using the fixed 65-byte form (path.EncodeKey) would
+			// produce keys reth misreads as 65-NIBBLE paths and the
+			// walker eventually SIGSEGVs at block-time.
 			emit := func(path iReth.StoredNibbles, node iReth.BranchNodeCompact) error {
 				var keyBuf, valBuf bytes.Buffer
-				path.EncodeKey(&keyBuf)
+				path.EncodeAccountKey(&keyBuf)
 				node.EncodeCompact(&valBuf)
 				return cur.Put(keyBuf.Bytes(), valBuf.Bytes(), 0)
 			}
