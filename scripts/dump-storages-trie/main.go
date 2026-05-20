@@ -69,6 +69,39 @@ func main() {
 			fmt.Printf("%s: %d entries\n", table, stat.Entries)
 		}
 
+		// Histogram of AccountsTrie depths.
+		{
+			fmt.Println("\nAccountsTrie depth histogram:")
+			adbi, err := txn.OpenDBISimple("AccountsTrie", 0)
+			if err == nil {
+				acur, _ := txn.OpenCursor(adbi)
+				hist := [65]int{}
+				other := 0
+				k, _, err := acur.Get(nil, nil, mdbx.First)
+				for ; err == nil; k, _, err = acur.Get(nil, nil, mdbx.Next) {
+					if len(k) < 65 {
+						other++
+						continue
+					}
+					depth := int(k[64])
+					if depth >= 0 && depth <= 64 {
+						hist[depth]++
+					} else {
+						other++
+					}
+				}
+				acur.Close()
+				for d := 0; d <= 64; d++ {
+					if hist[d] > 0 {
+						fmt.Printf("  depth %2d: %d\n", d, hist[d])
+					}
+				}
+				if other > 0 {
+					fmt.Printf("  OTHER (malformed key): %d\n", other)
+				}
+			}
+		}
+
 		if targetBytes != nil {
 			fmt.Printf("\n=== Probing for hashed_address %s ===\n", hex.EncodeToString(targetBytes))
 
