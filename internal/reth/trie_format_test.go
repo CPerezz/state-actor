@@ -23,34 +23,22 @@ func TestStoredNibblesRoundtrip(t *testing.T) {
 	cases = append(cases, full)
 
 	for i, nibbles := range cases {
-		sn := StoredNibbles{Length: byte(len(nibbles)), Packed: packNibbles(nibbles)}
+		sn := StoredNibbles{Length: byte(len(nibbles))}
+		copy(sn.Nibbles[:], nibbles)
 		var buf bytes.Buffer
 		sn.EncodeKey(&buf)
-		if buf.Len() != 33 {
-			t.Fatalf("case %d: encoded len=%d, want 33", i, buf.Len())
+		if buf.Len() != 65 {
+			t.Fatalf("case %d: encoded len=%d, want 65", i, buf.Len())
 		}
 		var out StoredNibbles
 		out.DecodeKey(buf.Bytes())
 		if out.Length != sn.Length {
 			t.Errorf("case %d: length %d -> %d", i, sn.Length, out.Length)
 		}
-		if out.Packed != sn.Packed {
-			t.Errorf("case %d: packed mismatch hex=%x", i, buf.Bytes())
+		if out.Nibbles != sn.Nibbles {
+			t.Errorf("case %d: nibbles mismatch hex=%x", i, buf.Bytes())
 		}
 	}
-}
-
-// packNibbles is a test helper — same algorithm as production packing.
-func packNibbles(nibbles []byte) common.Hash {
-	var packed common.Hash
-	for i, n := range nibbles {
-		if i%2 == 0 {
-			packed[i/2] |= n << 4
-		} else {
-			packed[i/2] |= n
-		}
-	}
-	return packed
 }
 
 func TestBranchNodeCompactRoundtrip(t *testing.T) {
@@ -107,8 +95,10 @@ func branchNodeEqual(a, b BranchNodeCompact) bool {
 
 func TestStorageTrieEntryRoundtrip(t *testing.T) {
 	h := common.HexToHash("0xabc")
+	subKey := StoredNibbles{Length: 4}
+	copy(subKey.Nibbles[:], []byte{1, 2, 3, 4})
 	in := StorageTrieEntry{
-		SubKey: StoredNibbles{Length: 4, Packed: packNibbles([]byte{1, 2, 3, 4})},
+		SubKey: subKey,
 		Node: BranchNodeCompact{
 			StateMask: 0x0001, TreeMask: 0, HashMask: 0x0001,
 			Hashes: []common.Hash{h}, RootHash: nil,

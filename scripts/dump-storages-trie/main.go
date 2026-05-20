@@ -62,20 +62,20 @@ func main() {
 			fmt.Printf("  mainkey (keccak(addr), %d bytes): %s\n", len(k), hex.EncodeToString(k))
 			fmt.Printf("  value (%d bytes): %s\n", len(v), hex.EncodeToString(v))
 
-			if len(v) < 33 {
-				fmt.Printf("  ERROR: value too short for SubKey (%d < 33)\n", len(v))
+			if len(v) < 65 {
+				fmt.Printf("  ERROR: value too short for SubKey (%d < 65)\n", len(v))
 				shown++
 				continue
 			}
 
-			// Decode SubKey
+			// Decode SubKey (v1 legacy 65-byte form: nibbles[64] || length[1])
 			var subKey iReth.StoredNibblesSubKey
-			subKey.DecodeKey(v[:33])
+			subKey.DecodeKey(v[:65])
 			fmt.Printf("  subkey.Length: %d nibbles\n", subKey.Length)
-			fmt.Printf("  subkey.Packed[:8]: %s\n", hex.EncodeToString(subKey.Packed[:8]))
+			fmt.Printf("  subkey.Nibbles[:16]: %s\n", hex.EncodeToString(subKey.Nibbles[:16]))
 
 			// Decode BNC from bytes after SubKey
-			bncBytes := v[33:]
+			bncBytes := v[65:]
 			fmt.Printf("  bnc-bytes (%d): %s\n", len(bncBytes), hex.EncodeToString(bncBytes))
 
 			if len(bncBytes) < 6 {
