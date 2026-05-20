@@ -259,7 +259,7 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 	}
 	header.Root = stateRoot
 
-	if err := WriteMetadata(envs, header, uint64(chainID)); err != nil {
+	if err := WriteMetadata(envs, header, uint64(chainID), cfg.Archive); err != nil {
 		return nil, fmt.Errorf("RunCgo: WriteMetadata: %w", err)
 	}
 
