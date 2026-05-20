@@ -119,8 +119,8 @@ var ErrKeysOutOfOrder = errors.New("HashBuilder: keys must be inserted in strict
 //
 // NodeEmitter is called by HashBuilder once for each branch node that
 // completes during streaming. The path is the trie nibble path from root to
-// the branch (using StoredNibbles' 33-byte packed form), and node is the
-// reth-canonical BranchNodeCompact.
+// the branch (using StoredNibbles' 65-byte legacy form: nibbles[64] ||
+// length[1]), and node is the reth-canonical BranchNodeCompact.
 //
 // Emissions happen in path-lexicographic order, so the consumer can write to
 // AccountsTrie/StoragesTrie via cursor.append (sequential MDBX writes).
@@ -598,18 +598,13 @@ func nibbleMask(nibble byte) uint16 {
 	return uint16(1) << nibble
 }
 
-// nibblestoStoredNibbles packs a nibble slice into the 33-byte StoredNibbles
-// trie key format: packed[32] || length[1].
+// nibblestoStoredNibbles copies a nibble slice into the 65-byte legacy
+// StoredNibbles trie key format: nibbles[64] (one nibble per byte, low 4 bits,
+// right-padded with zeros) || length[1].
 func nibblestoStoredNibbles(nibbles []byte) StoredNibbles {
 	var sn StoredNibbles
 	sn.Length = byte(len(nibbles))
-	for i, n := range nibbles {
-		if i%2 == 0 {
-			sn.Packed[i/2] = n << 4
-		} else {
-			sn.Packed[i/2] |= n & 0x0f
-		}
-	}
+	copy(sn.Nibbles[:], nibbles)
 	return sn
 }
 

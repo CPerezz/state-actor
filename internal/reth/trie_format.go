@@ -6,38 +6,43 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
-// StoredNibbles is the v2 33-byte packed nibble path used as the
-// AccountsTrie key. PR paradigmxyz/reth#22158 reduced this from 65 to 33 bytes.
+// StoredNibbles is reth's legacy v1 65-byte nibble path used as the AccountsTrie
+// key and as the StoragesTrie sub-key. One nibble per byte (low 4 bits used),
+// right-padded with zeros to 64 bytes, followed by a length byte.
 //
-// Wire (MDBX key, fixed 33 bytes):
+// Wire (MDBX key, fixed 65 bytes):
 //
-//	packed (32 bytes; 2 nibbles per byte, high then low) || length (1 byte, 0..=64)
+//	nibbles[64] (one nibble per byte, low 4 bits, right-padded zeros) || length[1]
 //
-// When Length is odd, the final low nibble is zero-padded.
-//
-// Note: the length byte is at the END (byte[32]), not the beginning.
-// This matches PackedStoredNibbles::to_compact in reth-trie-common (nibbles.rs
-// lines 193-211) which writes packed[32] then puts the nibble count byte last.
+// Matches StoredNibbles::to_compact / StoredNibblesSubKey::to_compact in
+// reth-trie-common (nibbles.rs lines 101-128). Reth's ProviderFactory defaults
+// to StorageSettings::v1() when no metadata row is present (see
+// crates/storage/provider/src/providers/database/mod.rs:132), which selects the
+// LegacyKeyAdapter and reads this 65-byte form via StorageTrieEntry::from_compact
+// (storage.rs:38-43). The 33-byte PackedStoredNibbles variant is only used when
+// storage_v2 = true is explicitly written into the Metadata table — that mode
+// also expects RocksDB history sidecars + static-file changesets, which a
+// one-shot genesis writer does not produce.
 type StoredNibbles struct {
-	Length byte
-	Packed common.Hash
+	Length  byte
+	Nibbles [64]byte
 }
 
 func (s *StoredNibbles) EncodeKey(buf *bytes.Buffer) {
-	buf.Write(s.Packed[:])
+	buf.Write(s.Nibbles[:])
 	buf.WriteByte(s.Length)
 }
 
 func (s *StoredNibbles) DecodeKey(b []byte) {
-	if len(b) < 33 {
-		panic("StoredNibbles: truncated key")
+	if len(b) < 65 {
+		panic("StoredNibbles: truncated key, need >=65 bytes")
 	}
-	copy(s.Packed[:], b[0:32])
-	s.Length = b[32]
+	copy(s.Nibbles[:], b[0:64])
+	s.Length = b[64]
 }
 
-// StoredNibblesSubKey is the StoragesTrie sub-key (DupSort sub-key after the
-// 32-byte hashed-address main key). Same 33-byte layout as StoredNibbles.
+// StoredNibblesSubKey is the StoragesTrie DupSort sub-key (after the 32-byte
+// hashed-address main key). Same 65-byte layout as StoredNibbles.
 type StoredNibblesSubKey = StoredNibbles
 
 // BranchNodeCompact mirrors alloy_trie::BranchNodeCompact (alloy-trie 0.9.5,
@@ -148,48 +153,43 @@ func readBEU16(b []byte) uint16 {
 	return uint16(b[0])<<8 | uint16(b[1])
 }
 
-// StorageTrieEntry is the DupSort value of StoragesTrie. The 33-byte SubKey
-// is also the MDBX DupSort sub-key prefix; reth re-encodes it inside the
-// value for self-description.
+// StorageTrieEntry is the DupSort value of StoragesTrie. The 65-byte SubKey is
+// also encoded inside the value so reth's StorageTrieEntry::from_compact can
+// self-describe (storage.rs:38-43).
 //
 // Wire:
 //
-//	33 bytes SubKey (PackedStoredNibblesSubKey) || BranchNodeCompact bytes
+//	65 bytes SubKey (StoredNibblesSubKey) || BranchNodeCompact bytes
 //
-// SubKey layout matches PackedStoredNibblesSubKey::to_compact (reth-trie-common
-// nibbles.rs): packed[32] (2 nibbles per byte, zero-padded right) || length[1].
-// The length byte is at the END (byte[32]), not the beginning.
-// Cross-validated against Rust canonical hex via TestGoldenStorageTrieEntry
-// in golden_test.go.
+// SubKey layout matches StoredNibblesSubKey::to_compact (reth-trie-common
+// nibbles.rs:113-129): nibbles[64] (one nibble per byte, right-padded) ||
+// length[1]. Length byte is at byte 64 (the end).
 type StorageTrieEntry struct {
 	SubKey StoredNibblesSubKey
 	Node   BranchNodeCompact
 }
 
 func (e *StorageTrieEntry) EncodeCompact(buf *bytes.Buffer) int {
-	// SubKey wire: packed[32] || length[1] (length byte at end, matching
-	// PackedStoredNibblesSubKey::to_compact in reth-trie-common nibbles.rs).
 	written := 0
-	written += copy(bufWrite(buf, 32), e.SubKey.Packed[:])
+	written += copy(bufWrite(buf, 64), e.SubKey.Nibbles[:])
 	written += copy(bufWrite(buf, 1), []byte{e.SubKey.Length})
 	written += e.Node.EncodeCompact(buf)
 	return written
 }
 
 func (e *StorageTrieEntry) DecodeCompact(data []byte, totalLen int) int {
-	if totalLen < 33 {
-		panic("StorageTrieEntry: totalLen < 33 (SubKey truncated)")
+	if totalLen < 65 {
+		panic("StorageTrieEntry: totalLen < 65 (SubKey truncated)")
 	}
 	if len(data) < totalLen {
 		panic("StorageTrieEntry: buffer shorter than totalLen")
 	}
-	// SubKey wire: packed[32] || length[1]
-	copy(e.SubKey.Packed[:], data[0:32])
-	e.SubKey.Length = data[32]
-	nodeLen := totalLen - 33
-	consumed := e.Node.DecodeCompact(data[33:], nodeLen)
+	copy(e.SubKey.Nibbles[:], data[0:64])
+	e.SubKey.Length = data[64]
+	nodeLen := totalLen - 65
+	consumed := e.Node.DecodeCompact(data[65:], nodeLen)
 	if consumed != nodeLen {
-		panic("StorageTrieEntry: inner node consumed != totalLen-33")
+		panic("StorageTrieEntry: inner node consumed != totalLen-65")
 	}
 	return totalLen
 }
