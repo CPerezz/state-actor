@@ -469,6 +469,27 @@ func (b *HashBuilder) pushBranchNode(current []byte, length int) {
 		emittedTreeMask := treeMask & stateMask
 		emittedHashMask := hashMask & stateMask
 
+		// If the intersection actually dropped bits, the hashes slice
+		// (built from the un-masked hashMask above) might over-count
+		// relative to emittedHashMask. Reconcile by re-collecting hashes
+		// using the post-intersection mask. Without this, the encoder's
+		// popcount(HashMask) != len(Hashes) invariant would panic later.
+		if emittedHashMask != hashMask {
+			hashes = hashes[:0]
+			childIdx := 0
+			for slot := uint16(0); slot < 16; slot++ {
+				if stateMask&nibbleMask(byte(slot)) != 0 {
+					child := children[childIdx]
+					childIdx++
+					if emittedHashMask&nibbleMask(byte(slot)) != 0 {
+						var h common.Hash
+						copy(h[:], child[1:])
+						hashes = append(hashes, h)
+					}
+				}
+			}
+		}
+
 		bnc := BranchNodeCompact{
 			StateMask: stateMask,
 			TreeMask:  emittedTreeMask,
@@ -476,6 +497,9 @@ func (b *HashBuilder) pushBranchNode(current []byte, length int) {
 			Hashes:    hashes,
 			RootHash:  rootHashPtr,
 		}
+		// SENTINEL-V2: drift-detect this binary in production
+		// (extract /usr/local/bin/state-actor; strings | grep SENTINEL-V2).
+		_ = "SENTINEL-V2-MASK-INTERSECT"
 		// Ignore emit errors for now (Task 6 can add error propagation).
 		_ = b.emit(path, bnc)
 	}
