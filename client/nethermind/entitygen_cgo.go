@@ -20,7 +20,6 @@ import (
 	"github.com/nerolation/state-actor/generator"
 	"github.com/nerolation/state-actor/internal/entitygen"
 	nethtrie "github.com/nerolation/state-actor/internal/neth/trie"
-	"github.com/nerolation/state-actor/internal/streamingtrie"
 	"github.com/nerolation/state-actor/internal/streamsort"
 )
 

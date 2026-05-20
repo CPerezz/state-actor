@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"runtime"
-	"sort"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -68,11 +67,14 @@ func runPhase0(
 		return nil
 	}
 
-	// Long-pole-first scheduling. With the bloatnet spec there are ~5
-	// bloat EOAs with 100M-1B slots each, dominating wall-clock.
-	sort.SliceStable(indices, func(a, b int) bool {
-		return len(cfg.PreAlloc[indices[a]].Storage) > len(cfg.PreAlloc[indices[b]].Storage)
-	})
+	// NOTE: long-pole-first scheduling would help (the 5 bloat EOAs each
+	// have 100M-1B slots and dominate wall-clock), but pe.Storage is
+	// `iter.Seq2[Hash, Hash]` — a streaming function type — so len() isn't
+	// available without consuming the iterator. PreAllocEntity has no
+	// pre-computed slot-count field. Matches besu's behavior at
+	// client/besu/state_writer_cgo.go:328-334, which also processes
+	// indices in their natural order. Filed as part of the intra-entity
+	// parallelism follow-up issue.
 
 	workers := runtime.NumCPU()
 	if workers < 1 {
