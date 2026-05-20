@@ -1,17 +1,16 @@
 #!/bin/bash
-# nethermind-v8-solo.sh — gen + boot + verify + spamoor for nethermind
-# alone, with the syscontracts-aware state-actor:nethermind image (post
-# commit 57d0b46) and the CLI fixes:
+# nethermind-v8-postgen.sh — boot + verify + spamoor against an
+# ALREADY-GENERATED nethermind DB at $WORK/data/nethermind.
 #
-#   1. --Init.ChainSpecPath=/data/parity-chainspec.json (was MISSING in
-#      run-bloatnet.sh — caused mainnet-chainspec fallback)
-#   2. --JsonRpc.JwtSecretFile dropped (was passed empty in run-bloatnet.sh
-#      — caused nethermind to abort with "Required argument missing")
+# Same boot / engine-driver / verify / spamoor sequence as
+# nethermind-v8-solo.sh but skips the 90-min state-actor generation step.
+# Use this when the gen DB is intact (post a Phase 0 worker-pool gen) and
+# we only need to (re-)verify the post-boot behavior.
 #
-# Nethermind has no native --dev mode wall-clock miner. We drive blocks
-# via engine-driver (from $WORK/bin/engine-driver), same pattern besu uses.
+# Refuses to run if the DB directory is missing or empty.
 #
-# Outputs $WORK/results/nethermind-v8-result.json.
+# Outputs $WORK/results/nethermind-v8-postgen-result.json so it doesn't
+# clobber the original solo-run result.
 
 set -euo pipefail
 
@@ -20,68 +19,48 @@ export PATH=$HOME/.foundry/bin:/usr/local/go/bin:$PATH
 WORK=$HOME/work/bloatnet
 REPO=$HOME/state-actor
 DATA=$WORK/data/nethermind
-LOGDIR=$WORK/logs/nethermind-v8
+LOGDIR=$WORK/logs/nethermind-v8-postgen
 RESULTS=$WORK/results
-CT=bloatnet-nethermind-v8
+CT=bloatnet-nethermind-v8-pg
 HTTP_PORT=8545
 ENGINE_PORT=8551
-P2P_PORT=30503   # non-default to avoid clashes with reth's 30403 / besu's 30303
+P2P_PORT=30503
 RPC_URL=http://127.0.0.1:$HTTP_PORT
 ENGINE_URL=http://127.0.0.1:$ENGINE_PORT
-SPEC=$WORK/spec-bloatnet-100gb.yaml
 SPAMOOR_PRIVKEY=0x0000000000000000000000000000000000000000000000000000000000000001
 SPAMOOR_TARGET_BLOCK_DELTA=500
 ENGINE_DRIVER=$WORK/bin/engine-driver
 
-mkdir -p $LOGDIR $DATA $RESULTS
+mkdir -p $LOGDIR $RESULTS
 
 echo "════════════════════════════════════════════════════════════════"
-echo " nethermind v8 — syscontracts + CLI fixes ($(date))"
+echo " nethermind v8 POSTGEN — boot + verify against existing DB ($(date))"
 echo "════════════════════════════════════════════════════════════════"
 
-# Defensive: kill any stale container that might be holding our ports.
-docker rm -f $CT neth-probe besu-quick-probe bloatnet-besu-reverify 2>/dev/null || true
-pkill -f engine-driver 2>/dev/null || true
-
-# 1. Generate (with the syscontracts-aware image).
-echo "=== state-actor generation (writing to $DATA) ==="
-/usr/bin/time -v docker run --rm \
-    -v $SPEC:/spec.yaml \
-    -v $DATA:/data \
-    state-actor:nethermind \
-    --client=nethermind \
-    --db=/data \
-    --spec=/spec.yaml \
-    --seed=42 \
-    --fork=osaka \
-    --chain-id=1337 \
-    --gas-limit=60000000 \
-    --target-size=100GB \
-    --accounts=0 \
-    --contracts=0 \
-    --verbose \
-    > $LOGDIR/gen.log 2>&1
-gen_status=$?
-if [ $gen_status -ne 0 ]; then
-    echo "state-actor generation FAILED (exit $gen_status). See $LOGDIR/gen.log"
+# Sanity: DB must exist and not be empty.
+if [ ! -d "$DATA" ] || [ -z "$(ls -A $DATA 2>/dev/null)" ]; then
+    echo "ERROR: $DATA missing or empty. Run nethermind-v8-solo.sh to gen first."
     exit 1
 fi
-echo "=== generation done; DB size: $(du -sh $DATA | cut -f1) ==="
+echo "DB present: $(du -sh $DATA | cut -f1) at $DATA"
 
-# Capture the writer-claimed genesis state root for cross-check.
-WRITER_STATE_ROOT=$(grep -oE 'state root\s*=\s*0x[0-9a-fA-F]+' $LOGDIR/gen.log | tail -1 | awk -F= '{print $2}' | tr -d ' ')
-WRITER_GENESIS_HASH=$(grep -oE 'genesis hash\s*=\s*0x[0-9a-fA-F]+' $LOGDIR/gen.log | tail -1 | awk -F= '{print $2}' | tr -d ' ')
-echo "    writer claims: stateRoot=$WRITER_STATE_ROOT genesisHash=$WRITER_GENESIS_HASH"
+# Defensive: kill any stale container holding our ports + any old engine-driver.
+docker rm -f $CT bloatnet-nethermind-v8 neth-probe 2>/dev/null || true
+pkill -f engine-driver 2>/dev/null || true
 
-# 2. Boot nethermind with --Init.ChainSpecPath + sync/networking disabled.
+# Sanity check the engine-driver binary
+if [ ! -x "$ENGINE_DRIVER" ]; then
+    echo "ERROR: engine-driver not executable at $ENGINE_DRIVER"
+    exit 1
+fi
+
+# Boot nethermind.
 #
-# Sync.{Networking,Synchronization}Enabled=false + Init.PeerManagerEnabled=false
-# match the CI boot config at client/nethermind/e2e_test.go:48-83. Without
-# these, Nethermind's GenesisBuilder re-derives genesis from the chainspec's
-# empty accounts map (the chainspec writer doesn't emit stateRoot — tracked
-# as a separate latent bug), overwriting state-actor's on-disk genesis with
-# the empty-MPT-root one. With sync disabled, GenesisBuilder skips that
-# path and the on-disk genesis state survives.
+# Sync/PeerManager disablement matches the CI e2e boot config at
+# client/nethermind/e2e_test.go:48-83. Without these flags Nethermind's
+# GenesisBuilder re-derives the genesis from the chainspec (which doesn't
+# emit stateRoot, a separate latent bug) and overwrites the on-disk
+# state-actor genesis with the empty-MPT-root one.
 echo "=== booting nethermind (container=$CT, port=$HTTP_PORT, p2p=$P2P_PORT) ==="
 docker run -d --name $CT \
     --network host \
@@ -102,8 +81,7 @@ docker run -d --name $CT \
     --JsonRpc.UnsecureDevNoRpcAuthentication=true \
     --Merge.Enabled=true --Merge.TerminalTotalDifficulty=0
 
-# 3. Wait for RPC. .NET clients can take 30-60s on a cold start with 105GB
-# DB; bump the timeout generously.
+# Wait for RPC. Cold start with 105 GB DB can be slow.
 echo "=== waiting for RPC at $RPC_URL (cold-start can be slow) ==="
 elapsed=0
 while ! cast chain-id --rpc-url $RPC_URL >/dev/null 2>&1; do
@@ -117,13 +95,11 @@ while ! cast chain-id --rpc-url $RPC_URL >/dev/null 2>&1; do
 done
 echo "RPC ready at $RPC_URL after ${elapsed}s"
 
-# Cross-check the live genesis hash vs what state-actor wrote.
 LIVE_GENESIS_HASH=$(cast block 0 --rpc-url $RPC_URL --field hash 2>/dev/null || echo unknown)
 LIVE_STATE_ROOT=$(cast block 0 --rpc-url $RPC_URL --field stateRoot 2>/dev/null || echo unknown)
 echo "    live block 0:   stateRoot=$LIVE_STATE_ROOT hash=$LIVE_GENESIS_HASH"
 
-# 4. Start engine-driver — nethermind has no native local-miner ticker;
-# blocks come via engine_forkchoiceUpdated + engine_newPayload over 8551.
+# Start engine-driver.
 echo "=== starting engine-driver ==="
 nohup $ENGINE_DRIVER \
     -engine $ENGINE_URL \
@@ -134,7 +110,7 @@ nohup $ENGINE_DRIVER \
 ENGINE_PID=$!
 echo $ENGINE_PID > $LOGDIR/engine-driver.pid
 
-# 5. Pre-spamoor verify
+# Pre-spamoor verify.
 echo "=== pre-spamoor verify ==="
 RPC=$RPC_URL SAMPLE=500 BLOCK=latest \
     bash $REPO/scripts/verify-bloatnet.sh \
@@ -144,7 +120,7 @@ PRE_FAIL=$(sed 's/\x1b\[[0-9;]*m//g' $LOGDIR/verify-pre.log | grep -c "^FAIL" ||
 PRE_PASS=${PRE_PASS:-0}; PRE_FAIL=${PRE_FAIL:-0}
 echo "    pre-spamoor: $PRE_PASS passed / $PRE_FAIL failed"
 
-# 6. Spamoor 500 blocks
+# Spamoor 500 blocks.
 START_TIP=$(cast block-number --rpc-url $RPC_URL)
 TARGET_TIP=$((START_TIP + SPAMOOR_TARGET_BLOCK_DELTA))
 echo "=== spamoor erc20_bloater (start=$START_TIP target=$TARGET_TIP) ==="
@@ -182,7 +158,7 @@ done
 kill -KILL $SPAMOOR_PID 2>/dev/null || true
 wait $SPAMOOR_PID 2>/dev/null || true
 
-# 7. Post-spamoor verify
+# Post-spamoor verify.
 echo "=== post-spamoor verify ==="
 RPC=$RPC_URL SAMPLE=500 BLOCK=latest CHECK_CHAIN_ADVANCED=1 \
     bash $REPO/scripts/verify-bloatnet.sh \
@@ -192,19 +168,17 @@ POST_FAIL=$(sed 's/\x1b\[[0-9;]*m//g' $LOGDIR/verify-post.log | grep -c "^FAIL" 
 POST_PASS=${POST_PASS:-0}; POST_FAIL=${POST_FAIL:-0}
 echo "    post-spamoor: $POST_PASS passed / $POST_FAIL failed"
 
-# 8. Capture result
+# Capture result.
 GENESIS_ROOT=$(cast block 0 --rpc-url $RPC_URL --field stateRoot 2>/dev/null || echo unknown)
 LATEST_ROOT=$(cast block latest --rpc-url $RPC_URL --field stateRoot 2>/dev/null || echo unknown)
 LATEST_BN=$(cast block-number --rpc-url $RPC_URL 2>/dev/null || echo 0)
 DB_APPARENT=$(du -sh --apparent-size $DATA | cut -f1)
 DB_ACTUAL=$(du -sh $DATA | cut -f1)
 
-cat > $RESULTS/nethermind-v8-result.json <<JSON
+cat > $RESULTS/nethermind-v8-postgen-result.json <<JSON
 {
-  "client": "nethermind-v8",
-  "boot_mode": "--Init.ChainSpecPath + engine-driver block-time=1s",
-  "writer_genesis_hash": "$WRITER_GENESIS_HASH",
-  "writer_state_root": "$WRITER_STATE_ROOT",
+  "client": "nethermind-v8-postgen",
+  "boot_mode": "--Init.ChainSpecPath + engine-driver block-time=1s (DB reused)",
   "genesis_state_root": "$GENESIS_ROOT",
   "post_spamoor_state_root": "$LATEST_ROOT",
   "post_spamoor_block_number": $LATEST_BN,
@@ -221,10 +195,10 @@ echo "    latest_root:  $LATEST_ROOT"
 echo "    latest_bn:    $LATEST_BN"
 echo "    db_size:      apparent=$DB_APPARENT actual=$DB_ACTUAL"
 
-# 9. STOP + preserve DB
+# STOP + preserve DB.
 kill $ENGINE_PID 2>/dev/null || true
 rm -f $LOGDIR/engine-driver.pid
 docker stop $CT >/dev/null 2>&1 || true
 docker rm $CT >/dev/null 2>&1 || true
 
-echo "=== nethermind v8 done ($(date)) ==="
+echo "=== nethermind v8 postgen done ($(date)) ==="
