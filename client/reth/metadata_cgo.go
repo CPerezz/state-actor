@@ -15,31 +15,32 @@ import (
 
 // WriteMetadata populates the minimum-boot MDBX metadata into envs.
 // header is the genesis header (block 0). chainID is reth's chain ID.
+// archive controls whether to write PruneCheckpoint markers (see below).
 //
-// Writes 4 tables in a single atomic transaction:
+// Writes the following tables in a single atomic transaction:
 //   - Metadata.storage_v2 = Compact-encoded StorageSettings{storage_v2: true}
-//     (1-byte bitflag header with the single bit set = 0x01). Verified
-//     against reth crates/storage/db-api/src/models/metadata.rs at
-//     PinnedRethCommit: StorageSettings is a single-bool struct, so
-//     Compact encoding is exactly a 1-bit bitflag header byte.
+//     (1-byte bitflag header with the single bit set = 0x01).
 //   - StageCheckpoints: one entry per stage in iReth.StageIDsAll (15 entries),
 //     Compact-encoded StageCheckpoint{BlockNumber: 0}.
 //   - HeaderNumbers: header.Hash() → BE u64(0).
 //   - BlockBodyIndices: BE u64(0) → Compact StoredBlockBodyIndices{0, 0}.
+//   - PruneCheckpoints (NON-ARCHIVE ONLY): two rows for AccountHistory +
+//     StorageHistory with block_number=Some(0), prune_mode=Before(1).
+//     This triggers reth's HistoricalStateProvider to use the
+//     MaybeInPlainState fallback when the history-index tables are empty —
+//     critical because state-actor doesn't write those tables in
+//     non-archive mode (gated by `if archive`), and without this marker
+//     reth returns NotYetWritten → eth_getBalance returns 0 for any
+//     genesis account once the chain advances past genesis.
+//     See plan: /Users/random_anon/.claude/plans/on-the-meantime-i-proud-karp.md
 //
 // VersionHistory is intentionally NOT written here. Reth's init_db writes its
 // own ClientVersion entry keyed by the current Unix timestamp on every boot.
-// If we write a malformed entry (wrong wire format or wrong key), reth panics
-// when calling cursor.last() during record_client_version. Leaving the table
-// empty is safe: reth treats an empty table as "no previous version" and
-// simply writes a fresh entry.
-//
 // ChainState is left empty; reth populates it lazily on finality.
 //
-// NOTE: the Number=0 guard below is a forward-compatibility trap for Slices
-// D+E. If a future slice switches to a non-genesis header (e.g. block 1 to
-// work around an underflow bug), this guard must be relaxed or replaced.
-func WriteMetadata(envs *Envs, header *types.Header, chainID uint64) error {
+// NOTE: the Number=0 guard below is a forward-compatibility trap. If a future
+// caller switches to a non-genesis header, this guard must be relaxed.
+func WriteMetadata(envs *Envs, header *types.Header, chainID uint64, archive bool) error {
 	if header.Number.Sign() != 0 {
 		return fmt.Errorf("WriteMetadata: header must be block 0, got %s", header.Number)
 	}
@@ -56,8 +57,45 @@ func WriteMetadata(envs *Envs, header *types.Header, chainID uint64) error {
 		if err := writeBlockBodyIndices(txn, envs.MdbxDBIs["BlockBodyIndices"], 0); err != nil {
 			return fmt.Errorf("BlockBodyIndices: %w", err)
 		}
+		if !archive {
+			if err := writePruneCheckpoints(txn, envs.MdbxDBIs["PruneCheckpoints"]); err != nil {
+				return fmt.Errorf("PruneCheckpoints: %w", err)
+			}
+		}
 		return nil
 	})
+}
+
+// writePruneCheckpoints writes the two non-archive-mode PruneCheckpoint rows
+// for AccountHistory and StorageHistory. Together they trigger reth's
+// MaybeInPlainState read-path fallback (see WriteMetadata doc).
+//
+// Both rows use the same value: PruneCheckpoint{
+//
+//	block_number: Some(0),
+//	tx_number:    None,
+//	prune_mode:   PruneMode::Before(1),
+//
+// }. The block_number-is-Some bit is what flips reth's history_info() from
+// NotYetWritten to MaybeInPlainState; the prune_mode value is informational
+// (mirrors what reth's own pruner would write after a single run).
+func writePruneCheckpoints(txn *mdbx.Txn, dbi mdbx.DBI) error {
+	ckpt := iReth.PruneCheckpoint{
+		BlockNumber: iReth.U64Ptr(0),
+		TxNumber:    nil,
+		PruneMode:   iReth.PruneMode{Kind: iReth.PruneModeBefore, Value: 1},
+	}
+	var valBuf bytes.Buffer
+	ckpt.EncodeCompact(&valBuf)
+	value := valBuf.Bytes()
+
+	for _, segment := range []uint8{iReth.PruneSegmentAccountHistory, iReth.PruneSegmentStorageHistory} {
+		key := iReth.EncodePruneSegmentKey(segment)
+		if err := txn.Put(dbi, key, value, 0); err != nil {
+			return fmt.Errorf("segment %d: %w", segment, err)
+		}
+	}
+	return nil
 }
 
 // writeStorageV2Flag puts Compact-encoded StorageSettings{storage_v2: true}
