@@ -208,11 +208,23 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 				return fmt.Errorf("open AccountsTrie cursor: %w", cerr)
 			}
 			defer cur.Close()
+			// NOTE: mdbx.Append rejects keys < the cursor's last-written key.
+			// HashBuilder emissions happen during unwinds from deeper to
+			// shallower depths, so the SHALLOW emissions (depth 0..3) carry
+			// lexicographically smaller 65-byte StoredNibbles keys than the
+			// deeper emissions already written. Using Append silently drops
+			// those shallow rows (b.emit's error is swallowed inside
+			// HashBuilder by design), leaving reth's TrieWalker without
+			// breadcrumbs at the top of the trie — which then re-yields the
+			// same hashed_address twice at block-time state-root
+			// computation and trips alloy_trie's add_leaf assertion.
+			// Plain Put accepts any key order; we lose the sequential-write
+			// fast path but keep correctness.
 			emit := func(path iReth.StoredNibbles, node iReth.BranchNodeCompact) error {
 				var keyBuf, valBuf bytes.Buffer
 				path.EncodeKey(&keyBuf)
 				node.EncodeCompact(&valBuf)
-				return cur.Put(keyBuf.Bytes(), valBuf.Bytes(), mdbx.Append)
+				return cur.Put(keyBuf.Bytes(), valBuf.Bytes(), 0)
 			}
 			r, rerr := ComputeStateRootStreaming(sorter.Iterate, emit)
 			if rerr != nil {
