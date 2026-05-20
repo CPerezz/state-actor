@@ -4,6 +4,7 @@ package nethermind
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/linxGnu/grocksdb"
 
@@ -92,4 +93,72 @@ func (s *stateDBSink) SetStateNode(path []byte, pathLen int, keccak [32]byte, rl
 // (74 bytes: section(=2) + addrHash(32) + path[:8] + pathLen + keccak).
 func (s *stateDBSink) SetStorageNode(addrHash [32]byte, path []byte, pathLen int, keccak [32]byte, rlpBlob []byte) error {
 	return s.put(nethstorage.StorageNodeKey(addrHash, path, pathLen, keccak), rlpBlob)
+}
+
+// codeDBSink mirrors stateDBSink for the dbs.code RocksDB. Without this,
+// genesis-alloc code + synthetic-contract code were each a separate
+// db.Put with WAL-enabled WriteOptions — both an fsync-bound bottleneck
+// and a data race once Phase 0 became parallel. The same 64 MiB flush
+// threshold + DisableWAL(true) pattern from stateDBSink applies here.
+type codeDBSink struct {
+	db *grocksdb.DB
+	wo *grocksdb.WriteOptions
+	wb *grocksdb.WriteBatch
+	mu sync.Mutex // codeDBSink may be shared across Phase 0 workers
+	// pendingBytes is the live WriteBatch payload size; flush at the
+	// stateBatchFlushBytes threshold (same constant — both DBs see
+	// similar bulk-write volumes during a 100 GB-target gen).
+	pendingBytes int
+}
+
+func newCodeDBSink(db *grocksdb.DB) *codeDBSink {
+	wo := grocksdb.NewDefaultWriteOptions()
+	// Same WAL-skip rationale as stateDBSink (line 38-43).
+	wo.DisableWAL(true)
+	return &codeDBSink{
+		db: db,
+		wo: wo,
+		wb: grocksdb.NewWriteBatch(),
+	}
+}
+
+func (s *codeDBSink) put(key, value []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.wb.Put(key, value)
+	s.pendingBytes += len(key) + len(value)
+	if s.pendingBytes >= stateBatchFlushBytes {
+		return s.flushLocked()
+	}
+	return nil
+}
+
+// flushLocked writes any pending entries and resets the WriteBatch.
+// Caller must hold s.mu. Safe to call repeatedly — a no-op when nothing
+// is buffered.
+func (s *codeDBSink) flushLocked() error {
+	if s.pendingBytes == 0 {
+		return nil
+	}
+	if err := s.db.Write(s.wo, s.wb); err != nil {
+		return fmt.Errorf("codeDBSink flush: %w", err)
+	}
+	s.wb.Clear()
+	s.pendingBytes = 0
+	return nil
+}
+
+func (s *codeDBSink) close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	err := s.flushLocked()
+	if s.wb != nil {
+		s.wb.Destroy()
+		s.wb = nil
+	}
+	if s.wo != nil {
+		s.wo.Destroy()
+		s.wo = nil
+	}
+	return err
 }
