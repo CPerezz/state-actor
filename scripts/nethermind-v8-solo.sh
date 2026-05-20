@@ -94,6 +94,7 @@ docker run -d --name $CT \
     --Init.DiscoveryEnabled=false \
     --Sync.NetworkingEnabled=false \
     --Sync.SynchronizationEnabled=false \
+    --Sync.PivotNumber=0 \
     --Network.P2PPort=$P2P_PORT \
     --Network.DiscoveryPort=$P2P_PORT \
     --Network.ActivePeersMaxCount=0 \
