@@ -28,6 +28,17 @@ type StoredNibbles struct {
 	Nibbles [64]byte
 }
 
+// EncodeKey writes the FIXED 65-byte form (nibbles[64] || length[1]). This is
+// the wire layout reth uses for StoredNibblesSubKey (StoragesTrie DupSort
+// sub-key, inside the StorageTrieEntry value) — see reth-trie-common
+// nibbles.rs:113-128 and reth/crates/storage/db-api/src/models/mod.rs:135-141
+// (Encoded = [u8; 65]).
+//
+// NOTE: this is NOT the right encoder for an AccountsTrie KEY. Reth's
+// tables::AccountsTrie uses StoredNibbles::Encode = ArrayVec<u8, 64> (variable
+// length, raw nibbles, no padding, no length byte) — see
+// reth/crates/storage/db-api/src/models/mod.rs:121-127. For AccountsTrie
+// keys, use EncodeAccountKey below.
 func (s *StoredNibbles) EncodeKey(buf *bytes.Buffer) {
 	buf.Write(s.Nibbles[:])
 	buf.WriteByte(s.Length)
@@ -39,6 +50,30 @@ func (s *StoredNibbles) DecodeKey(b []byte) {
 	}
 	copy(s.Nibbles[:], b[0:64])
 	s.Length = b[64]
+}
+
+// EncodeAccountKey writes the VARIABLE-length form (just s.Nibbles[:s.Length],
+// 0..=64 bytes, no padding, no length suffix). This is the wire layout reth's
+// tables::AccountsTrie expects for keys (StoredNibbles::Encode in
+// reth/crates/storage/db-api/src/models/mod.rs:121-127 returns
+// ArrayVec<u8, 64>; decoding reconstructs Length = len(value) via
+// from_compact at line 131).
+func (s *StoredNibbles) EncodeAccountKey(buf *bytes.Buffer) {
+	if int(s.Length) > 64 {
+		panic("StoredNibbles: Length > 64")
+	}
+	buf.Write(s.Nibbles[:s.Length])
+}
+
+// DecodeAccountKey is the inverse: every byte of b is one nibble, Length =
+// len(b). Mirrors reth's StoredNibbles::from_compact(value, value.len()).
+func (s *StoredNibbles) DecodeAccountKey(b []byte) {
+	if len(b) > 64 {
+		panic("StoredNibbles: account key longer than 64 bytes")
+	}
+	*s = StoredNibbles{}
+	s.Length = byte(len(b))
+	copy(s.Nibbles[:], b)
 }
 
 // StoredNibblesSubKey is the StoragesTrie DupSort sub-key (after the 32-byte

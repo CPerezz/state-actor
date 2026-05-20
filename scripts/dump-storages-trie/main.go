@@ -69,7 +69,9 @@ func main() {
 			fmt.Printf("%s: %d entries\n", table, stat.Entries)
 		}
 
-		// Histogram of AccountsTrie depths.
+		// Histogram of AccountsTrie depths. Key wire = variable-length nibble
+		// bytes (no padding, no length suffix); see models/mod.rs:121-127.
+		// Depth = len(key).
 		{
 			fmt.Println("\nAccountsTrie depth histogram:")
 			adbi, err := txn.OpenDBISimple("AccountsTrie", 0)
@@ -79,11 +81,7 @@ func main() {
 				other := 0
 				k, _, err := acur.Get(nil, nil, mdbx.First)
 				for ; err == nil; k, _, err = acur.Get(nil, nil, mdbx.Next) {
-					if len(k) < 65 {
-						other++
-						continue
-					}
-					depth := int(k[64])
+					depth := len(k)
 					if depth >= 0 && depth <= 64 {
 						hist[depth]++
 					} else {
@@ -97,7 +95,7 @@ func main() {
 					}
 				}
 				if other > 0 {
-					fmt.Printf("  OTHER (malformed key): %d\n", other)
+					fmt.Printf("  OTHER (depth > 64): %d\n", other)
 				}
 			}
 		}
@@ -119,11 +117,9 @@ func main() {
 			}
 
 			// 2. AccountsTrie rows that are prefixes of unpack(target).
-			// A prefix-of-unpacked-target key is a 65-byte StoredNibbles
-			// where Length ∈ [0, 64) and Nibbles[:Length] match the
-			// corresponding nibbles of targetBytes.
-			//
-			// Easiest implementation: iterate ALL AccountsTrie rows, check.
+			// AccountsTrie key wire = raw nibbles (variable length, 0..=64
+			// bytes, no padding, no length suffix). A prefix-of-target
+			// row has key = first len(key) nibbles of unpack(target).
 			fmt.Printf("\nAccountsTrie rows whose nibble path is a prefix of the target:\n")
 			adbi, err := txn.OpenDBISimple("AccountsTrie", 0)
 			if err != nil {
@@ -142,15 +138,11 @@ func main() {
 			k, v, err := acur.Get(nil, nil, mdbx.First)
 			matches := 0
 			for ; err == nil; k, v, err = acur.Get(nil, nil, mdbx.Next) {
-				if len(k) < 65 {
-					continue
-				}
-				length := int(k[64])
+				length := len(k)
 				if length > 64 {
-					fmt.Printf("  WARNING: AccountsTrie key has Length=%d > 64: %s\n", length, hex.EncodeToString(k))
+					fmt.Printf("  WARNING: AccountsTrie key length=%d > 64: %s\n", length, hex.EncodeToString(k))
 					continue
 				}
-				// Compare k[:length] against targetNibbles[:length]
 				match := true
 				for i := 0; i < length; i++ {
 					if k[i] != targetNibbles[i] {
@@ -159,8 +151,8 @@ func main() {
 					}
 				}
 				if match {
-					fmt.Printf("  PREFIX MATCH at depth=%d: nibbles[:%d]=%s value_len=%d\n",
-						length, length, hex.EncodeToString(k[:length]), len(v))
+					fmt.Printf("  PREFIX MATCH at depth=%d: nibbles=%s value_len=%d\n",
+						length, hex.EncodeToString(k), len(v))
 					if matches < 4 {
 						fmt.Printf("    value=%s\n", hex.EncodeToString(v))
 					}
@@ -177,12 +169,9 @@ func main() {
 				defer acur.Close()
 				k, v, err := acur.Get(nil, nil, mdbx.First)
 				for i := 0; err == nil && i < *n; i, _ = i+1, 0 {
-					length := byte(0)
-					if len(k) >= 65 {
-						length = k[64]
-					}
-					fmt.Printf("  [%d] key_len=%d nibbles[:%d]=%s value_len=%d value=%s\n",
-						i, len(k), length, hex.EncodeToString(k[:min(int(length), len(k))]),
+					depth := len(k)
+					fmt.Printf("  [%d] depth=%d nibbles=%s value_len=%d value=%s\n",
+						i, depth, hex.EncodeToString(k),
 						len(v), hex.EncodeToString(v[:min(20, len(v))]))
 					k, v, err = acur.Get(nil, nil, mdbx.Next)
 				}

@@ -41,6 +41,43 @@ func TestStoredNibblesRoundtrip(t *testing.T) {
 	}
 }
 
+// TestStoredNibblesEncodeAccountKey_VariableLength asserts the AccountsTrie
+// key wire format: raw nibbles (one byte per nibble), no padding, no length
+// suffix. Matches reth's StoredNibbles::Encode = ArrayVec<u8, 64>
+// (reth/crates/storage/db-api/src/models/mod.rs:121-127).
+func TestStoredNibblesEncodeAccountKey_VariableLength(t *testing.T) {
+	cases := [][]byte{
+		{},                                                     // empty path = depth 0 (root)
+		{0xa},                                                  // 1 nibble
+		{0xa, 0xb, 0xc},                                        // 3 nibbles
+		bytes.Repeat([]byte{0x0f}, 32),                         // 32 nibbles
+		func() []byte { b := make([]byte, 64); for i := range b { b[i] = byte(i % 16) }; return b }(), // full 64-nibble leaf
+	}
+	for i, nibbles := range cases {
+		sn := StoredNibbles{Length: byte(len(nibbles))}
+		copy(sn.Nibbles[:], nibbles)
+		var buf bytes.Buffer
+		sn.EncodeAccountKey(&buf)
+		if buf.Len() != len(nibbles) {
+			t.Errorf("case %d: encoded len=%d, want %d (no padding, no length byte)", i, buf.Len(), len(nibbles))
+		}
+		if !bytes.Equal(buf.Bytes(), nibbles) {
+			t.Errorf("case %d: encoded=%x want=%x", i, buf.Bytes(), nibbles)
+		}
+
+		var out StoredNibbles
+		out.DecodeAccountKey(buf.Bytes())
+		if out.Length != sn.Length {
+			t.Errorf("case %d: length %d -> %d", i, sn.Length, out.Length)
+		}
+		for j := 0; j < int(sn.Length); j++ {
+			if out.Nibbles[j] != sn.Nibbles[j] {
+				t.Errorf("case %d: nibble[%d] %d -> %d", i, j, sn.Nibbles[j], out.Nibbles[j])
+			}
+		}
+	}
+}
+
 func TestBranchNodeCompactRoundtrip(t *testing.T) {
 	h1 := common.HexToHash("0x1111111111111111111111111111111111111111111111111111111111111111")
 	h2 := common.HexToHash("0x2222222222222222222222222222222222222222222222222222222222222222")
