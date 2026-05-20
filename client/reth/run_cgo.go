@@ -3,6 +3,7 @@
 package reth
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
@@ -10,12 +11,14 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/erigontech/mdbx-go/mdbx"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/rlp"
 
 	"github.com/nerolation/state-actor/generator"
 	"github.com/nerolation/state-actor/genesis"
 	"github.com/nerolation/state-actor/internal/entitygen"
+	iReth "github.com/nerolation/state-actor/internal/reth"
 	"github.com/nerolation/state-actor/internal/streamsort"
 )
 
@@ -192,35 +195,48 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 	}
 
 	if accountsCreated+contractsCreated > 0 {
-		// Compute the state root WITHOUT populating AccountsTrie. Reth's
-		// payload-builder state-root computation will fall back to a
-		// linear HashedAccounts cursor walk on every block — slower but
-		// correct.
-		//
-		// History: we previously emitted BranchNodeCompact rows for every
-		// hashed branch via NewHashBuilderFullEmissions, intending to
-		// prime reth's trie cache and avoid the linear walk. Two
-		// independent issues emerged:
-		//   1. mdbx.Append silently dropped the shallow emissions because
-		//      they're unwound in descending-depth order (deeper keys
-		//      sort lexicographically larger than shallow ones with the
-		//      65-byte StoredNibbles + trailing-zero padding) — fixed by
-		//      switching to plain Put.
-		//   2. With shallow BNCs in place (depth 0-3 = 1 + 16 + 256 +
-		//      4096 = 4369 rows), reth's tokio runtime threads segfault
-		//      during block-time state-root traversal even with
-		//      RUST_MIN_STACK=16MB — likely a deep-recursion path in
-		//      alloy_trie/reth_trie that explodes on a uniformly-full
-		//      215K-leaf trie with all sub-branch hints present.
-		//
-		// Until reth's trie walker is investigated upstream, leave the
-		// AccountsTrie empty and accept the slower payload path. The
-		// state root is still computed correctly (HashBuilder w/ a no-op
-		// emit), it just doesn't get persisted as a navigation cache.
-		stateRoot, err = ComputeStateRootStreaming(sorter.Iterate, nil)
+		// Wrap state-root computation in an MDBX write txn so the
+		// per-branch emissions populate AccountsTrie. Without this,
+		// reth's payload-builder state-root computation falls back to a
+		// linear HashedAccounts walk on every block (project memory:
+		// project_reth_trie_cache.md). Emissions arrive in path-lex
+		// order, so cursor.Append takes the sequential-write fast path.
+		var root common.Hash
+		err := envs.Mdbx.Update(func(txn *mdbx.Txn) error {
+			cur, cerr := txn.OpenCursor(envs.MdbxDBIs["AccountsTrie"])
+			if cerr != nil {
+				return fmt.Errorf("open AccountsTrie cursor: %w", cerr)
+			}
+			defer cur.Close()
+			// NOTE: mdbx.Append rejects keys < the cursor's last-written key.
+			// HashBuilder emissions happen during unwinds from deeper to
+			// shallower depths, so the SHALLOW emissions (depth 0..3) carry
+			// lexicographically smaller 65-byte StoredNibbles keys than the
+			// deeper emissions already written. Using Append silently drops
+			// those shallow rows (b.emit's error is swallowed inside
+			// HashBuilder by design), leaving reth's TrieWalker without
+			// breadcrumbs at the top of the trie — which then re-yields the
+			// same hashed_address twice at block-time state-root
+			// computation and trips alloy_trie's add_leaf assertion.
+			// Plain Put accepts any key order; we lose the sequential-write
+			// fast path but keep correctness.
+			emit := func(path iReth.StoredNibbles, node iReth.BranchNodeCompact) error {
+				var keyBuf, valBuf bytes.Buffer
+				path.EncodeKey(&keyBuf)
+				node.EncodeCompact(&valBuf)
+				return cur.Put(keyBuf.Bytes(), valBuf.Bytes(), 0)
+			}
+			r, rerr := ComputeStateRootStreaming(sorter.Iterate, emit)
+			if rerr != nil {
+				return rerr
+			}
+			root = r
+			return nil
+		})
 		if err != nil {
-			return nil, fmt.Errorf("RunCgo: ComputeStateRootStreaming: %w", err)
+			return nil, fmt.Errorf("RunCgo: ComputeStateRootStreaming + AccountsTrie emit: %w", err)
 		}
+		stateRoot = root
 	}
 
 	// Free the sorter's temp files before the chainspec/static-files writes.
