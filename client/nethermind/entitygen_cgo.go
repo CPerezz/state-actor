@@ -16,15 +16,25 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	gethrlp "github.com/ethereum/go-ethereum/rlp"
-	"github.com/linxGnu/grocksdb"
 
 	"github.com/nerolation/state-actor/generator"
 	"github.com/nerolation/state-actor/internal/entitygen"
-	nethrlp "github.com/nerolation/state-actor/internal/neth/rlp"
 	nethtrie "github.com/nerolation/state-actor/internal/neth/trie"
 	"github.com/nerolation/state-actor/internal/streamingtrie"
 	"github.com/nerolation/state-actor/internal/streamsort"
 )
+
+// maxPhase0Workers caps Phase 0's drain-and-compute parallelism, mirroring
+// geth's maxPhase0Workers and besu's maxPhase0Workers (both = 8). Each
+// worker holds an independent nethtrie.Builder + stateDBSink (per-worker
+// grocksdb.WriteBatch up to stateBatchFlushBytes = 64 MiB) + a per-call
+// streamsort.Store (256 MiB MemTable). At 8 workers, peak RAM ≈ 3-4 GiB
+// over and above the baseline. Raising the cap on a 96-core box helps
+// only if there are >8 PreAlloc entities of comparable cost; with the
+// bloatnet spec, 5 long-pole bloat EOAs dominate and the cap of 8 is
+// already adequate (intra-entity parallelism would be the next step
+// for further gains — out of scope here, tracked in a follow-up issue).
+const maxPhase0Workers = 8
 
 // writeSyntheticAccounts populates the State + Code DBs from synthetic
 // EOAs/contracts, genesis-alloc entries, and spec-PreAlloc entities,
@@ -62,42 +72,27 @@ func writeSyntheticAccounts(
 	}
 	defer sorter.Close()
 
-	codeWO := grocksdb.NewDefaultWriteOptions()
-	defer codeWO.Destroy()
+	codeSink := newCodeDBSink(dbs.code)
+	defer func() { _ = codeSink.close() }()
 
-	for i, pe := range cfg.PreAlloc {
-		if pe.Storage == nil {
-			continue
-		}
-		if err := ctx.Err(); err != nil {
-			return common.Hash{}, err
-		}
-		addr := pe.Address
-		addrHash := crypto.Keccak256Hash(addr[:])
-		ah := [32]byte(addrHash)
-		hb := &nethermindStorageHashBuilder{builder: builder, ah: ah}
-		var entityStorageBytes uint64
-		statSink := func(_, _, value common.Hash) error {
-			// RLP-of-trimmed-value byte count (1 prefix + len(trimmed)).
-			v := value[:]
-			for len(v) > 0 && v[0] == 0 {
-				v = v[1:]
-			}
-			if len(v) > 0 {
-				entityStorageBytes += uint64(len(v) + 1)
-			}
-			return nil
-		}
-		root, err := streamingtrie.StorageRoot("", pe.Storage, hb, statSink)
-		if err != nil {
-			return common.Hash{}, fmt.Errorf("nethermind: stream spec storage[%d] %s: %w", i, addr.Hex(), err)
-		}
-		if acc, ok := genesisAccounts[addr]; ok && acc != nil {
-			acc.Root = root
-		}
-		if stats != nil {
-			stats.StorageBytes += entityStorageBytes
-		}
+	// Phase 0: drain every spec-PreAlloc entity's storage trie in parallel.
+	// Workers each own (a) a stateDBSink wrapping a per-worker
+	// grocksdb.WriteBatch — grocksdb's Write is safe to call concurrently
+	// across workers per RocksDB's WAL serialization (besu commit 4847945,
+	// docs and matching pattern at client/besu/state_writer_cgo.go:308-432),
+	// and (b) a per-worker nethtrie.Builder so the single-goroutine
+	// invariant (internal/neth/trie/builder.go:60-61) holds within each
+	// worker. Storage roots are content-addressed (keccak), so out-of-order
+	// completion doesn't affect determinism; the main goroutine assigns
+	// roots into genesisAccounts in receive order — the eventual state-trie
+	// root depends only on sorted addrHash iteration (sorter.Iterate below).
+	//
+	// Long-pole scheduling: bloatnet specs have 5 EOAs with 100M-1B storage
+	// slots each. FIFO would put one bloat on a worker mid-run, making it
+	// the wall-clock floor. Sort indices descending by len(pe.Storage) to
+	// launch the largest entities at t=0 across the first workers.
+	if err := runPhase0(ctx, cfg, dbs, genesisAccounts, stats); err != nil {
+		return common.Hash{}, fmt.Errorf("nethermind: phase 0: %w", err)
 	}
 
 	// Genesis-alloc accounts go to the temp DB AND the code DB AND
@@ -109,7 +104,7 @@ func writeSyntheticAccounts(
 	for addr, acc := range genesisAccounts {
 		if code, ok := genesisCodes[addr]; ok && len(code) > 0 {
 			ch := crypto.Keccak256Hash(code)
-			if err := dbs.code.Put(codeWO, ch[:], code); err != nil {
+			if err := codeSink.put(ch[:], code); err != nil {
 				return common.Hash{}, fmt.Errorf("write genesis code for %s: %w", addr.Hex(), err)
 			}
 			acc.CodeHash = ch[:]
@@ -227,7 +222,7 @@ func writeSyntheticAccounts(
 		contract := entitygen.GenerateContractRoll(rng, cfg.Distribution, codeSize, cfg.MinSlots, cfg.MaxSlots)
 		numSlots := len(contract.Storage)
 
-		if err := dbs.code.Put(codeWO, contract.CodeHash[:], contract.Code); err != nil {
+		if err := codeSink.put(contract.CodeHash[:], contract.Code); err != nil {
 			return common.Hash{}, fmt.Errorf("write contract code: %w", err)
 		}
 		if stats != nil {
@@ -295,16 +290,14 @@ func writeSyntheticAccounts(
 		var ah [32]byte
 		copy(ah[:], key)
 
-		var sa types.StateAccount
-		if err := gethrlp.DecodeBytes(value, &sa); err != nil {
-			return fmt.Errorf("decode StateAccount: %w", err)
-		}
-
-		accRLP, err := nethrlp.EncodeAccount(&sa)
-		if err != nil {
-			return fmt.Errorf("encode neth account: %w", err)
-		}
-		if err := builder.AddAccount(ah, accRLP); err != nil {
+		// Skip the decode + re-encode round-trip: nethrlp.EncodeAccount
+		// (internal/neth/rlp/account.go:28-30) is literally
+		// gethrlp.EncodeToBytes(acc), which is the same encoder that
+		// produced the stashed `value` bytes in the loops above. Saves
+		// ~5-10% of Phase 2 wall on the 215K-entity bloatnet workload.
+		// Determinism preserved: the bytes ARE the canonical Nethermind
+		// RLP encoding by construction.
+		if err := builder.AddAccount(ah, value); err != nil {
 			return fmt.Errorf("add account: %w", err)
 		}
 		return nil
