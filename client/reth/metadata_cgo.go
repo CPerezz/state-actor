@@ -4,6 +4,7 @@ package reth
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 
 	"github.com/erigontech/mdbx-go/mdbx"
@@ -18,8 +19,10 @@ import (
 // archive controls whether to write PruneCheckpoint markers (see below).
 //
 // Writes the following tables in a single atomic transaction:
-//   - Metadata.storage_v2 = Compact-encoded StorageSettings{storage_v2: true}
-//     (1-byte bitflag header with the single bit set = 0x01).
+//   - Metadata.storage_settings = JSON-encoded StorageSettings (the key reth
+//     reads via STORAGE_SETTINGS const at storage-api/src/metadata.rs:10).
+//     The value is {"storage_v2":false} so reth selects v1 (matches the
+//     current write surface; commit 3 of the v2 migration flips this).
 //   - StageCheckpoints: one entry per stage in iReth.StageIDsAll (15 entries),
 //     Compact-encoded StageCheckpoint{BlockNumber: 0}.
 //   - HeaderNumbers: header.Hash() → BE u64(0).
@@ -42,8 +45,8 @@ func WriteMetadata(envs *Envs, header *types.Header, chainID uint64, archive boo
 		return fmt.Errorf("WriteMetadata: header must be block 0, got %s", header.Number)
 	}
 	return envs.Mdbx.Update(func(txn *mdbx.Txn) error {
-		if err := writeStorageV2Flag(txn, envs.MdbxDBIs["Metadata"]); err != nil {
-			return fmt.Errorf("Metadata.storage_v2: %w", err)
+		if err := writeStorageSettings(txn, envs.MdbxDBIs["Metadata"]); err != nil {
+			return fmt.Errorf("Metadata.storage_settings: %w", err)
 		}
 		if err := writeStageCheckpoints(txn, envs.MdbxDBIs["StageCheckpoints"], 0); err != nil {
 			return fmt.Errorf("StageCheckpoints: %w", err)
@@ -95,13 +98,27 @@ func writePruneCheckpoints(txn *mdbx.Txn, dbi mdbx.DBI) error {
 	return nil
 }
 
-// writeStorageV2Flag puts Compact-encoded StorageSettings{storage_v2: true}
-// (single byte 0x01) under the key "storage_v2" in the Metadata table.
-//
-// StorageSettings has one bool field. Compact derives a 1-bit bitflag header
-// (padded to 1 byte). storage_v2=true sets that bit → 0x01.
-func writeStorageV2Flag(txn *mdbx.Txn, dbi mdbx.DBI) error {
-	return txn.Put(dbi, []byte("storage_v2"), []byte{0x01}, 0)
+// storageSettings mirrors reth's StorageSettings struct
+// (crates/storage/db-api/src/models/metadata.rs:13-27). Single bool field, no
+// serde rename — serde_json::to_vec produces {"storage_v2":<bool>} (19 or 20
+// bytes, no whitespace). State-actor encodes/decodes via encoding/json so the
+// Go type drift stays linked to the wire format.
+type storageSettings struct {
+	StorageV2 bool `json:"storage_v2"`
+}
+
+// writeStorageSettings puts a JSON-encoded storageSettings under the key
+// "storage_settings" in the Metadata table — the key reth's
+// StorageSettingsCache::load (storage-api/src/metadata.rs:10) reads. The
+// value is {"storage_v2":false}: state-actor still writes the v1 layout
+// (PlainAccountState/PlainStorageState populated). Commit 3 of the v2
+// migration flips the flag to true and drops the Plain* writes.
+func writeStorageSettings(txn *mdbx.Txn, dbi mdbx.DBI) error {
+	val, err := json.Marshal(storageSettings{StorageV2: false})
+	if err != nil {
+		return fmt.Errorf("marshal storageSettings: %w", err)
+	}
+	return txn.Put(dbi, []byte("storage_settings"), val, 0)
 }
 
 // writeStageCheckpoints writes one StageCheckpoint{BlockNumber: blockNum}

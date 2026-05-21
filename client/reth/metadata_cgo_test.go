@@ -4,6 +4,7 @@ package reth
 
 import (
 	"bytes"
+	"encoding/json"
 	"math/big"
 	"testing"
 
@@ -40,15 +41,24 @@ func TestWriteMetadataAllTables(t *testing.T) {
 				t.Fatalf("WriteMetadata: %v", err)
 			}
 
-			// Verify Metadata.storage_v2
+			// Verify Metadata.storage_settings — key matches reth's
+			// STORAGE_SETTINGS const (storage-api/src/metadata.rs:10); value is
+			// the JSON form reth's StorageSettingsCache::load deserializes.
 			if err := envs.Mdbx.View(func(txn *mdbx.Txn) error {
-				val, err := txn.Get(envs.MdbxDBIs["Metadata"], []byte("storage_v2"))
+				val, err := txn.Get(envs.MdbxDBIs["Metadata"], []byte("storage_settings"))
 				if err != nil {
 					return err
 				}
-				// Compact bool true = 1-byte 0x01 (1-bit bitflag header).
-				if !bytes.Equal(val, []byte{0x01}) {
-					t.Errorf("Metadata[storage_v2] = %x, want 01", val)
+				want := []byte(`{"storage_v2":false}`)
+				if !bytes.Equal(val, want) {
+					t.Errorf("Metadata[storage_settings] = %q, want %q", val, want)
+				}
+				var got storageSettings
+				if err := json.Unmarshal(val, &got); err != nil {
+					t.Errorf("json.Unmarshal: %v", err)
+				}
+				if got.StorageV2 {
+					t.Errorf("decoded storage_v2 = true, want false")
 				}
 				return nil
 			}); err != nil {
