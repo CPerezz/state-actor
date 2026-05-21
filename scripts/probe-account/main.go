@@ -1,5 +1,8 @@
 // probe-account looks up a specific address in reth's PlainAccountState
-// + HashedAccounts MDBX tables and prints what it finds.
+// + HashedAccounts MDBX tables and prints what it finds. On v2 datadirs
+// PlainAccountState is empty by design (HashedAccounts is the canonical
+// state); the probe prints NOT FOUND for it and reads the row from
+// HashedAccounts.
 //
 // Usage:
 //
