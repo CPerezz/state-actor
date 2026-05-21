@@ -14,56 +14,19 @@ import (
 
 	"github.com/nerolation/state-actor/generator"
 	"github.com/nerolation/state-actor/internal/besu/keys"
-	"github.com/nerolation/state-actor/internal/entitygen"
-	"github.com/nerolation/state-actor/internal/oracle"
+	"github.com/nerolation/state-actor/internal/e2e_testing"
 )
 
-// TestBesuGoldenStateRoot pins the state root the full cgo_besu pipeline
-// produces for the canonical Osaka-bootable config: 10 EOAs + 5 contracts
-// (seed=12345, PowerLaw, MaxSlots=100, CodeSize=256) + 4 EIP system
-// contracts via oracle.AddCanonicalSystemContracts. The hash MUST equal
-// entitygen.CanonicalOsakaMPTRoot — every MPT-mode client adapter
-// (geth, nethermind, besu, reth) pins the same constant. Drift requires
-// a coordinated update across all 4 + the pure-Go canonical_mpt_test.
 func TestBesuGoldenStateRoot(t *testing.T) {
-	expectedRoot := entitygen.CanonicalOsakaMPTRoot.Hex()
-
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "besu-golden")
+	dbPath := filepath.Join(t.TempDir(), "besu-golden")
 	if err := os.MkdirAll(dbPath, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-
-	cfg := generator.Config{
-		DBPath:       dbPath,
-		NumAccounts:  10,
-		NumContracts: 5,
-		MaxSlots:     100,
-		MinSlots:     1,
-		Distribution: generator.PowerLaw,
-		Seed:         12345,
-		CodeSize:     256,
-		Verbose:      false,
-	}
-	// Deploy EIP-4788/2935/7002/7251 system contracts — match the
-	// Osaka-bootable canonical computed by canonical_mpt_test.go and
-	// produced by the e2e suites.
-	oracle.AddCanonicalSystemContracts(&cfg)
-
-	stats, err := Run(context.Background(), cfg, Options{})
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if stats == nil {
-		t.Fatal("Run returned nil stats")
-	}
-	if stats.StateRoot == (common.Hash{}) {
-		t.Fatal("Run returned zero state root — pipeline didn't populate stats.StateRoot")
-	}
-	if got := stats.StateRoot.Hex(); got != expectedRoot {
-		t.Fatalf("besu golden state root mismatch:\n  got:  %s\n  want: %s\n  Diverging here means a coordinated update across all entitygen-using adapters is needed (see internal/entitygen/canonical_mpt_test.go).",
-			got, expectedRoot)
-	}
+	cfg := e2e_testing.GoldenStateRootCfg(dbPath)
+	e2e_testing.AssertGoldenStateRoot(t, "besu", cfg,
+		func(ctx context.Context, cfg generator.Config) (*generator.Stats, error) {
+			return Run(ctx, cfg, Options{})
+		})
 }
 
 // TestBesuReproducibility verifies that the same config + seed produces the
