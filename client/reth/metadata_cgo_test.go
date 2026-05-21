@@ -49,7 +49,7 @@ func TestWriteMetadataAllTables(t *testing.T) {
 				if err != nil {
 					return err
 				}
-				want := []byte(`{"storage_v2":false}`)
+				want := []byte(`{"storage_v2":true}`)
 				if !bytes.Equal(val, want) {
 					t.Errorf("Metadata[storage_settings] = %q, want %q", val, want)
 				}
@@ -57,8 +57,8 @@ func TestWriteMetadataAllTables(t *testing.T) {
 				if err := json.Unmarshal(val, &got); err != nil {
 					t.Errorf("json.Unmarshal: %v", err)
 				}
-				if got.StorageV2 {
-					t.Errorf("decoded storage_v2 = true, want false")
+				if !got.StorageV2 {
+					t.Errorf("decoded storage_v2 = false, want true")
 				}
 				return nil
 			}); err != nil {

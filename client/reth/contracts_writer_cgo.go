@@ -14,10 +14,10 @@ import (
 	iReth "github.com/nerolation/state-actor/internal/reth"
 )
 
-// WriteContracts writes the 9 reth tables for each contract: Bytecodes
-// (deduped), PlainAccountState, HashedAccounts, AccountChangeSets,
-// AccountsHistory, PlainStorageState, HashedStorages, StorageChangeSets,
-// StoragesHistory.
+// WriteContracts writes the reth tables for each contract: Bytecodes
+// (deduped), HashedAccounts, AccountChangeSets, HashedStorages,
+// StorageChangeSets — plus AccountsHistory + StoragesHistory in archive
+// mode (routed to RocksDB CFs v2 reth reads from).
 //
 // SIDE EFFECT: each contract's StateAccount.Root and .CodeHash are
 // mutated in place from the supplied Storage + Code. With empty Storage
@@ -26,8 +26,8 @@ import (
 //
 // stats (optional) accumulates AccountBytes, CodeBytes (deduped — only
 // counts code that actually got written), and StorageBytes (sum of
-// PlainStorageState compact-encoded entries). Increments are applied
-// only after the MDBX transaction commits.
+// HashedStorages compact-encoded entries — the canonical v2 storage
+// table). Increments are applied only after the MDBX transaction commits.
 func WriteContracts(envs *Envs, contracts []*entitygen.Account, blockNum uint64, archive bool, stats *generator.Stats) error {
 	var (
 		localAccountBytes uint64
@@ -96,11 +96,7 @@ func WriteContracts(envs *Envs, contracts []*entitygen.Account, blockNum uint64,
 			ethAccount.EncodeCompact(&accBuf)
 			accountBytes := accBuf.Bytes()
 
-			// PlainAccountState: raw addr → Account
-			if err := txn.Put(envs.MdbxDBIs["PlainAccountState"], contract.Address[:], accountBytes, 0); err != nil {
-				return fmt.Errorf("PlainAccountState %s: %w", contract.Address.Hex(), err)
-			}
-			// HashedAccounts: keccak(addr) → Account
+			// HashedAccounts: keccak(addr) → Account (canonical v2 state)
 			if err := txn.Put(envs.MdbxDBIs["HashedAccounts"], contract.AddrHash[:], accountBytes, 0); err != nil {
 				return fmt.Errorf("HashedAccounts %s: %w", contract.Address.Hex(), err)
 			}
@@ -112,18 +108,13 @@ func WriteContracts(envs *Envs, contracts []*entitygen.Account, blockNum uint64,
 				if err := txn.Put(envs.MdbxDBIs["AccountChangeSets"], blockKey[:], abtBuf.Bytes(), 0); err != nil {
 					return fmt.Errorf("AccountChangeSets %s: %w", contract.Address.Hex(), err)
 				}
-				// AccountsHistory: ShardedKey(addr, u64::MAX) → IntegerList([blockNum])
-				shardedKey := iReth.ShardedKeyAddress{Address: contract.Address, BlockNumber: ^uint64(0)}
-				var keyBuf bytes.Buffer
-				shardedKey.EncodeKey(&keyBuf)
-				var listBuf bytes.Buffer
-				iReth.EncodeIntegerList(&listBuf, []uint64{blockNum})
-				if err := txn.Put(envs.MdbxDBIs["AccountsHistory"], keyBuf.Bytes(), listBuf.Bytes(), 0); err != nil {
+				// AccountsHistory → RocksDB CF (v2 routing).
+				if err := envs.HistorySink().PutAccountHistory(contract.Address, blockNum); err != nil {
 					return fmt.Errorf("AccountsHistory %s: %w", contract.Address.Hex(), err)
 				}
 			}
 
-			storBytes, err := WriteContractStorage(txn, envs.MdbxDBIs, contract, blockNum, archive)
+			storBytes, err := WriteContractStorage(envs, txn, contract, blockNum, archive)
 			if err != nil {
 				return fmt.Errorf("WriteContracts: WriteContractStorage %s: %w", contract.Address.Hex(), err)
 			}

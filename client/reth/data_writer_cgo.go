@@ -13,18 +13,22 @@ import (
 	iReth "github.com/nerolation/state-actor/internal/reth"
 )
 
-// WriteEOAs writes data-table rows for each account: PlainAccountState,
-// HashedAccounts, and (in archive mode) AccountChangeSets at blockNum
-// + AccountsHistory.
+// WriteEOAs writes data-table rows for each account: HashedAccounts (the
+// canonical v2 account-state table), and (in archive mode) AccountChangeSets
+// at blockNum + AccountsHistory.
 //
-// All writes happen in ONE MDBX write transaction. Atomic; on error no
-// partial state is committed.
+// MDBX writes happen in ONE MDBX write transaction. The archive-mode
+// AccountsHistory write goes into the RocksDB column family v2 reth reads
+// from (envs.HistorySink); MDBX and RocksDB are independent backends so the
+// atomicity boundary is per-backend, not cross-backend. On error after
+// the RocksDB batch has accumulated, Envs.Close drains it; on caller
+// error before Close the batch is dropped (an empty datadir is a safe
+// abort state).
 //
 // Tables written per EOA:
-//   - PlainAccountState (Address → Account) — always
-//   - HashedAccounts (keccak(Address) → Account) — always
-//   - AccountChangeSets (DupSort: BE_u64(block) → AccountBeforeTx{addr, nil}) — archive only
-//   - AccountsHistory (ShardedKey(addr, u64::MAX) → IntegerList([blockNum])) — archive only
+//   - HashedAccounts (keccak(Address) → Account, MDBX) — always
+//   - AccountChangeSets (DupSort: BE_u64(block) → AccountBeforeTx{addr, nil}, MDBX) — archive only
+//   - AccountsHistory (ShardedKey(addr, u64::MAX) → IntegerList([blockNum]), RocksDB CF) — archive only
 //
 // In full mode (archive=false), the two archive-only tables are skipped:
 // at block 0 there's no history to preserve, and a full-mode reth node
@@ -56,18 +60,13 @@ func WriteEOAs(envs *Envs, accounts []*entitygen.Account, blockNum uint64, archi
 			ethAccount.EncodeCompact(&accBuf)
 			accountBytes := accBuf.Bytes()
 
-			// 1. PlainAccountState — raw addr → Account
-			if err := txn.Put(envs.MdbxDBIs["PlainAccountState"], acc.Address[:], accountBytes, 0); err != nil {
-				return fmt.Errorf("PlainAccountState %s: %w", acc.Address.Hex(), err)
-			}
-
-			// 2. HashedAccounts — keccak(addr) → Account
+			// HashedAccounts — keccak(addr) → Account (canonical v2 state)
 			if err := txn.Put(envs.MdbxDBIs["HashedAccounts"], acc.AddrHash[:], accountBytes, 0); err != nil {
 				return fmt.Errorf("HashedAccounts %s: %w", acc.Address.Hex(), err)
 			}
 
 			if archive {
-				// 3. AccountChangeSets — DupSort: BE_u64(block) → AccountBeforeTx{addr, nil}
+				// AccountChangeSets — DupSort: BE_u64(block) → AccountBeforeTx{addr, nil}
 				// Address is the DupSort SubKey (encoded first in AccountBeforeTx.EncodeCompact).
 				// Info=nil: account had no prior state (genesis creation).
 				abt := iReth.AccountBeforeTx{Address: acc.Address, Info: nil}
@@ -77,15 +76,10 @@ func WriteEOAs(envs *Envs, accounts []*entitygen.Account, blockNum uint64, archi
 					return fmt.Errorf("AccountChangeSets %s: %w", acc.Address.Hex(), err)
 				}
 
-				// 4. AccountsHistory — ShardedKey(addr, u64::MAX) → IntegerList([blockNum])
-				// u64::MAX marks the latest (open) shard; the bitmap contains the block
-				// numbers at which this account was first touched.
-				shardedKey := iReth.ShardedKeyAddress{Address: acc.Address, BlockNumber: ^uint64(0)}
-				var keyBuf bytes.Buffer
-				shardedKey.EncodeKey(&keyBuf)
-				var listBuf bytes.Buffer
-				iReth.EncodeIntegerList(&listBuf, []uint64{blockNum})
-				if err := txn.Put(envs.MdbxDBIs["AccountsHistory"], keyBuf.Bytes(), listBuf.Bytes(), 0); err != nil {
+				// AccountsHistory → RocksDB CF (v2 routing per
+				// either_writer.rs:741-759). Same encoding as the v1 MDBX
+				// row; only the backend differs.
+				if err := envs.HistorySink().PutAccountHistory(acc.Address, blockNum); err != nil {
 					return fmt.Errorf("AccountsHistory %s: %w", acc.Address.Hex(), err)
 				}
 			}

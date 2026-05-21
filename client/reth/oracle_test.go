@@ -82,7 +82,7 @@ func TestRethDbStats(t *testing.T) {
 		t.Fatalf("reth db stats failed:\noutput:\n%s\nerr: %v", out, err)
 	}
 	output := string(out)
-	for _, table := range []string{"PlainAccountState", "HashedAccounts", "Bytecodes"} {
+	for _, table := range []string{"HashedAccounts", "Bytecodes"} {
 		if !strings.Contains(output, table) {
 			t.Errorf("expected table %q in db stats output, got:\n%s", table, output)
 		}
@@ -119,11 +119,12 @@ func TestRethDbStatsSyntheticEOAs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reth db stats failed:\noutput:\n%s\nerr: %v", out, err)
 	}
+	// v2 routing: PlainAccountState must be empty (HashedAccounts is the
+	// canonical state); AccountsHistory lives in RocksDB CFs which `reth db
+	// stats` does NOT enumerate, so we only check the MDBX-resident tables.
 	output := string(out)
 	checks := map[string]int{
-		"PlainAccountState": numAccounts,
 		"HashedAccounts":    numAccounts,
-		"AccountsHistory":   numAccounts,
 		"AccountChangeSets": numAccounts,
 	}
 	for table, minEntries := range checks {
