@@ -18,6 +18,7 @@ import (
 	e2e "github.com/nerolation/state-actor/internal/e2e_testing"
 	"github.com/nerolation/state-actor/internal/oracle"
 	"github.com/nerolation/state-actor/internal/rpcprobe"
+	"github.com/nerolation/state-actor/internal/syscontracts"
 )
 
 // pinnedNethImage is the upstream Nethermind Docker tag the e2e suite
@@ -137,7 +138,7 @@ func TestE2ESuite(t *testing.T) {
 	cfg.PreAlloc = preAlloc
 	// Deploy EIP-4788/2935/7002/7251 system contracts at their canonical
 	// addresses — required for the cross-client genesis-root invariant.
-	oracle.AddCanonicalSystemContracts(&cfg)
+	syscontracts.AddCanonicalSystemContracts(&cfg)
 
 	if _, err := Run(context.Background(), cfg, Options{}); err != nil {
 		t.Fatalf("Run: %v", err)

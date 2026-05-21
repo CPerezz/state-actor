@@ -8,7 +8,7 @@ import (
 
 	"github.com/nerolation/state-actor/generator"
 	"github.com/nerolation/state-actor/internal/entitygen"
-	"github.com/nerolation/state-actor/internal/oracle"
+	"github.com/nerolation/state-actor/internal/syscontracts"
 )
 
 // GoldenStateRootCfg returns the canonical Osaka-bootable config every
@@ -36,7 +36,7 @@ func GoldenStateRootCfg(dbPath string) generator.Config {
 func AssertGoldenStateRoot(t *testing.T, clientName string, cfg generator.Config,
 	runFn func(context.Context, generator.Config) (*generator.Stats, error)) {
 	t.Helper()
-	oracle.AddCanonicalSystemContracts(&cfg)
+	syscontracts.AddCanonicalSystemContracts(&cfg)
 
 	stats, err := runFn(context.Background(), cfg)
 	if err != nil {

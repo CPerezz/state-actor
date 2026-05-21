@@ -16,6 +16,7 @@ import (
 	e2e "github.com/nerolation/state-actor/internal/e2e_testing"
 	"github.com/nerolation/state-actor/internal/oracle"
 	"github.com/nerolation/state-actor/internal/rpcprobe"
+	"github.com/nerolation/state-actor/internal/syscontracts"
 )
 
 // pinnedBesuImage is the upstream Besu Docker tag the e2e suite pins
@@ -88,7 +89,7 @@ func TestE2ESuite(t *testing.T) {
 	// addresses — besu refuses to boot a Prague-active chain without
 	// them ("Withdrawal Request Contract Address not found"), and on
 	// each block "Invalid system call address" if their code is missing.
-	oracle.AddCanonicalSystemContracts(&cfg)
+	syscontracts.AddCanonicalSystemContracts(&cfg)
 	if _, err := Run(context.Background(), cfg, Options{}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}

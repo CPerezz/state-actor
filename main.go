@@ -23,8 +23,8 @@ import (
 	"github.com/nerolation/state-actor/generator"
 	"github.com/nerolation/state-actor/genesis"
 	"github.com/nerolation/state-actor/internal/clientpolicy"
-	"github.com/nerolation/state-actor/internal/oracle"
 	"github.com/nerolation/state-actor/internal/sizecal"
+	"github.com/nerolation/state-actor/internal/syscontracts"
 	"github.com/nerolation/state-actor/internal/spec"
 	"github.com/nerolation/state-actor/internal/specbuild"
 	"github.com/nerolation/state-actor/internal/templates"
@@ -192,8 +192,8 @@ func main() {
 	// Deposit Contract) into cfg.GenesisAccounts / cfg.GenesisCode. Every
 	// supported client reads these maps when composing the genesis state,
 	// so this single call covers all 4 dispatch branches below. See
-	// internal/oracle/syscontracts.go for the contract list and rationale.
-	oracle.AddCanonicalSystemContracts(&config)
+	// internal/syscontracts/syscontracts.go for the contract list and rationale.
+	syscontracts.AddCanonicalSystemContracts(&config)
 
 	if *verbose {
 		log.Printf("Configuration:")
