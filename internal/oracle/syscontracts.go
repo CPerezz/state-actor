@@ -10,62 +10,23 @@ import (
 	"github.com/nerolation/state-actor/generator"
 )
 
-// DepositContractAddress is the canonical mainnet address of the Beacon
-// Chain Deposit Contract. Pinned literally to avoid threading a ChainConfig
-// through every caller — params.MainnetChainConfig.DepositContractAddress
-// holds the same value but is a per-config field, not a package-level constant.
+// DepositContractAddress is the canonical mainnet Beacon Chain Deposit Contract
+// address. Mirrors params.MainnetChainConfig.DepositContractAddress but pinned
+// as a package-level constant so callers don't have to thread a ChainConfig.
 var DepositContractAddress = common.HexToAddress("0x00000000219ab540356cBB839Cbe05303d7705Fa")
 
-// AddCanonicalSystemContracts populates cfg.GenesisAccounts + cfg.GenesisCode
-// with EVERY canonical mainnet system contract — the four Cancun/Prague
-// pre-execution contracts AND the Beacon Chain Deposit Contract. Without
-// these, post-Prague block processing diverges silently:
+// AddCanonicalSystemContracts injects the four Cancun/Prague pre-execution
+// system contracts (BeaconRoots, HistoryStorage, WithdrawalQueue,
+// ConsolidationQueue) plus the Beacon Chain Deposit Contract into
+// cfg.GenesisAccounts + cfg.GenesisCode. Required for post-Prague block
+// processing to match mainnet semantics.
 //
-//   - besu: "Failed to start Besu: Withdrawal Request Contract Address
-//     not found" at boot, then "Invalid system call address" + "Block
-//     creation failed unexpectedly" on every engine_forkchoiceUpdated.
-//   - geth/reth: per-block EIP-2935 + EIP-4788 system calls land on an
-//     address with no code; revm/geth-evm silently no-ops these calls.
-//     The ring-buffer storage stays empty, diverging from any compliant
-//     Ethereum node the moment something reads
-//     blockhash(N) at N - 256 < block < N - 8191.
+// Bytecode sources: params.{BeaconRoots,HistoryStorage,WithdrawalQueue,
+// ConsolidationQueue}Code for the Cancun/Prague four; DepositContractCode()
+// for the Deposit Contract (see deposit_contract.go for provenance).
 //
-// Bytecodes for the Cancun/Prague four come from
-// go-ethereum/params/protocol_params.go (canonical wire form
-// 3373fffffffffffffffffffffffffffffffffffffffe…). Deposit Contract bytecode
-// is vendored from Prysm's runtime/interop genesis helper (see
-// deposit_contract.go for full provenance).
-//
-// Addresses match
-//   - params.BeaconRootsAddress / HistoryStorageAddress /
-//     WithdrawalQueueAddress / ConsolidationQueueAddress (Cancun/Prague), and
-//   - DepositContractAddress (pinned here as the mainnet ChainConfig
-//     value 0x00000000219ab540...05Fa).
-//
-// Writes go through cfg.GenesisAccounts + cfg.GenesisCode (NOT g.Alloc) —
-// that's the field each client writer reads when composing the genesis
-// state. StateAccount is constructed with the correct Root (EmptyRootHash
-// — no storage) + CodeHash (keccak256(code)) so geth/nethermind/reth
-// writers (which encode the account RLP from the StateAccount struct
-// verbatim) produce the correct state root. Besu's writer reconstructs
-// both from code separately, so it tolerates zero values too, but uniform
-// field values keep all 4 writers in lock-step.
-//
-// Nonce=1 matches geth's --dev DeveloperGenesisBlock convention
-// (go-ethereum/core/genesis.go) so a chain built by state-actor and a
-// chain built by `geth --dev` from scratch produce the same state for
-// the system contracts.
-//
-// Called from main.go's --spec path AND every client's e2e_test.go /
-// golden_test.go right after BuildSynthetic. The canonical cross-client
-// invariant is "Osaka-bootable, mainnet-shaped state" — synthetic
-// entitygen entities + InjectAddresses + the five system contracts (this
-// helper). Every supported client (geth, reth, nethermind, besu) MUST
-// carry the full set; failing that, cross-client genesis-root parity
-// breaks and the post-Prague pre-execution path diverges.
-//
-// Idempotent: calling twice overwrites the same entries. Preserves any
-// existing GenesisAccounts entries (cf. syscontracts_test.go).
+// Nonce=1 matches go-ethereum's --dev DeveloperGenesisBlock convention.
+// Idempotent: calling twice overwrites the same entries.
 func AddCanonicalSystemContracts(cfg *generator.Config) {
 	if cfg == nil {
 		return
@@ -96,11 +57,6 @@ func AddCanonicalSystemContracts(cfg *generator.Config) {
 	}
 }
 
-// AddPragueSystemContracts is the previous (narrower) name for
-// AddCanonicalSystemContracts, kept as a thin alias so in-flight callers
-// continue to compile during the rename window. Prefer the canonical name
-// for new code; the alias will be removed in a follow-up cleanup pass.
-//
 // Deprecated: use AddCanonicalSystemContracts.
 func AddPragueSystemContracts(cfg *generator.Config) {
 	AddCanonicalSystemContracts(cfg)

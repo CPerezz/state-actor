@@ -18,23 +18,14 @@ import (
 	"github.com/cockroachdb/pebble/sstable"
 )
 
-// MemTableSize is the in-memory write buffer per Pebble MemTable.
-// Datasets up to this size stay entirely in RAM (no L0 flush).
-//
-// 256 MiB chosen for the parallel-drain case: with maxPhase0Workers=8
-// concurrent streamsort.Stores, the prior 2 GiB cap × (1 active + 16
-// immutable memtables) reached 272 GiB worst-case RAM — directly caused
-// the cap=32 OOM-kill at 127 GiB on the 125 GiB bench box. 256 MiB
-// keeps per-Store peak under ~520 MiB (memtable + cache); 8 workers
-// total ~4 GiB. More frequent L0 flushes are absorbed by Pebble's
-// merging iterator (~5-15% per-Store throughput cost, run in parallel).
+// MemTableSize is the per-Pebble-MemTable write buffer. Sized for 8
+// concurrent streamsort.Stores; peak per-Store RAM (memtable + cache) stays
+// under ~520 MiB.
 const MemTableSize = 256 << 20
 
 const (
 	batchFlushBytes = 64 << 20
-	// blockCacheBytes is the per-Store Pebble block cache. Small because
-	// streamsort.Iterate is a single sequential scan — the cache benefit
-	// is tiny vs the per-worker RAM cost at 8 parallel Stores.
+	// blockCacheBytes is small because Iterate is a single sequential scan.
 	blockCacheBytes = 8 << 20
 )
 

@@ -172,18 +172,12 @@ func NewHashBuilder(emit NodeEmitter) *HashBuilder {
 	return &HashBuilder{emit: emit}
 }
 
-// NewHashBuilderFullEmissions is the state-actor genesis variant: emits a
-// BranchNodeCompact for every branch whose RLP encoding is ≥ 32 bytes,
-// regardless of hash_mask / tree_mask state. Use this when populating
-// reth's AccountsTrie / StoragesTrie at genesis so the runtime's
-// TrieWalker can find the cached branch rows it expects (without them,
-// payload-build hits the 300 s MDBX read-txn timeout on the full-state
-// walk; see project_reth_trie_cache.md memory).
-//
-// The synthesised emission set is a strict superset of alloy_trie's
-// add_branch-driven set — every alloy_trie-emitted row appears here
-// too (its tree_mask/hash_mask are non-zero by construction), plus the
-// hashed branches that alloy_trie would have skipped at genesis.
+// NewHashBuilderFullEmissions emits a BranchNodeCompact for every branch
+// whose RLP encoding is ≥ 32 bytes, regardless of hash_mask / tree_mask
+// state. Required when populating reth's AccountsTrie / StoragesTrie at
+// genesis so reth's TrieWalker finds the cached branch rows; otherwise
+// payload-build falls back to a linear HashedAccounts walk per block.
+// The emission set is a strict superset of alloy_trie's add_branch set.
 func NewHashBuilderFullEmissions(emit NodeEmitter) *HashBuilder {
 	return &HashBuilder{emit: emit, fullEmissions: true}
 }
@@ -497,10 +491,7 @@ func (b *HashBuilder) pushBranchNode(current []byte, length int) {
 			Hashes:    hashes,
 			RootHash:  rootHashPtr,
 		}
-		// SENTINEL-V2: drift-detect this binary in production
-		// (extract /usr/local/bin/state-actor; strings | grep SENTINEL-V2).
-		_ = "SENTINEL-V2-MASK-INTERSECT"
-		// Ignore emit errors for now (Task 6 can add error propagation).
+		// TODO: propagate emit errors (alloy_trie's add_branch signature returns ()).
 		_ = b.emit(path, bnc)
 	}
 

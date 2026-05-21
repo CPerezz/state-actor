@@ -47,15 +47,13 @@ func WriteContracts(envs *Envs, contracts []*entitygen.Account, blockNum uint64,
 
 			var storageRoot common.Hash
 			if len(contract.Storage) > 0 {
-				// Per-contract StoragesTrie emit: writes the intermediate
-				// branch-node cache reth's payload builder reads during
-				// state-root computation. Keyed under contract.AddrHash as
-				// the DupSort main key; SubKey + BNC are co-encoded into
-				// the value via StorageTrieEntry. Plain txn.Put (no
-				// Append) — contracts in this batch aren't addrHash-
-				// sorted, so AppendDup's "key >= last in DB" precondition
-				// would fail on cross-contract boundaries.
-				// See project_reth_trie_cache.md for the motivation.
+				// Per-contract StoragesTrie emit: writes the intermediate-node
+				// cache reth's payload builder reads during state-root
+				// computation. DupSort main key = AddrHash; SubKey + BNC are
+				// co-encoded into the value via StorageTrieEntry. Plain Put
+				// (not AppendDup) — contracts in this batch aren't
+				// addrHash-sorted, so AppendDup's monotonic-main-key
+				// precondition would fail on cross-contract boundaries.
 				contractAddrHash := contract.AddrHash
 				emit := func(path iReth.StoredNibbles, node iReth.BranchNodeCompact) error {
 					var valBuf bytes.Buffer

@@ -16,25 +16,18 @@ import (
 var ErrSlotsOutOfOrder = errors.New("besu/trie: AddSlot called out of keccak-ascending order")
 
 // StreamingStorageBuilder builds the per-account Bonsai storage trie in
-// O(depth) memory by processing keccak-sorted slot inserts through a
-// right-spine. Mirrors the reth HashBuilder / geth StackTrie algorithm
-// with Bonsai-specific adjustments at the emit step:
-//
-//   - DB key is the raw-nibble location (one byte per nibble), assembled
-//     incrementally from current[0:lenFrom] for leaves/extensions and
-//     current[0:length] for branches.
+// O(trie depth) memory by processing keccak-sorted slot inserts through a
+// right-spine, mirroring the reth HashBuilder / geth StackTrie algorithm.
+// Bonsai-specific:
+//   - DB key is the raw-nibble location (1 byte/nibble), assembled
+//     incrementally from current[0:lenFrom] (leaves/extensions) or
+//     current[0:length] (branches).
 //   - Roots whose RLP < 32 bytes are emitted explicitly at RootLocation
-//     (matches StorageBuilder.Commit's small-root special case).
+//     (matches StorageBuilder.Commit's small-root case).
 //   - Nodes whose hash equals besu.EmptyTrieNodeHash are not emitted.
 //
 // Input contract: AddSlot calls MUST arrive in strictly ascending
-// keccak256(slotKey) order. The streamingtrie.IterateRoot driver
-// provides this guarantee.
-//
-// Memory profile: O(trie depth × 16 child refs × 33 bytes) ≈ 4-5 KiB
-// peak, independent of slot count. The non-streaming StorageBuilder is
-// O(slot count) — for a 250 M-slot bloated EOA that's ~30-75 GiB, which
-// is the 2026-05-17 bloatnet OOM root cause.
+// keccak256(slotKey) order; streamingtrie.IterateRoot provides this.
 type StreamingStorageBuilder struct {
 	addrHash common.Hash
 	sink     NodeSink

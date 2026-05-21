@@ -59,9 +59,9 @@ var (
 	client = flag.String("client", "geth", "Target Ethereum client: 'geth' (default), 'nethermind', 'besu', or 'reth'.")
 
 	archive = flag.Bool("archive", false, "Configure the generated DB for archive-mode operation.\n"+
-		"  reth: writes StoragesHistory + AccountsHistory + StorageChangeSets + AccountChangeSets at genesis (~80-130 GB at bloatnet scale; full mode skips them).\n"+
-		"  geth: writes PathDB archive-anchor metadata so geth boots cleanly under --gcmode=archive.\n"+
-		"Rejected for besu and nethermind which have no archive code path.")
+		"  reth: writes StoragesHistory + AccountsHistory + StorageChangeSets + AccountChangeSets at genesis.\n"+
+		"  geth: writes PathDB archive-anchor metadata for --gcmode=archive boots.\n"+
+		"Rejected for besu and nethermind (no archive code path).")
 )
 
 func main() {
@@ -107,14 +107,10 @@ func main() {
 		}
 	}
 
-	// --archive validation: gate on per-client support. Only geth and
-	// reth have archive code paths; besu/nethermind would silently
-	// ignore. Fail fast at parse time so users don't burn a 30+ min
-	// gen on a flag that wouldn't take effect.
+	// Reject --archive for clients that have no archive code path.
 	if *archive {
 		switch *client {
 		case "geth", "reth":
-			// supported — see client/{geth,reth} writer changes
 		default:
 			log.Fatalf("--archive is only supported on geth and reth; got --client=%s. Re-run without --archive.", *client)
 		}

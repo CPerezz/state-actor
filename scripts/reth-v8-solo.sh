@@ -66,10 +66,11 @@ docker run -d --name $CT \
     -v $DATA:/data \
     ghcr.io/paradigmxyz/reth@sha256:e528857e5e9ebc2c6cb99f28436e70ded38ca905629f00afc98d186e27d206e0 \
     node --dev --dev.block-time=1s --debug.skip-genesis-validation \
+    --chain /data/chainspec.json \
     --datadir /data \
     --port $P2P_PORT \
     --discovery.port $P2P_PORT \
-    --http --http.addr=127.0.0.1 --http.port=$HTTP_PORT
+    --http --http.addr=127.0.0.1 --http.port=$HTTP_PORT --http.api=eth,net,web3,txpool
 
 # 3. Wait for RPC
 elapsed=0

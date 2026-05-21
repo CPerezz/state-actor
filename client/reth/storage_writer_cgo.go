@@ -37,11 +37,8 @@ import (
 // Caller is responsible for transferring the returned count to *generator.Stats
 // only after the enclosing MDBX transaction commits.
 //
-// archive controls writes to the two archive-only tables (StorageChangeSets,
-// StoragesHistory). When archive=false (full mode, default), both are
-// skipped — a full-mode reth node prunes them past the pruning window,
-// and at block 0 there's no history to preserve. When archive=true,
-// both are written matching the original reth schema for archive nodes.
+// archive=false skips StorageChangeSets + StoragesHistory (no genesis history
+// to preserve); archive=true writes both per the reth archive schema.
 func WriteContractStorage(
 	txn *mdbx.Txn,
 	dbis map[string]mdbx.DBI,

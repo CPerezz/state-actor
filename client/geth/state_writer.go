@@ -34,15 +34,8 @@ const phase1FlushBytes = 64 * 1024 * 1024
 // keccak hashing is parallelised across cores.
 const parallelKeccakThreshold = 64
 
-// maxPhase0Workers caps Phase 0's drain-and-compute parallelism. Matches
-// reth's maxStreamSpecStorageWorkers — both clients use the same upper
-// bound.
-//
-// Each worker owns a streamsort.Store with a 2 GiB MemTable cap plus
-// Pebble's per-flush queue (MemTableStopWritesThreshold = 16). On the
-// bloatnet workload at 32 workers, this OOM-killed state-actor at 127
-// GiB anon-RSS on a 125 GiB box. 8 keeps the worst-case under ~32 GiB
-// while still giving 5+ parallel bloated-EOA drains.
+// maxPhase0Workers caps Phase 0 drain-and-compute parallelism so peak
+// per-worker streamsort RAM stays within the design budget.
 const maxPhase0Workers = 8
 
 // scratchBatchFlushBytes is the per-worker batch flush threshold during

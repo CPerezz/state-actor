@@ -12,21 +12,16 @@ import (
 	"github.com/linxGnu/grocksdb"
 )
 
-// bulkBackgroundJobs caps RocksDB's background compaction/flush thread
-// pool per-DB during bulk import. Matches geth's MaxConcurrentCompactions
-// cap (commit aa0bfcb) and besu's bulkBackgroundJobs (commit 4847945).
+// bulkBackgroundJobs caps RocksDB's per-DB background compaction/flush thread
+// pool during bulk import.
 const bulkBackgroundJobs = 8
 
 // perDBWriteBufferBytes is the per-DB memtable size during bulk import.
-// 256 MiB matches geth's prodPebbleOptions.MemTableSize and besu's
-// perCFWriteBufferBytes. Defaults were 2 MiB.
 const perDBWriteBufferBytes = 256 * 1024 * 1024
 
-// bulkRocksOptions returns a fresh *grocksdb.Options tuned for the
-// nethermind bulk-import path. Defers compaction (Level0*Trigger =
-// MaxInt32) so the bulk write isn't interrupted by L0 stalls; the
-// final CompactRange in Close() pays the LSM-flattening cost once,
-// parallelised across MaxBackgroundJobs. Mirrors besu commit 4847945.
+// bulkRocksOptions returns *grocksdb.Options tuned for the bulk-import path:
+// L0 triggers pinned to MaxInt32 (no compaction during writes), one final
+// CompactRange at Close().
 func bulkRocksOptions() *grocksdb.Options {
 	opts := grocksdb.NewDefaultOptions()
 	opts.SetCreateIfMissing(true)
@@ -227,12 +222,9 @@ func openNethDBs(dataDir string) (*nethDBs, error) {
 // Close releases all open grocksdb resources. Safe to call multiple times
 // and on partially-opened structs.
 //
-// Before closing each DB, runs a full-range CompactRange so the LSM tree
-// is flat when Nethermind later opens it. We suppressed auto-compactions
-// during the bulk write via bulkRocksOptions (Level0FileNumCompactionTrigger
-// = MaxInt32) — this is where we pay that deferred cost, parallelised
-// across MaxBackgroundJobs threads. Mirrors geth commit 32ac564 and besu
-// commit 4847945.
+// Before closing each DB, runs a full-range CompactRange so the LSM tree is
+// flat when Nethermind later opens it — pays the deferred-compaction cost
+// from the bulk write, parallelised across MaxBackgroundJobs.
 func (d *nethDBs) Close() {
 	emptyRange := grocksdb.Range{Start: nil, Limit: nil}
 

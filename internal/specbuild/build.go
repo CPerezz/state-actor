@@ -20,16 +20,14 @@ type BuildOptions struct {
 	ClientName string
 	// Sizer translates approximate_size_bytes → slot count.
 	Sizer templates.SizeApproximator
-	// TargetSize, when non-zero, caps the projected trie-DB footprint of
-	// the returned PreAlloc list. The spec entity list is walked in
-	// declaration order and each entity's projected cost is
-	//   sizecal.BytesPerAccount(client)
-	//   + sizecal.BytesPerSlot(client) × Sizer.SlotsForBytes(client, e.ApproximateSizeBytes)
-	// Once including the next entity would exceed TargetSize, all remaining
-	// entities are dropped. Because the calibration constants are global
-	// and the walk order is identical across clients, every client
-	// truncates to the same prefix — preserving the cross-client
-	// genesis-root invariance gate.
+	// TargetSize, when non-zero, caps the projected trie-DB footprint of the
+	// returned PreAlloc. Walks the spec in declaration order, projecting each
+	// entity's cost as
+	//   sizecal.BytesPerAccount(client) +
+	//   sizecal.BytesPerSlot(client) × Sizer.SlotsForBytes(client, e.ApproximateSizeBytes)
+	// and drops all remaining entities once including the next would exceed
+	// the cap. Deterministic across clients (same global constants + identical
+	// walk order) — preserves the cross-client genesis-root invariance gate.
 	TargetSize uint64
 }
 

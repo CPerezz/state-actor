@@ -30,17 +30,14 @@ type stateDBSink struct {
 	pendingBytes int
 }
 
-// stateBatchFlushBytes is the WriteBatch flush threshold. 64 MiB matches
-// geth's defaultFlushBytes and besu's flushThresholdBytes — at 16 MiB
-// (the pre-tuning value) the v5 bench paid 4x the per-flush RocksDB
-// commit overhead, contributing materially to the 2:42 wall time.
+// stateBatchFlushBytes is the WriteBatch flush threshold, sized to amortise
+// RocksDB commit overhead.
 const stateBatchFlushBytes = 64 * 1024 * 1024
 
 func newStateDBSink(db *grocksdb.DB) *stateDBSink {
 	wo := grocksdb.NewDefaultWriteOptions()
-	// Genesis is one-shot; durability comes from the final CompactRange
-	// + Close. Skipping WAL on the bulk-flush path saves ~50% of
-	// RocksDB's write amplification (matches besu commit 4847945).
+	// Disable WAL on bulk flushes. Durability is owed at the final
+	// CompactRange + Close.
 	wo.DisableWAL(true)
 	return &stateDBSink{
 		db: db,
@@ -95,19 +92,14 @@ func (s *stateDBSink) SetStorageNode(addrHash [32]byte, path []byte, pathLen int
 	return s.put(nethstorage.StorageNodeKey(addrHash, path, pathLen, keccak), rlpBlob)
 }
 
-// codeDBSink mirrors stateDBSink for the dbs.code RocksDB. Without this,
-// genesis-alloc code + synthetic-contract code were each a separate
-// db.Put with WAL-enabled WriteOptions — both an fsync-bound bottleneck
-// and a data race once Phase 0 became parallel. The same 64 MiB flush
-// threshold + DisableWAL(true) pattern from stateDBSink applies here.
+// codeDBSink batches writes to the dbs.code RocksDB at stateBatchFlushBytes
+// and is safe for concurrent callers via the internal mutex (Phase 0 workers
+// share one instance).
 type codeDBSink struct {
-	db *grocksdb.DB
-	wo *grocksdb.WriteOptions
-	wb *grocksdb.WriteBatch
-	mu sync.Mutex // codeDBSink may be shared across Phase 0 workers
-	// pendingBytes is the live WriteBatch payload size; flush at the
-	// stateBatchFlushBytes threshold (same constant — both DBs see
-	// similar bulk-write volumes during a 100 GB-target gen).
+	db           *grocksdb.DB
+	wo           *grocksdb.WriteOptions
+	wb           *grocksdb.WriteBatch
+	mu           sync.Mutex
 	pendingBytes int
 }
 

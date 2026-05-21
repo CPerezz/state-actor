@@ -195,16 +195,13 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 	}
 
 	if accountsCreated+contractsCreated > 0 {
-		// Wrap state-root computation in an MDBX write txn so the
-		// per-branch emissions populate AccountsTrie. Without this,
-		// reth's payload-builder state-root computation falls back to a
-		// linear HashedAccounts walk on every block (project memory:
-		// project_reth_trie_cache.md). cursor.Put (flag=0) accepts any
-		// key order: HashBuilder emissions arrive in descending-depth
-		// order during unwinds, and the variable-length AccountsTrie
-		// key layout (see below) means shallow paths sort
-		// lexicographically smaller than deeper ones — cursor.Append
-		// would silently drop those shallow rows.
+		// Wrap state-root computation in an MDBX write txn so per-branch
+		// emissions populate AccountsTrie; without it, reth's payload builder
+		// falls back to a linear HashedAccounts walk per block. cursor.Put
+		// (flag=0) accepts any key order: HashBuilder emissions arrive in
+		// descending-depth order during unwinds, and the variable-length
+		// AccountsTrie key layout means shallow paths sort smaller than
+		// deeper ones — cursor.Append would silently drop shallow rows.
 		var root common.Hash
 		err := envs.Mdbx.Update(func(txn *mdbx.Txn) error {
 			cur, cerr := txn.OpenCursor(envs.MdbxDBIs["AccountsTrie"])
