@@ -88,7 +88,7 @@ type Config struct {
 
 	// GenesisAccounts / GenesisStorage / GenesisCode carry pre-allocated
 	// state consumed by all 4 client writers (e.g. post-Merge EIP system
-	// contracts deployed by oracle.AddCanonicalSystemContracts). Validate()
+	// contracts deployed by syscontracts.AddCanonicalSystemContracts). Validate()
 	// rejects orphan Storage/Code entries (no matching GenesisAccounts).
 	// The --spec YAML path populates these via PreAlloc + Validate().
 	GenesisAccounts map[common.Address]*types.StateAccount

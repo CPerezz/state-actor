@@ -19,6 +19,7 @@ import (
 	e2e "github.com/nerolation/state-actor/internal/e2e_testing"
 	"github.com/nerolation/state-actor/internal/oracle"
 	"github.com/nerolation/state-actor/internal/rpcprobe"
+	"github.com/nerolation/state-actor/internal/syscontracts"
 )
 
 // defaultGethImage is the upstream geth Docker tag the e2e suite pins
@@ -108,7 +109,7 @@ func TestE2ESuite(t *testing.T) {
 	// addresses — required for the cross-client genesis-root invariant
 	// (besu refuses to boot without them; geth/neth/reth tolerate but
 	// would compute a different state root than besu without them).
-	oracle.AddCanonicalSystemContracts(&cfg)
+	syscontracts.AddCanonicalSystemContracts(&cfg)
 
 	if _, err := Populate(context.Background(), cfg, Options{}); err != nil {
 		t.Fatalf("Populate: %v", err)

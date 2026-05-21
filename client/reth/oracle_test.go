@@ -17,6 +17,7 @@ import (
 	"github.com/nerolation/state-actor/internal/oracle"
 	iReth "github.com/nerolation/state-actor/internal/reth"
 	"github.com/nerolation/state-actor/internal/rpcprobe"
+	"github.com/nerolation/state-actor/internal/syscontracts"
 )
 
 // rethImageRef returns the fully-qualified reth image reference from the
@@ -249,7 +250,7 @@ func TestE2ESuite(t *testing.T) {
 	cfg.PreAlloc = preAlloc
 	// Deploy EIP-4788/2935/7002/7251 system contracts at their canonical
 	// addresses — required for the cross-client genesis-root invariant.
-	oracle.AddCanonicalSystemContracts(&cfg)
+	syscontracts.AddCanonicalSystemContracts(&cfg)
 
 	if _, err := RunCgo(context.Background(), cfg, Options{}); err != nil {
 		t.Fatalf("RunCgo: %v", err)

@@ -12,7 +12,7 @@ import "github.com/ethereum/go-ethereum/common"
 //   - HistoryStorage (EIP-2935) — params.HistoryStorageAddress
 //   - WithdrawalQueue (EIP-7002) — params.WithdrawalQueueAddress
 //   - ConsolidationQueue (EIP-7251) — params.ConsolidationQueueAddress
-//   - Beacon-chain DepositContract — oracle.DepositContractAddress
+//   - Beacon-chain DepositContract — syscontracts.DepositContractAddress
 //     (0x00000000219ab540...05Fa); bytecode vendored from Prysm v6.0.5-rc.1.
 //
 // Every MPT-mode client adapter (geth, nethermind, besu, reth) MUST

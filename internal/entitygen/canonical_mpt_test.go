@@ -15,7 +15,7 @@ import (
 	"github.com/holiman/uint256"
 
 	. "github.com/nerolation/state-actor/internal/entitygen"
-	"github.com/nerolation/state-actor/internal/oracle"
+	"github.com/nerolation/state-actor/internal/syscontracts"
 )
 
 // TestCanonicalOsakaMPTRoot pins the canonical hexary-MPT state root for
@@ -102,14 +102,13 @@ func TestCanonicalOsakaMPTRoot(t *testing.T) {
 	}
 
 	// 5 canonical system contracts at canonical addresses — match
-	// oracle.AddCanonicalSystemContracts (Nonce=1, Balance=0,
+	// syscontracts.AddCanonicalSystemContracts (Nonce=1, Balance=0,
 	// Root=EmptyRootHash, CodeHash=keccak256(code)). The 4 per-client
 	// golden tests also call AddCanonicalSystemContracts before computing
 	// state root, so this canonical hash matches what all 4 writers
 	// produce for the canonical config. The DepositContract is sourced
-	// via the oracle package (Prysm-vendored bytecode) so the two
-	// packages don't drift — wire it in via a tiny indirection because
-	// internal/oracle imports internal/entitygen (cyclic if reversed).
+	// via the syscontracts package (Prysm-vendored bytecode) so the two
+	// packages don't drift.
 	sysContracts := []struct {
 		addr common.Address
 		code []byte
@@ -118,7 +117,7 @@ func TestCanonicalOsakaMPTRoot(t *testing.T) {
 		{params.HistoryStorageAddress, params.HistoryStorageCode},
 		{params.WithdrawalQueueAddress, params.WithdrawalQueueCode},
 		{params.ConsolidationQueueAddress, params.ConsolidationQueueCode},
-		{oracle.DepositContractAddress, oracle.DepositContractCode()},
+		{syscontracts.DepositContractAddress, syscontracts.DepositContractCode()},
 	}
 	for _, sc := range sysContracts {
 		sa := &types.StateAccount{
