@@ -14,6 +14,7 @@ import (
 	stategenesis "github.com/nerolation/state-actor/genesis"
 	"github.com/nerolation/state-actor/generator"
 	e2e "github.com/nerolation/state-actor/internal/e2e_testing"
+	"github.com/nerolation/state-actor/internal/engineapi"
 	"github.com/nerolation/state-actor/internal/oracle"
 	"github.com/nerolation/state-actor/internal/rpcprobe"
 	"github.com/nerolation/state-actor/internal/syscontracts"
@@ -172,7 +173,7 @@ func TestE2ESuite(t *testing.T) {
 	// Mock CL: drive block production via engine API. Modeled after besu's
 	// own PragueAcceptanceTestHelper.java. The goroutine runs for the
 	// rest of the test so spamoor's txs (Phase 5) get included in blocks.
-	e2e.StartEngineDriver(t, containerIP, rpcURL, e2e.ForkOsaka)
+	e2e.StartEngineDriver(t, containerIP, rpcURL, engineapi.ForkOsaka)
 
 	// Phases 3-7: shared via internal/e2e.RunSuitePhases.
 	e2e.RunSuitePhases(t, e2e.SuitePhasesCfg{
