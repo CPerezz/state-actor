@@ -57,7 +57,8 @@ const nethermindE2EConfigTemplate = `{
   },
   "Sync": {
     "NetworkingEnabled": false,
-    "SynchronizationEnabled": false
+    "SynchronizationEnabled": false,
+    "PivotNumber": 0
   },
   "TxPool": {
     "Size": 128,

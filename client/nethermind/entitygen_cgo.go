@@ -23,16 +23,10 @@ import (
 	"github.com/nerolation/state-actor/internal/streamsort"
 )
 
-// maxPhase0Workers caps Phase 0's drain-and-compute parallelism, mirroring
-// geth's maxPhase0Workers and besu's maxPhase0Workers (both = 8). Each
-// worker holds an independent nethtrie.Builder + stateDBSink (per-worker
-// grocksdb.WriteBatch up to stateBatchFlushBytes = 64 MiB) + a per-call
-// streamsort.Store (256 MiB MemTable). At 8 workers, peak RAM ≈ 3-4 GiB
-// over and above the baseline. Raising the cap on a 96-core box helps
-// only if there are >8 PreAlloc entities of comparable cost; with the
-// bloatnet spec, 5 long-pole bloat EOAs dominate and the cap of 8 is
-// already adequate (intra-entity parallelism would be the next step
-// for further gains — out of scope here, tracked in a follow-up issue).
+// maxPhase0Workers caps Phase 0 drain-and-compute parallelism. Each worker
+// holds a nethtrie.Builder + stateDBSink (grocksdb.WriteBatch up to
+// stateBatchFlushBytes) + a streamsort.Store; peak per-worker RAM scales
+// linearly.
 const maxPhase0Workers = 8
 
 // writeSyntheticAccounts populates the State + Code DBs from synthetic

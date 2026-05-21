@@ -25,11 +25,8 @@ import (
 	"github.com/nerolation/state-actor/internal/streamsort"
 )
 
-// maxPhase0Workers caps Phase 0's drain-and-compute parallelism, mirroring
-// geth's maxPhase0Workers and reth's maxStreamSpecStorageWorkers. Each
-// worker owns its own streamsort.Store and grocksdb.WriteBatch; 8 keeps
-// peak RAM under the 32 GiB target after the streamsort downsizing
-// (commit aa0bfcb).
+// maxPhase0Workers caps Phase 0 drain-and-compute parallelism so peak
+// per-worker RAM (streamsort.Store + grocksdb.WriteBatch) stays within budget.
 const maxPhase0Workers = 8
 
 // writeStateAndCollectRoot drives the two-phase streaming pipeline:

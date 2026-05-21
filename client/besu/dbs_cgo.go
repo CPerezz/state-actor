@@ -14,16 +14,13 @@ import (
 	"github.com/nerolation/state-actor/internal/besu/keys"
 )
 
-// bulkBackgroundJobs caps RocksDB's background compaction/flush thread
-// pool during bulk import. Matches geth's MaxConcurrentCompactions cap
-// (commit aa0bfcb) — 8 threads is enough to drive the final
-// CompactRange in parallel without ballooning RAM.
+// bulkBackgroundJobs caps RocksDB's background compaction/flush thread pool
+// during bulk import. 8 is enough to drive the final CompactRange in parallel
+// without ballooning RAM.
 const bulkBackgroundJobs = 8
 
-// perCFWriteBufferBytes is the per-column-family memtable size during
-// bulk import. 256 MiB matches geth's prodPebbleOptions.MemTableSize;
-// it dictates the flush granularity (smaller -> more L0 SSTs, larger
-// -> larger RAM footprint per CF).
+// perCFWriteBufferBytes is the per-CF memtable size during bulk import. Larger
+// → fewer L0 SSTs but more RAM per CF.
 const perCFWriteBufferBytes = 256 * 1024 * 1024
 
 // Besu opens ONE RocksDB instance under <datadir>/database/ with all 8 column
@@ -124,13 +121,9 @@ func openBesuDB(datadir string) (*besuDB, error) {
 		opts := grocksdb.NewDefaultOptions()
 		opts.SetCompression(grocksdb.LZ4Compression)
 		opts.SetLevelCompactionDynamicLevelBytes(true)
-		// Bulk-import tuning per the v5 bench analysis: with default
-		// 64 MiB memtables + Level0FileNumCompactionTrigger=4, besu
-		// hit a ~9 min L0-stall plateau at 32 GB. Raising the memtable
-		// to 256 MiB plus pinning all three L0 triggers to MaxInt32
-		// suppresses auto-compaction during the import; the final
-		// CompactRange at Close pays the LSM-flattening cost once,
-		// parallelised. Mirrors geth's commit 32ac564 model.
+		// Bulk-import tuning: 256 MiB memtables, L0 triggers pinned to
+		// MaxInt32 (no auto-compaction during writes), one final
+		// CompactRange in Close().
 		opts.SetWriteBufferSize(perCFWriteBufferBytes)
 		opts.SetMaxWriteBufferNumber(4)
 		opts.SetLevel0FileNumCompactionTrigger(math.MaxInt32)
@@ -157,10 +150,8 @@ func openBesuDB(datadir string) (*besuDB, error) {
 	dbOpts.SetCreateIfMissingColumnFamilies(true)
 	dbOpts.SetMaxTotalWalSize(1 << 30) // 1 GB — Besu's default
 	dbOpts.SetKeepLogFileNum(7)        // 1 week of daily rotation
-	// Use multiple background threads for parallel CF flushes during
-	// the bulk import and parallel CompactRange at Close. Capped at
-	// bulkBackgroundJobs (8) — on the 96-core bench box, the default
-	// of 1 was a real bottleneck.
+	// Multiple background threads for parallel CF flushes + parallel
+	// CompactRange at Close. Capped at bulkBackgroundJobs.
 	parallelism := runtime.NumCPU()
 	if parallelism > bulkBackgroundJobs {
 		parallelism = bulkBackgroundJobs
@@ -198,11 +189,9 @@ func openBesuDB(datadir string) (*besuDB, error) {
 // Close releases all open grocksdb resources. Safe to call multiple times
 // and on partially-initialized structs.
 //
-// Before closing, runs a full-range CompactRange on every user CF so the
-// LSM tree is flat when Besu later opens this DB. We suppressed auto-
-// compactions during the bulk write (Level0FileNumCompactionTrigger =
-// MaxInt32) — this is where we pay that deferred cost, parallelised
-// across MaxBackgroundJobs threads. Mirrors geth's commit 32ac564.
+// Before closing, runs a full-range CompactRange on every user CF so the LSM
+// tree is flat when Besu later opens this DB — pays the deferred cost from
+// the bulk write's suppressed compactions, parallelised across MaxBackgroundJobs.
 func (b *besuDB) Close() {
 	if b.db != nil {
 		// CompactRange the user CFs only. The Default CF is empty in our

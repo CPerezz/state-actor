@@ -123,23 +123,11 @@ type Config struct {
 	// streaming consumption by per-client writers).
 	PreAlloc []templates.PreAllocEntity
 
-	// Archive, when true, generates a DB sized for an archive-mode node.
-	//
-	// For reth this means writing the four archive-only tables at genesis:
-	// StorageChangeSets, StoragesHistory, AccountChangeSets, AccountsHistory.
-	// A full-mode reth node prunes these after the pruning window; at
-	// block 0 there's no history to preserve, so the default (false)
-	// skips them. Saves ~80-130 GB at bloatnet scale (v6 measured 285 GB
-	// archive vs projected ~200 GB full-mode).
-	//
-	// For geth this means writing PathDB archive-anchor metadata so geth
-	// boots cleanly under --gcmode=archive. Negligible disk delta — the
-	// state-trie content at block 0 is identical between full and archive
-	// mode (no historical state to preserve yet).
-	//
-	// Not supported for besu or nethermind — their writers have no
-	// archive code path. main.go rejects --archive for those clients at
-	// CLI parse time.
+	// Archive, when true, generates a DB sized for an archive-mode node:
+	// reth writes the four archive-only tables (Account/StorageChangeSets +
+	// Account/StoragesHistory); geth writes the PathDB archive-anchor
+	// metadata for --gcmode=archive. besu and nethermind have no archive
+	// code path; main.go rejects --archive for those clients at parse time.
 	Archive bool
 }
 

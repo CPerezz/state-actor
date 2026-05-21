@@ -26,13 +26,10 @@ import (
 //   - BlockBodyIndices: BE u64(0) → Compact StoredBlockBodyIndices{0, 0}.
 //   - PruneCheckpoints (NON-ARCHIVE ONLY): two rows for AccountHistory +
 //     StorageHistory with block_number=Some(0), prune_mode=Before(1).
-//     This triggers reth's HistoricalStateProvider to use the
-//     MaybeInPlainState fallback when the history-index tables are empty —
-//     critical because state-actor doesn't write those tables in
-//     non-archive mode (gated by `if archive`), and without this marker
-//     reth returns NotYetWritten → eth_getBalance returns 0 for any
-//     genesis account once the chain advances past genesis.
-//     See plan: /Users/random_anon/.claude/plans/on-the-meantime-i-proud-karp.md
+//     Triggers reth's HistoricalStateProvider.MaybeInPlainState branch
+//     (historical.rs:861-867) so eth_getBalance on genesis accounts reads
+//     PlainAccountState directly instead of returning NotYetWritten when
+//     history-index tables are empty in non-archive mode.
 //
 // VersionHistory is intentionally NOT written here. Reth's init_db writes its
 // own ClientVersion entry keyed by the current Unix timestamp on every boot.

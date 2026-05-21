@@ -117,8 +117,8 @@ boot_client() {
                 --data-path=/data \
                 --rpc-http-enabled --rpc-http-host=127.0.0.1 --rpc-http-port=8545 \
                 --rpc-http-api=ETH,NET,WEB3,TXPOOL,DEBUG \
-                --host-allowlist=* \
-                --engine-rpc-enabled --engine-host-allowlist=* \
+                --host-allowlist=all \
+                --engine-rpc-enabled --engine-host-allowlist=all \
                 --engine-rpc-port=8551 \
                 --engine-jwt-disabled
             ;;
@@ -156,8 +156,9 @@ boot_client() {
                 -v $data:/data \
                 ghcr.io/paradigmxyz/reth@sha256:e528857e5e9ebc2c6cb99f28436e70ded38ca905629f00afc98d186e27d206e0 \
                 node --dev --dev.block-time=1s --debug.skip-genesis-validation \
+                --chain /data/chainspec.json \
                 --datadir /data \
-                --http --http.addr=127.0.0.1 --http.port=8545
+                --http --http.addr=127.0.0.1 --http.port=8545 --http.api=eth,net,web3,txpool
             ;;
         *)
             echo "unknown client: $client" >&2; return 1 ;;

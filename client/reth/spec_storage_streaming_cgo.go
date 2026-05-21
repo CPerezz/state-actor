@@ -19,24 +19,16 @@ import (
 	"github.com/nerolation/state-actor/internal/streamingtrie"
 )
 
-// maxStreamSpecStorageWorkers caps the drain-and-compute worker count.
-// Matches geth's maxPhase0Workers — both clients use the same upper
-// bound. Each worker owns a streamsort.Store; at 8 workers RAM stays
-// under the 32 GiB target after the streamsort memtable downsizing
-// (commit aa0bfcb).
+// maxStreamSpecStorageWorkers caps drain-and-compute parallelism; each worker
+// owns a streamsort.Store so peak RAM scales linearly.
 const maxStreamSpecStorageWorkers = 8
 
-// chunkSlots is the slot-batch size workers emit to the consumer.
-// Bounds in-flight memory per entity: chunkSlots × ~250 B/slot ×
-// chunkChanCap = ~1 MiB peak across all 8 workers. Chunking lets a
-// worker make progress on IterateRoot while the consumer drains
-// earlier chunks.
+// chunkSlots is the slot-batch size workers emit to the consumer; bounds
+// in-flight memory per entity.
 const chunkSlots = 1024
 
-// chunkChanCap is the per-entity chunk-channel buffer depth. With
-// cap=4, the worker can produce 4 chunks ahead before blocking on the
-// consumer — enough to hide the consumer's per-Mdbx.Update commit
-// latency without unbounded RAM growth.
+// chunkChanCap = 4 lets a worker run ~4 chunks ahead of the consumer to hide
+// per-txn commit latency without unbounded RAM growth.
 const chunkChanCap = 4
 
 // slotPrepared holds the four pre-encoded byte buffers a single slot
