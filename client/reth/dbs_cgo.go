@@ -61,23 +61,7 @@ type Envs struct {
 	RocksDB  *grocksdb.DB
 	RocksCFs map[string]*grocksdb.ColumnFamilyHandle
 
-	// historySink batches archive-mode AccountsHistory + StoragesHistory
-	// writes into the RocksDB column families v2 reth reads them from.
-	// Lazy-initialised by HistorySink; Close drains + tears it down.
-	historySink *historySink
-
 	closed bool
-}
-
-// HistorySink returns the per-Envs archive-mode history sink, creating it
-// on first call. NOT goroutine-safe — callers serialize puts (the streaming
-// consumer is single-goroutine; the inline writers are called from one
-// MDBX Update closure at a time).
-func (e *Envs) HistorySink() *historySink {
-	if e.historySink == nil {
-		e.historySink = newHistorySink(e)
-	}
-	return e.historySink
 }
 
 // OpenEnvs creates a fresh datadir at dataDir and opens the MDBX env +
@@ -226,12 +210,6 @@ func (e *Envs) Close() error {
 	}
 	e.closed = true
 	var firstErr error
-	if e.historySink != nil {
-		if err := e.historySink.Close(); err != nil {
-			firstErr = fmt.Errorf("historySink.Close: %w", err)
-		}
-		e.historySink = nil
-	}
 	if e.RocksDB != nil {
 		flushOpts := grocksdb.NewDefaultFlushOptions()
 		flushOpts.SetWait(true)
@@ -240,9 +218,7 @@ func (e *Envs) Close() error {
 			cfs = append(cfs, cf)
 		}
 		if err := e.RocksDB.FlushCFs(cfs, flushOpts); err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("rocksdb.FlushCFs: %w", err)
-			}
+			firstErr = fmt.Errorf("rocksdb.FlushCFs: %w", err)
 		}
 		flushOpts.Destroy()
 		for _, cf := range e.RocksCFs {

@@ -31,15 +31,15 @@ const chunkSlots = 1024
 // per-txn commit latency without unbounded RAM growth.
 const chunkChanCap = 4
 
-// slotPrepared holds the pre-encoded byte buffers a single slot contributes
-// to MDBX, plus the raw slot key the consumer needs to route an archive-mode
-// StoragesHistory put into the RocksDB CF. Produced on the worker goroutine,
-// consumed on the main goroutine inside Mdbx.Update — no encoding work in
-// the hot write path.
+// slotPrepared holds the four pre-encoded byte buffers a single slot
+// contributes to MDBX. Produced on the worker goroutine, consumed on
+// the main goroutine inside Mdbx.Update — no encoding work in the
+// hot write path.
 type slotPrepared struct {
-	rawKey      common.Hash // slot key (untouched); StoragesHistory sink arg
-	hashedEntry []byte      // HashedStorages value (encoded keyHash || value)
-	changeEntry []byte      // StorageChangeSets value (encoded rawKey || 0); nil in full mode
+	plainEntry  []byte // PlainStorageState value (encoded rawKey || value)
+	hashedEntry []byte // HashedStorages value (encoded keyHash || value)
+	changeEntry []byte // StorageChangeSets value (encoded rawKey || 0); nil in full mode
+	sskKey      []byte // StoragesHistory key (StorageShardedKey-encoded); nil in full mode
 }
 
 // preparedEntity carries everything the consumer needs to commit one
@@ -52,14 +52,15 @@ type slotPrepared struct {
 // the per-slot rows land. Emitted in path-lex order so cursor.AppendDup
 // takes the fast path.
 type preparedEntity struct {
-	idx      int
-	addr     common.Address
-	addrHash common.Hash
-	blockKey []byte // BlockNumberAddress-encoded
-	chunkCh  chan []slotPrepared
-	rootCh   chan common.Hash
-	errCh    chan error
-	trieRows [][]byte
+	idx        int
+	addr       common.Address
+	addrHash   common.Hash
+	blockKey   []byte         // BlockNumberAddress-encoded
+	historyVal []byte         // EncodeIntegerList([0]) — fixed per entity for genesis pre-state
+	chunkCh    chan []slotPrepared
+	rootCh     chan common.Hash
+	errCh      chan error
+	trieRows   [][]byte
 }
 
 // streamSpecStorage writes each PreAlloc entity's Storage into reth's
@@ -113,6 +114,13 @@ func streamSpecStorage(ctx context.Context, envs *Envs, cfg *generator.Config, s
 	// small latency spikes.
 	preparedCh := make(chan *preparedEntity, workers*2)
 
+	// EncodeIntegerList([0]) is identical for every slot in a genesis
+	// pre-state import — encode once on the caller goroutine, reuse
+	// across all workers.
+	var sharedHistoryBuf bytes.Buffer
+	iReth.EncodeIntegerList(&sharedHistoryBuf, []uint64{0})
+	historyVal := sharedHistoryBuf.Bytes()
+
 	var wg sync.WaitGroup
 	for w := 0; w < workers; w++ {
 		wg.Add(1)
@@ -122,7 +130,7 @@ func streamSpecStorage(ctx context.Context, envs *Envs, cfg *generator.Config, s
 				if drainCtx.Err() != nil {
 					return
 				}
-				if err := drainAndEncodeEntity(drainCtx, cfg, i, preparedCh); err != nil {
+				if err := drainAndEncodeEntity(drainCtx, cfg, i, historyVal, preparedCh); err != nil {
 					cancelDrain(err)
 					return
 				}
@@ -200,6 +208,7 @@ func drainAndEncodeEntity(
 	drainCtx context.Context,
 	cfg *generator.Config,
 	idx int,
+	historyVal []byte,
 	preparedCh chan<- *preparedEntity,
 ) error {
 	pe := &cfg.PreAlloc[idx]
@@ -216,13 +225,14 @@ func drainAndEncodeEntity(
 	blockKey.EncodeKey(&blockKeyBuf)
 
 	ent := &preparedEntity{
-		idx:      idx,
-		addr:     addr,
-		addrHash: addrHash,
-		blockKey: blockKeyBuf.Bytes(),
-		chunkCh:  make(chan []slotPrepared, chunkChanCap),
-		rootCh:   make(chan common.Hash, 1),
-		errCh:    make(chan error, 1),
+		idx:        idx,
+		addr:       addr,
+		addrHash:   addrHash,
+		blockKey:   blockKeyBuf.Bytes(),
+		historyVal: historyVal,
+		chunkCh:    make(chan []slotPrepared, chunkChanCap),
+		rootCh:     make(chan common.Hash, 1),
+		errCh:      make(chan error, 1),
 	}
 
 	// Hand the preparedEntity to the consumer BEFORE starting iteration
@@ -272,7 +282,12 @@ func drainAndEncodeEntity(
 	sink := func(keyHash, rawKey, value common.Hash) error {
 		slotValueU256 := uint256.NewInt(0).SetBytes(value[:])
 
-		prep := slotPrepared{rawKey: rawKey}
+		prep := slotPrepared{}
+
+		plainEntry := iReth.StorageEntry{Key: rawKey, Value: slotValueU256}
+		var plainBuf bytes.Buffer
+		plainEntry.EncodeCompact(&plainBuf)
+		prep.plainEntry = plainBuf.Bytes()
 
 		hashedEntry := iReth.StorageEntry{Key: keyHash, Value: slotValueU256}
 		var hashedBuf bytes.Buffer
@@ -284,6 +299,17 @@ func drainAndEncodeEntity(
 			var changeBuf bytes.Buffer
 			changeEntry.EncodeCompact(&changeBuf)
 			prep.changeEntry = changeBuf.Bytes()
+
+			// StoragesHistory key is only built in archive mode; in full
+			// mode the consumer skips the Put entirely.
+			ssk := iReth.StorageShardedKey{
+				Address:     addr,
+				StorageKey:  rawKey,
+				BlockNumber: ^uint64(0),
+			}
+			var sskBuf bytes.Buffer
+			ssk.EncodeKey(&sskBuf)
+			prep.sskKey = sskBuf.Bytes()
 		}
 
 		pending = append(pending, prep)
@@ -331,6 +357,9 @@ func consumeEntity(
 		}
 		for chunk := range ent.chunkCh {
 			for _, prep := range chunk {
+				if err := txn.Put(envs.MdbxDBIs["PlainStorageState"], ent.addr[:], prep.plainEntry, 0); err != nil {
+					return fmt.Errorf("PlainStorageState %s: %w", ent.addr.Hex(), err)
+				}
 				if err := txn.Put(envs.MdbxDBIs["HashedStorages"], ent.addrHash[:], prep.hashedEntry, 0); err != nil {
 					return fmt.Errorf("HashedStorages %s: %w", ent.addrHash.Hex(), err)
 				}
@@ -339,12 +368,14 @@ func consumeEntity(
 					if err := txn.Put(envs.MdbxDBIs["StorageChangeSets"], ent.blockKey, prep.changeEntry, 0); err != nil {
 						return fmt.Errorf("StorageChangeSets %s: %w", ent.addr.Hex(), err)
 					}
-					// Archive mode: StoragesHistory → RocksDB CF (v2 routing).
-					if err := envs.HistorySink().PutStorageHistory(ent.addr, prep.rawKey, 0); err != nil {
+				}
+				if prep.sskKey != nil {
+					// Archive mode: write the StoragesHistory row.
+					if err := txn.Put(envs.MdbxDBIs["StoragesHistory"], prep.sskKey, ent.historyVal, 0); err != nil {
 						return fmt.Errorf("StoragesHistory %s: %w", ent.addr.Hex(), err)
 					}
 				}
-				localBytes += uint64(len(prep.hashedEntry))
+				localBytes += uint64(len(prep.plainEntry))
 			}
 		}
 		// Drain pre-encoded trie rows into StoragesTrie under the

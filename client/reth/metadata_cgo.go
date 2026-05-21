@@ -21,9 +21,8 @@ import (
 // Writes the following tables in a single atomic transaction:
 //   - Metadata.storage_settings = JSON-encoded StorageSettings (the key reth
 //     reads via STORAGE_SETTINGS const at storage-api/src/metadata.rs:10).
-//     The value is {"storage_v2":true} so reth selects v2: state queries go
-//     through HashedAccounts/HashedStorages; history queries route through
-//     RocksDB column families AccountsHistory + StoragesHistory.
+//     The value is {"storage_v2":false} so reth selects v1 (matches the
+//     current write surface; commit 3 of the v2 migration flips this).
 //   - StageCheckpoints: one entry per stage in iReth.StageIDsAll (15 entries),
 //     Compact-encoded StageCheckpoint{BlockNumber: 0}.
 //   - HeaderNumbers: header.Hash() → BE u64(0).
@@ -31,11 +30,9 @@ import (
 //   - PruneCheckpoints (NON-ARCHIVE ONLY): two rows for AccountHistory +
 //     StorageHistory with block_number=Some(0), prune_mode=Before(1).
 //     Triggers reth's HistoricalStateProvider.MaybeInPlainState branch
-//     (historical.rs:374-381) which on v2 reads HashedAccounts /
-//     HashedStorages — those are unconditionally populated by the writers
-//     — so eth_getBalance on genesis accounts returns the correct value
-//     instead of NotYetWritten when the RocksDB history CFs are empty in
-//     non-archive mode.
+//     (historical.rs:861-867) so eth_getBalance on genesis accounts reads
+//     PlainAccountState directly instead of returning NotYetWritten when
+//     history-index tables are empty in non-archive mode.
 //
 // VersionHistory is intentionally NOT written here. Reth's init_db writes its
 // own ClientVersion entry keyed by the current Unix timestamp on every boot.
@@ -112,11 +109,12 @@ type storageSettings struct {
 
 // writeStorageSettings puts a JSON-encoded storageSettings under the key
 // "storage_settings" in the Metadata table — the key reth's
-// StorageSettingsCache::load (storage-api/src/metadata.rs:10) reads.
-// {"storage_v2":true} routes account/storage reads through the Hashed*
-// tables and history reads through the RocksDB column families.
+// StorageSettingsCache::load (storage-api/src/metadata.rs:10) reads. The
+// value is {"storage_v2":false}: state-actor still writes the v1 layout
+// (PlainAccountState/PlainStorageState populated). Commit 3 of the v2
+// migration flips the flag to true and drops the Plain* writes.
 func writeStorageSettings(txn *mdbx.Txn, dbi mdbx.DBI) error {
-	val, err := json.Marshal(storageSettings{StorageV2: true})
+	val, err := json.Marshal(storageSettings{StorageV2: false})
 	if err != nil {
 		return fmt.Errorf("marshal storageSettings: %w", err)
 	}
