@@ -199,11 +199,6 @@ func requireFreshDir(dataDir string) error {
 // MDBX_SAFE_NOSYNC deferred writes are flushed to disk on a clean
 // process exit. force=true requests synchronous fdatasync;
 // nonblock=false waits for completion.
-//
-// On the RocksDB side, FlushCFs forces the per-CF memtables to land as
-// SST files before Close. Bulk writes go through historySink with
-// WAL-disabled, so without this flush reth's first read could see an
-// empty CF whose state lived only in the now-discarded memtable.
 func (e *Envs) Close() error {
 	if e == nil || e.closed {
 		return nil
@@ -211,16 +206,6 @@ func (e *Envs) Close() error {
 	e.closed = true
 	var firstErr error
 	if e.RocksDB != nil {
-		flushOpts := grocksdb.NewDefaultFlushOptions()
-		flushOpts.SetWait(true)
-		cfs := make([]*grocksdb.ColumnFamilyHandle, 0, len(e.RocksCFs))
-		for _, cf := range e.RocksCFs {
-			cfs = append(cfs, cf)
-		}
-		if err := e.RocksDB.FlushCFs(cfs, flushOpts); err != nil {
-			firstErr = fmt.Errorf("rocksdb.FlushCFs: %w", err)
-		}
-		flushOpts.Destroy()
 		for _, cf := range e.RocksCFs {
 			cf.Destroy()
 		}
@@ -228,9 +213,7 @@ func (e *Envs) Close() error {
 	}
 	if e.Mdbx != nil {
 		if err := e.Mdbx.Sync(true, false); err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("mdbx.Sync: %w", err)
-			}
+			firstErr = fmt.Errorf("mdbx.Sync: %w", err)
 		}
 		e.Mdbx.Close()
 	}
