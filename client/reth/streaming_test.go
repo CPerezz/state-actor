@@ -34,7 +34,7 @@ func TestStreaming_GoldenEqualsLegacy(t *testing.T) {
 	for i := range legacy {
 		legacy[i] = entitygen.GenerateEOA(rngLegacy)
 	}
-	legacyRoot, err := ComputeStateRoot(legacy)
+	legacyRoot, err := ComputeStateRoot(legacy, nil)
 	if err != nil {
 		t.Fatalf("ComputeStateRoot: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestStreaming_GoldenEqualsLegacy(t *testing.T) {
 		}
 		produced += b
 	}
-	streamRoot, err := ComputeStateRootStreaming(sorter.Iterate)
+	streamRoot, err := ComputeStateRootStreaming(sorter.Iterate, nil)
 	if err != nil {
 		t.Fatalf("ComputeStateRootStreaming: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestStreaming_MixedAccountsContracts(t *testing.T) {
 		// and code hash are filled in BEFORE the StateAccount is RLP-encoded
 		// for the global state trie. Both paths must apply the same
 		// mutation in the same order.
-		root, err := computeStorageRoot(c.Storage)
+		root, err := computeStorageRoot(c.Storage, nil)
 		if err != nil {
 			t.Fatalf("legacy computeStorageRoot: %v", err)
 		}
@@ -113,7 +113,7 @@ func TestStreaming_MixedAccountsContracts(t *testing.T) {
 		c.StateAccount.CodeHash = crypto.Keccak256Hash(c.Code).Bytes()
 		legacy = append(legacy, c)
 	}
-	legacyRoot, err := ComputeStateRoot(legacy)
+	legacyRoot, err := ComputeStateRoot(legacy, nil)
 	if err != nil {
 		t.Fatalf("ComputeStateRoot: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestStreaming_MixedAccountsContracts(t *testing.T) {
 			batch[i] = entitygen.GenerateContract(rngStream, codeSize, slotCount)
 		}
 		for _, c := range batch {
-			root, err := computeStorageRoot(c.Storage)
+			root, err := computeStorageRoot(c.Storage, nil)
 			if err != nil {
 				t.Fatalf("streaming computeStorageRoot: %v", err)
 			}
@@ -178,7 +178,7 @@ func TestStreaming_MixedAccountsContracts(t *testing.T) {
 		remaining -= b
 	}
 
-	streamRoot, err := ComputeStateRootStreaming(sorter.Iterate)
+	streamRoot, err := ComputeStateRootStreaming(sorter.Iterate, nil)
 	if err != nil {
 		t.Fatalf("ComputeStateRootStreaming: %v", err)
 	}
