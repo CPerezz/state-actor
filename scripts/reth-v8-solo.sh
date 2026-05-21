@@ -57,9 +57,6 @@ if [ $gen_status -ne 0 ]; then
     exit 1
 fi
 echo "=== generation done; DB size: $(du -sh $DATA | cut -f1) ==="
-# v2 layout: report per-backend sizes so MDBX vs RocksDB vs static-files
-# growth is visible at a glance. Empty subdirs print as 0.
-du -sh "$DATA/db" "$DATA/rocksdb" "$DATA/static_files" 2>/dev/null | sed 's/^/    /' || true
 
 # 2. Boot reth with --dev.block-time=1s (no engine-driver, no JWT —
 # the local-miner wall-clock ticker handles block production).

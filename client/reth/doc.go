@@ -8,23 +8,16 @@
 //
 //	stats, err := reth.RunCgo(ctx, cfg, reth.Options{})
 //
-// RunCgo writes the on-disk artifacts reth boot validates. The datadir is a
-// v2 layout (Metadata.storage_settings = {"storage_v2":true}):
+// RunCgo writes the on-disk artifacts reth boot validates:
 //
-//   - <datadir>/db/mdbx.dat — MDBX env with all named DBIs. The canonical
-//     state tables HashedAccounts + HashedStorages are populated; the v1
-//     Plain* tables (PlainAccountState, PlainStorageState) are declared
-//     but empty — v2 routes reads through Hashed* only. Trie + changeset
-//     + metadata tables (AccountsTrie, StoragesTrie, AccountChangeSets,
-//     StorageChangeSets, Bytecodes, StageCheckpoints, HeaderNumbers,
-//     BlockBodyIndices, PruneCheckpoints, etc.) stay MDBX-resident.
+//   - <datadir>/db/mdbx.dat — MDBX env with all named DBIs
+//     (PlainAccountState, HashedAccounts, AccountChangeSets,
+//     AccountsHistory, PlainStorageState, HashedStorages,
+//     StorageChangeSets, StoragesHistory, Bytecodes, plus 15 metadata
+//     tables incl. StageCheckpoints/Metadata/HeaderNumbers/etc.)
 //   - <datadir>/db/database.version — schema version sentinel ("2")
-//   - <datadir>/rocksdb/* — RocksDB env with v2 column families
-//     (AccountsHistory + StoragesHistory + TransactionHashNumbers + the
-//     default CF). The two history CFs receive writes under
-//     cfg.Archive=true; default-mode runs leave them empty (PruneCheckpoint
-//     markers tell reth's read path "history pruned before block 1",
-//     routing historical-tag queries through HashedAccounts).
+//   - <datadir>/rocksdb/* — RocksDB env with v2 history-table column
+//     families
 //   - <datadir>/static_files/{headers,transactions,receipts,
 //     transaction-senders}/static_file_*_0_499999.{conf,sf,off} — block-0
 //     segment files in the nippy-jar format

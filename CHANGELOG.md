@@ -2,32 +2,6 @@
 
 ## Unreleased
 
-### Changed (BREAKING — reth on-disk format)
-- **reth datadir flipped from v1 to v2** (`Metadata.storage_settings =
-  {"storage_v2":true}`). Old v1 reth datadirs produced by prior state-actor
-  builds remain readable by reth but are NOT compatible with this revision's
-  writers; regenerate from scratch. Migration details:
-  - The MDBX `PlainAccountState` + `PlainStorageState` tables are now empty
-    by design; reads dispatch through `HashedAccounts` + `HashedStorages`
-    (canonical v2 state) per `LatestStateProvider::storage()` /
-    `basic_account` `use_hashed_state()` branches. Saves ~78.5 GiB on the
-    100 GB-target bloatnet bench (752M storage slots no longer
-    double-written).
-  - Archive-mode `AccountsHistory` + `StoragesHistory` writes now target
-    the RocksDB column families v2 reth reads from (`EitherReader`
-    routing), not the MDBX tables of the same name. Same archive gate
-    (`cfg.Archive=true`); same wire format for keys/values.
-  - PruneCheckpoint markers (`Some(0), None, Before(1)`) keep their
-    existing role: written under `cfg.Archive=false`, they trigger reth's
-    `MaybeInPlainState` branch which on v2 reads `HashedAccounts` (a
-    populated table), so `eth_getBalance(genesisEOA, "latest")` returns
-    the correct value without history sidecars.
-  - The metadata row encoding was also corrected: previously written
-    under key `"storage_v2"` (Compact bitflag, silently ignored by reth);
-    now under key `"storage_settings"` (JSON-encoded `StorageSettings`,
-    matching the `STORAGE_SETTINGS` const reth uses).
-  - Closes issues #79 (malformed metadata write) + #80 (drop Plain* on v2).
-
 ### Added
 - **`--spec <file>.yaml` flag** — declarative state customization via YAML.
   Users can specify concrete EOAs + contracts (with optional ERC-20

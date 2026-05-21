@@ -6,8 +6,8 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
-// StoredNibbles is the 65-byte nibble path reth uses as the AccountsTrie key
-// and as the StoragesTrie sub-key. One nibble per byte (low 4 bits used),
+// StoredNibbles is reth's legacy v1 65-byte nibble path used as the AccountsTrie
+// key and as the StoragesTrie sub-key. One nibble per byte (low 4 bits used),
 // right-padded with zeros to 64 bytes, followed by a length byte.
 //
 // Wire (MDBX key, fixed 65 bytes):
@@ -15,12 +15,14 @@ import (
 //	nibbles[64] (one nibble per byte, low 4 bits, right-padded zeros) || length[1]
 //
 // Matches StoredNibbles::to_compact / StoredNibblesSubKey::to_compact in
-// reth-trie-common (nibbles.rs lines 101-128). State-actor writes
-// storage_v2=true into the Metadata table (see client/reth/metadata_cgo.go)
-// so reth's ProviderFactory routes AccountsHistory + StoragesHistory through
-// the RocksDB column families opened by client/reth/dbs_cgo.go; the trie
-// tables themselves stay in MDBX and still use this 65-byte StoredNibbles
-// encoding.
+// reth-trie-common (nibbles.rs lines 101-128). Reth's ProviderFactory defaults
+// to StorageSettings::v1() when no metadata row is present (see
+// crates/storage/provider/src/providers/database/mod.rs:132), which selects the
+// LegacyKeyAdapter and reads this 65-byte form via StorageTrieEntry::from_compact
+// (storage.rs:38-43). The 33-byte PackedStoredNibbles variant is only used when
+// storage_v2 = true is explicitly written into the Metadata table — that mode
+// also expects RocksDB history sidecars + static-file changesets, which a
+// one-shot genesis writer does not produce.
 type StoredNibbles struct {
 	Length  byte
 	Nibbles [64]byte
