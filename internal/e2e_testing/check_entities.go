@@ -93,20 +93,39 @@ func CheckInjections(t *testing.T, rpcURL string, cfg *generator.Config, blockTa
 	}
 	passed := true
 	for addr, acct := range cfg.GenesisAccounts {
-		if acct == nil || acct.Balance == nil || acct.Balance.IsZero() {
-			continue // No balance assertion for zero-balance entities (e.g. Prague system contracts).
-		}
-		got, err := rpcprobe.EthGetBalance(rpcURL, addr, blockTag)
-		if err != nil {
-			t.Errorf("[%s] alloc eth_getBalance %s: %v", blockTag, addr.Hex(), err)
-			passed = false
+		if acct == nil {
 			continue
 		}
-		want := acct.Balance.ToBig()
-		if got.Cmp(want) != 0 {
-			t.Errorf("[%s] alloc eth_getBalance %s: got %s want %s — writer dropped GenesisAccounts balance?",
-				blockTag, addr.Hex(), got.String(), want.String())
-			passed = false
+		// Balance check covers EVERY entity, zero-balance included. The
+		// previous skip-on-zero left YAML entries like `zero-balance-eoa`
+		// (entity #20) and the canonical syscontracts (which all have
+		// zero balance) unverified — a writer bug that wrote balance=N
+		// for a speced balance=0 entry would slip through silently.
+		if acct.Balance != nil {
+			got, err := rpcprobe.EthGetBalance(rpcURL, addr, blockTag)
+			if err != nil {
+				t.Errorf("[%s] alloc eth_getBalance %s: %v", blockTag, addr.Hex(), err)
+				passed = false
+			} else if want := acct.Balance.ToBig(); got.Cmp(want) != 0 {
+				t.Errorf("[%s] alloc eth_getBalance %s: got %s want %s — writer dropped GenesisAccounts balance?",
+					blockTag, addr.Hex(), got.String(), want.String())
+				passed = false
+			}
+		}
+		// Nonce check: only when the spec/template set an explicit non-zero
+		// nonce. Zero is the StateAccount default — re-querying every zero-
+		// nonce entity would balloon Phase 4 RPC calls without catching
+		// any class of writer bug.
+		if acct.Nonce > 0 {
+			gotNonce, err := rpcprobe.EthGetTransactionCount(rpcURL, addr, blockTag)
+			if err != nil {
+				t.Errorf("[%s] alloc eth_getTransactionCount %s: %v", blockTag, addr.Hex(), err)
+				passed = false
+			} else if gotNonce != acct.Nonce {
+				t.Errorf("[%s] alloc eth_getTransactionCount %s: got %d want %d — writer dropped GenesisAccounts nonce?",
+					blockTag, addr.Hex(), gotNonce, acct.Nonce)
+				passed = false
+			}
 		}
 	}
 	for addr, wantCode := range cfg.GenesisCode {
