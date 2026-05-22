@@ -1,5 +1,17 @@
 # `--spec` YAML schema
 
+> [!IMPORTANT]
+> **This file is the schema reference** — parser rules, validation errors,
+> the address-resolution algorithm, `approximate_size_bytes` semantics.
+>
+> **The syntax reference** — every feature shown in practice — is
+> [`../examples/full-matrix-spec-feature.yaml`](../examples/full-matrix-spec-feature.yaml).
+> Read it alongside this file. The fixture is CI-pinned by
+> `TestBuildFullMatrix`, every per-client `TestE2ESuite`, and the
+> cross-client genesis-root invariant job, so it stays correct
+> automatically. [`docs/SKILL.md`](SKILL.md#canonical-spec-reference) has an
+> intent → entity-# index for navigating it.
+
 State-actor's `--spec` flag accepts a YAML file declaring concrete entities
 (EOAs + contracts) the writer must include in generated genesis state.
 Spec entities are written first; the synthetic-fill loop
@@ -10,6 +22,9 @@ Spec entities are written first; the synthetic-fill loop
 ```bash
 state-actor --client=reth --db=/tmp/mychain --spec=examples/spec-erc20-mixed-sizes.yaml --target-size=20GB
 ```
+
+Once the DB is written, boot the client per [`RUNBOOK.md`](RUNBOOK.md). For
+example specs covering each capability, see [`examples/README.md`](../examples/README.md).
 
 ## Schema
 
@@ -32,7 +47,7 @@ One of:
 
 - `contract` — a smart contract with deployed bytecode. **Must** set
   exactly one of `template:` or `code:`. May set `approximate_size_bytes:`
-  to populate storage at scale.
+  to populate synthetic storage.
 - `eoa` — an externally-owned account. May set `code:` (e.g. an EIP-7702
   23-byte `0xef0100<addr>` delegation marker). May set
   `approximate_size_bytes:` for delegated-storage bloat. MUST NOT set
@@ -63,20 +78,21 @@ balance: "0xde0b6b3a7640000"          # 1 ETH hex
 ### `approximate_size_bytes`
 
 Target on-disk byte budget for this entity's storage. Resolved to a
-synthetic slot count via a per-client calibration factor
-(see `internal/sizecal/factors.json`). Slots are populated with
-deterministic `(key, value)` pairs derived from `(seed, address)`.
+synthetic slot count via the single global trie-only `bytesPerSlot`
+constant in [`internal/sizecal/factors.go`](../internal/sizecal/factors.go)
+(identical across clients by design — required by the cross-client
+genesis-root invariance gate). Slots are populated with deterministic
+`(key, value)` pairs derived from `(seed, address)`.
 
 - **RAM**: spec storage flows through a per-entity streaming pipeline
   (`internal/streamingtrie` + `internal/streamsort`). Total writer RAM
   stays at ~2 GB peak (a tuned Pebble MemTable per active entity)
-  regardless of slot count, so 50 GB ERC-20s and 50 KB ones share the
-  same code path.
+  regardless of slot count.
 - **Disk**: per-entity bound is the temp-sort working set (`slot_count
   × 96 B` in Pebble) colocated with the output datadir; freed when the
   entity finishes writing.
-- **Accuracy**: ±25% via per-client calibration factors
-  (`internal/sizecal/factors.json`).
+- **Accuracy**: ±25% versus the realised on-disk size, set by the
+  global `bytesPerSlot` constant.
 
 ## Templates
 
@@ -139,9 +155,12 @@ Built-in non-template handlers (no `template:` field needed):
 - `--accounts`, `--contracts`, `--min-slots`, `--max-slots`,
   `--distribution`: still drive the synthetic-fill loop. Spec entities
   are written first, then the loop runs on top.
-- `--target-size`: still bounds the synthetic-fill loop. **If spec
-  entities alone exceed `--target-size`, `Config.Validate()` fails
-  loudly** with copy-pasteable guidance — no silent truncation.
+- `--target-size`: an upper bound on the projected trie footprint of
+  the whole generated database — spec entities AND synthetic fill both
+  count toward it. If the spec alone exceeds the budget,
+  `internal/specbuild` truncates the entity list to the longest prefix
+  that fits and emits a `--target-size … truncated spec at entity[N]`
+  warning on stderr. To generate a spec verbatim, omit `--target-size`.
 - `--seed`: drives both the spec's deterministic address derivation
   AND the synthetic-fill loop's RNG. Same `--seed + --spec` always
   produces the same on-disk state on a given client.
