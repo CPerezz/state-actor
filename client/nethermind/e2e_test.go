@@ -59,8 +59,6 @@ const nethermindE2EConfigTemplate = `{
     "MemoryHint": 256000000
   },
   "Sync": {
-    "NetworkingEnabled": false,
-    "SynchronizationEnabled": false,
     "PivotNumber": 0
   },
   "TxPool": {
