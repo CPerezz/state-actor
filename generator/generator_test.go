@@ -12,23 +12,32 @@ import (
 	"github.com/ethereum/go-ethereum/ethdb/pebble"
 	"github.com/ethereum/go-ethereum/rlp"
 
-	"github.com/nerolation/state-actor/internal/sizecal"
+	"github.com/nerolation/state-actor/internal/autofill"
 )
+
+// mustPlan returns the autofill Plan for the given budget or fails the test.
+// All migrated generator tests use this helper to construct their auto-fill
+// configuration after the NumAccounts/NumContracts/... Config fields were
+// removed.
+func mustPlan(tb testing.TB, budget uint64) *autofill.Plan {
+	tb.Helper()
+	p, err := autofill.PlanForBudget(budget)
+	if err != nil {
+		tb.Fatalf("PlanForBudget(%d): %v", budget, err)
+	}
+	return p
+}
 
 func TestGenerateSmallState(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "testdb")
 
+	plan := mustPlan(t, 512<<10)
 	config := Config{
-		DBPath:       dbPath,
-		NumAccounts:  10,
-		NumContracts: 5,
-		MaxSlots:     100,
-		MinSlots:     10,
-		Distribution: Uniform,
-		Seed:         12345,
-		CodeSize:     256,
-		Verbose:      false,
+		DBPath:   dbPath,
+		AutoFill: plan,
+		Seed:     12345,
+		Verbose:  false,
 	}
 
 	gen, err := New(config)
@@ -42,15 +51,15 @@ func TestGenerateSmallState(t *testing.T) {
 		t.Fatalf("Failed to generate state: %v", err)
 	}
 
-	// Verify statistics
-	if stats.AccountsCreated != 10 {
-		t.Errorf("Expected 10 accounts, got %d", stats.AccountsCreated)
+	// Verify statistics — counts come from PlanForBudget(512 KiB).
+	if stats.AccountsCreated != plan.NumEOAs {
+		t.Errorf("Expected %d accounts, got %d", plan.NumEOAs, stats.AccountsCreated)
 	}
-	if stats.ContractsCreated != 5 {
-		t.Errorf("Expected 5 contracts, got %d", stats.ContractsCreated)
+	if stats.ContractsCreated != plan.NumContracts {
+		t.Errorf("Expected %d contracts, got %d", plan.NumContracts, stats.ContractsCreated)
 	}
-	if stats.StorageSlotsCreated < 50 { // 5 contracts * 10 min slots
-		t.Errorf("Expected at least 50 storage slots, got %d", stats.StorageSlotsCreated)
+	if stats.StorageSlotsCreated == 0 {
+		t.Errorf("Expected non-zero storage slots, got %d", stats.StorageSlotsCreated)
 	}
 	if stats.StateRoot == (common.Hash{}) {
 		t.Error("State root should not be empty")
@@ -60,49 +69,37 @@ func TestGenerateSmallState(t *testing.T) {
 	}
 }
 
-func TestStorageDistributions(t *testing.T) {
-	distributions := []struct {
-		name string
-		dist Distribution
-	}{
-		{"PowerLaw", PowerLaw},
-		{"Uniform", Uniform},
-		{"Exponential", Exponential},
+// TestStorageSampling verifies that the auto-fill plan's storage sampler
+// produces non-trivial slot counts. The old test ran one subtest per
+// Distribution enum value (PowerLaw/Uniform/Exponential); the auto-fill
+// rewrite collapsed all three into a single truncated-normal Sampler, so
+// this test now just checks the new path emits storage at all.
+func TestStorageSampling(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "testdb")
+
+	plan := mustPlan(t, 2<<20)
+	config := Config{
+		DBPath:   dbPath,
+		AutoFill: plan,
+		Seed:     42,
+		Verbose:  false,
 	}
 
-	for _, tc := range distributions {
-		t.Run(tc.name, func(t *testing.T) {
-			tmpDir := t.TempDir()
-			dbPath := filepath.Join(tmpDir, "testdb")
+	gen, err := New(config)
+	if err != nil {
+		t.Fatalf("Failed to create generator: %v", err)
+	}
+	defer gen.Close()
 
-			config := Config{
-				DBPath:       dbPath,
-				NumAccounts:  5,
-				NumContracts: 20,
-				MaxSlots:     1000,
-				MinSlots:     1,
-				Distribution: tc.dist,
-				Seed:         42,
-				CodeSize:     128,
-				Verbose:      false,
-			}
+	stats, err := gen.Generate()
+	if err != nil {
+		t.Fatalf("Failed to generate state: %v", err)
+	}
 
-			gen, err := New(config)
-			if err != nil {
-				t.Fatalf("Failed to create generator: %v", err)
-			}
-			defer gen.Close()
-
-			stats, err := gen.Generate()
-			if err != nil {
-				t.Fatalf("Failed to generate state: %v", err)
-			}
-
-			// Basic sanity checks
-			if stats.StorageSlotsCreated < 20 { // At least 1 slot per contract
-				t.Errorf("Expected at least 20 storage slots, got %d", stats.StorageSlotsCreated)
-			}
-		})
+	// Basic sanity check: at least 1 slot per contract.
+	if stats.StorageSlotsCreated < plan.NumContracts {
+		t.Errorf("Expected at least %d storage slots, got %d", plan.NumContracts, stats.StorageSlotsCreated)
 	}
 }
 
@@ -110,16 +107,12 @@ func TestDatabaseContent(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "testdb")
 
+	plan := mustPlan(t, 512<<10)
 	config := Config{
-		DBPath:       dbPath,
-		NumAccounts:  3,
-		NumContracts: 2,
-		MaxSlots:     10,
-		MinSlots:     5,
-		Distribution: Uniform,
-		Seed:         99,
-		CodeSize:     64,
-		Verbose:      false,
+		DBPath:   dbPath,
+		AutoFill: plan,
+		Seed:     99,
+		Verbose:  false,
 	}
 
 	gen, err := New(config)
@@ -184,7 +177,7 @@ func TestDatabaseContent(t *testing.T) {
 	}
 	iter.Release()
 
-	expectedAccounts := config.NumAccounts + config.NumContracts
+	expectedAccounts := plan.NumEOAs + plan.NumContracts
 	if accountCount != expectedAccounts {
 		t.Errorf("Expected %d accounts in DB, got %d", expectedAccounts, accountCount)
 	}
@@ -201,7 +194,9 @@ func TestDatabaseContent(t *testing.T) {
 		t.Errorf("Expected %d storage slots in DB, got %d", stats.StorageSlotsCreated, storageCount)
 	}
 
-	// Count code entries
+	// Count code entries. The auto-fill plan emits code for both contracts
+	// AND the ~30 % of EOAs that draw an EIP-7702 delegation marker, so the
+	// expected lower bound is plan.NumContracts (we accept >=).
 	iter = db.NewIterator([]byte("c"), nil)
 	codeCount := 0
 	for iter.Next() {
@@ -209,8 +204,8 @@ func TestDatabaseContent(t *testing.T) {
 	}
 	iter.Release()
 
-	if codeCount != config.NumContracts {
-		t.Errorf("Expected %d code entries in DB, got %d", config.NumContracts, codeCount)
+	if codeCount < plan.NumContracts {
+		t.Errorf("Expected at least %d code entries in DB, got %d", plan.NumContracts, codeCount)
 	}
 }
 
@@ -258,16 +253,12 @@ func TestReproducibility(t *testing.T) {
 		tmpDir := t.TempDir()
 		dbPath := filepath.Join(tmpDir, "testdb")
 
+		plan := mustPlan(t, 512<<10)
 		config := Config{
-			DBPath:       dbPath,
-			NumAccounts:  10,
-			NumContracts: 5,
-			MaxSlots:     50,
-			MinSlots:     10,
-			Distribution: PowerLaw,
-			Seed:         54321,
-			CodeSize:     128,
-			Verbose:      false,
+			DBPath:   dbPath,
+			AutoFill: plan,
+			Seed:     54321,
+			Verbose:  false,
 		}
 
 		gen, err := New(config)
@@ -300,22 +291,22 @@ func mustRLP(data []byte) []byte {
 // Benchmarks
 
 func BenchmarkGenerate1K(b *testing.B) {
-	benchmarkGenerate(b, 100, 10, 100)
+	benchmarkGenerate(b, 512<<10)
 }
 
 func BenchmarkGenerate10K(b *testing.B) {
-	benchmarkGenerate(b, 1000, 100, 100)
+	benchmarkGenerate(b, 5<<20)
 }
 
 func BenchmarkGenerate100K(b *testing.B) {
-	benchmarkGenerate(b, 10000, 1000, 100)
+	benchmarkGenerate(b, 50<<20)
 }
 
 func BenchmarkGenerate1M(b *testing.B) {
-	benchmarkGenerate(b, 10000, 10000, 100)
+	benchmarkGenerate(b, 500<<20)
 }
 
-func benchmarkGenerate(b *testing.B, accounts, contracts, maxSlots int) {
+func benchmarkGenerate(b *testing.B, budget uint64) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
@@ -325,16 +316,12 @@ func benchmarkGenerate(b *testing.B, accounts, contracts, maxSlots int) {
 		}
 		dbPath := filepath.Join(tmpDir, "testdb")
 
+		plan := mustPlan(b, budget)
 		config := Config{
-			DBPath:       dbPath,
-			NumAccounts:  accounts,
-			NumContracts: contracts,
-			MaxSlots:     maxSlots,
-			MinSlots:     10,
-			Distribution: PowerLaw,
-			Seed:         int64(i),
-			CodeSize:     512,
-			Verbose:      false,
+			DBPath:   dbPath,
+			AutoFill: plan,
+			Seed:     int64(i),
+			Verbose:  false,
 		}
 
 		gen, err := New(config)
@@ -361,16 +348,12 @@ func TestGenerateBinaryTrie(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "testdb")
 
+	plan := mustPlan(t, 512<<10)
 	config := Config{
-		DBPath:       dbPath,
-		NumAccounts:  10,
-		NumContracts: 5,
-		MaxSlots:     100,
-		MinSlots:     1,
-		Distribution: PowerLaw,
-		Seed:         12345,
-		CodeSize:     256,
-		TrieMode:     TrieModeBinary,
+		DBPath:   dbPath,
+		AutoFill: plan,
+		Seed:     12345,
+		TrieMode: TrieModeBinary,
 	}
 
 	gen, err := New(config)
@@ -384,11 +367,11 @@ func TestGenerateBinaryTrie(t *testing.T) {
 		t.Fatalf("Failed to generate state: %v", err)
 	}
 
-	if stats.AccountsCreated != 10 {
-		t.Errorf("Expected 10 accounts, got %d", stats.AccountsCreated)
+	if stats.AccountsCreated != plan.NumEOAs {
+		t.Errorf("Expected %d accounts, got %d", plan.NumEOAs, stats.AccountsCreated)
 	}
-	if stats.ContractsCreated != 5 {
-		t.Errorf("Expected 5 contracts, got %d", stats.ContractsCreated)
+	if stats.ContractsCreated != plan.NumContracts {
+		t.Errorf("Expected %d contracts, got %d", plan.NumContracts, stats.ContractsCreated)
 	}
 	if stats.StateRoot == (common.Hash{}) {
 		t.Error("State root should not be empty")
@@ -423,16 +406,12 @@ func TestDatabaseContentBinaryTrie(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "testdb")
 
+	plan := mustPlan(t, 512<<10)
 	config := Config{
-		DBPath:       dbPath,
-		NumAccounts:  3,
-		NumContracts: 2,
-		MaxSlots:     10,
-		MinSlots:     5,
-		Distribution: Uniform,
-		Seed:         99,
-		CodeSize:     64,
-		TrieMode:     TrieModeBinary,
+		DBPath:   dbPath,
+		AutoFill: plan,
+		Seed:     99,
+		TrieMode: TrieModeBinary,
 	}
 
 	gen, err := New(config)
@@ -534,8 +513,10 @@ func TestDatabaseContentBinaryTrie(t *testing.T) {
 	}
 	iter.Release()
 
-	if codeCount != config.NumContracts {
-		t.Errorf("Expected %d code entries in DB, got %d", config.NumContracts, codeCount)
+	if codeCount < plan.NumContracts {
+		// Auto-fill EOAs may also carry EIP-7702 delegation code; codeCount is a
+		// lower-bound check against plan.NumContracts here.
+		t.Errorf("Expected at least %d code entries in DB, got %d", plan.NumContracts, codeCount)
 	}
 }
 
@@ -604,16 +585,12 @@ func TestBinaryTrieReproducibility(t *testing.T) {
 		tmpDir := t.TempDir()
 		dbPath := filepath.Join(tmpDir, "testdb")
 
+		plan := mustPlan(t, 512<<10)
 		config := Config{
-			DBPath:       dbPath,
-			NumAccounts:  10,
-			NumContracts: 5,
-			MaxSlots:     50,
-			MinSlots:     10,
-			Distribution: PowerLaw,
-			Seed:         54321,
-			CodeSize:     128,
-			TrieMode:     TrieModeBinary,
+			DBPath:   dbPath,
+			AutoFill: plan,
+			Seed:     54321,
+			TrieMode: TrieModeBinary,
 		}
 
 		gen, err := New(config)
@@ -637,21 +614,18 @@ func TestBinaryTrieReproducibility(t *testing.T) {
 }
 
 func TestBinaryTrieStateRootValue(t *testing.T) {
-	// Golden value test: pin the binary trie state root for a specific configuration.
-	// If the upstream bintrie API changes behavior, this test fails loudly.
+	// Golden value test: pin the binary trie state root for the canonical
+	// auto-fill plan at 256 KiB budget, seed 12345 — matches the writer
+	// configuration in internal/e2e_testing/golden.go.
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "testdb")
 
+	plan := mustPlan(t, 256<<10)
 	config := Config{
-		DBPath:       dbPath,
-		NumAccounts:  10,
-		NumContracts: 5,
-		MaxSlots:     100,
-		MinSlots:     1,
-		Distribution: PowerLaw,
-		Seed:         12345,
-		CodeSize:     256,
-		TrieMode:     TrieModeBinary,
+		DBPath:   dbPath,
+		AutoFill: plan,
+		Seed:     12345,
+		TrieMode: TrieModeBinary,
 	}
 
 	gen, err := New(config)
@@ -665,7 +639,7 @@ func TestBinaryTrieStateRootValue(t *testing.T) {
 		t.Fatalf("Failed to generate state: %v", err)
 	}
 
-	expected := common.HexToHash("0xee656cf3921d8cbd1aa003a881128846feed2f2c670fa9110cac78f6f8e9d263")
+	expected := common.HexToHash("0xb7acf92d82c2b932d1ca3f5f2e0560e6b9a6ec53a2b1611ca54baedb74b9b82e")
 	if stats.StateRoot != expected {
 		t.Errorf("Binary trie state root mismatch:\n  got:  %s\n  want: %s\nThis may indicate an upstream bintrie API change.",
 			stats.StateRoot.Hex(), expected.Hex())
@@ -682,15 +656,11 @@ func TestBinaryTrieStateRootValue(t *testing.T) {
 func TestBinaryTrieCommitIntervalRootEquivalence(t *testing.T) {
 	// Use a configuration with enough accounts and contracts that multiple
 	// commit cycles are triggered at CommitInterval=5.
+	plan := mustPlan(t, 512<<10)
 	baseConfig := Config{
-		NumAccounts:  100,
-		NumContracts: 10,
-		MaxSlots:     50,
-		MinSlots:     1,
-		Distribution: PowerLaw,
-		Seed:         7777,
-		CodeSize:     128,
-		TrieMode:     TrieModeBinary,
+		AutoFill: plan,
+		Seed:     7777,
+		TrieMode: TrieModeBinary,
 	}
 
 	// Run 1: all in-memory (CommitInterval=0, default behavior).
@@ -755,15 +725,11 @@ func TestBinaryTrieCommitIntervalGoldenHash(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "testdb")
 
+	plan := mustPlan(t, 256<<10)
 	config := Config{
 		DBPath:         dbPath,
-		NumAccounts:    10,
-		NumContracts:   5,
-		MaxSlots:       100,
-		MinSlots:       1,
-		Distribution:   PowerLaw,
+		AutoFill:       plan,
 		Seed:           12345,
-		CodeSize:       256,
 		TrieMode:       TrieModeBinary,
 		CommitInterval: 3, // Commit every 3 accounts
 	}
@@ -780,7 +746,7 @@ func TestBinaryTrieCommitIntervalGoldenHash(t *testing.T) {
 	}
 
 	// Must match the same golden hash as TestBinaryTrieStateRootValue.
-	expected := common.HexToHash("0xee656cf3921d8cbd1aa003a881128846feed2f2c670fa9110cac78f6f8e9d263")
+	expected := common.HexToHash("0xb7acf92d82c2b932d1ca3f5f2e0560e6b9a6ec53a2b1611ca54baedb74b9b82e")
 	if stats.StateRoot != expected {
 		t.Errorf("CommitInterval golden hash mismatch:\n  got:  %s\n  want: %s",
 			stats.StateRoot.Hex(), expected.Hex())
@@ -792,18 +758,14 @@ func TestTargetSizeStopsEarly(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "testdb")
 
 	// Generate without target-size to get a baseline.
-	// Use enough contracts (5000) so that Pebble flushes data to disk,
-	// making dirSize() measurements meaningful for the target check.
+	// Use a generous budget so Pebble flushes data to disk, making
+	// dirSize() measurements meaningful for the target check.
+	planFull := mustPlan(t, 250<<20) // 250 MiB → ~5K contracts after sampling
 	configFull := Config{
-		DBPath:       dbPath,
-		NumAccounts:  20,
-		NumContracts: 5000,
-		MaxSlots:     100,
-		MinSlots:     10,
-		Distribution: PowerLaw,
-		Seed:         42,
-		CodeSize:     256,
-		TrieMode:     TrieModeBinary,
+		DBPath:   dbPath,
+		AutoFill: planFull,
+		Seed:     42,
+		TrieMode: TrieModeBinary,
 	}
 
 	genFull, err := New(configFull)
@@ -827,17 +789,13 @@ func TestTargetSizeStopsEarly(t *testing.T) {
 	// ContractsCreated < baseline.ContractsCreated. 5 MB is large enough
 	// that Phase 1 code blobs don't exceed target and leave Phase 2
 	// with no room to write stems — at 500 KB they would.
+	planTarget := mustPlan(t, 250<<20) // same cap as baseline; TargetSize trims the tail
 	configTarget := Config{
-		DBPath:       dbPath2,
-		NumAccounts:  20,
-		NumContracts: 5000,
-		MaxSlots:     100,
-		MinSlots:     10,
-		Distribution: PowerLaw,
-		Seed:         42,
-		CodeSize:     256,
-		TrieMode:     TrieModeBinary,
-		TargetSize:   5 * 1024 * 1024, // 5 MB target
+		DBPath:     dbPath2,
+		AutoFill:   planTarget,
+		Seed:       42,
+		TrieMode:   TrieModeBinary,
+		TargetSize: 5 * 1024 * 1024, // 5 MB target
 	}
 
 	genTarget, err := New(configTarget)
@@ -871,36 +829,22 @@ func TestTargetSizeStopsEarly(t *testing.T) {
 		t.Error("Target run produced empty state root")
 	}
 
-	// And the resulting DB should land within a loose tolerance of target.
-	// Small-scale Pebble overhead (WAL, MANIFEST, L0 min SST) dominates
-	// here so the tolerance is generous; the tight ±20% test lives in
-	// TestTargetSizeStopsAccurately_Bintrie at 50 MB.
-	assertDBSizeWithin(t, dbPath2, 5*1024*1024, 0.5)
-}
-
-// assertProjectedTrieSizeNearTarget verifies that the run's projected
-// trie-only footprint (computed from the stats counters with the same
-// sizecal constants Phase 1 uses to decide when to stop) lands within
-// tolerance of target. Unlike assertDBSizeWithin, this does not depend
-// on Pebble compression, flat-state overhead, or fixed file metadata —
-// it directly tests Phase 1's stop accuracy.
-func assertProjectedTrieSizeNearTarget(t *testing.T, stats *Stats, target uint64, tolerance float64) {
-	t.Helper()
-	bAcct := sizecal.BytesPerAccount("")
-	bSlot := sizecal.BytesPerSlot("")
-	projected := uint64(stats.AccountsCreated+stats.ContractsCreated)*bAcct +
-		uint64(stats.StorageSlotsCreated)*bSlot
-	diff := float64(projected) - float64(target)
-	if diff < 0 {
-		diff = -diff
+	// The resulting DB should at least be SMALLER than the baseline full run.
+	// At 5 MB target we can't actually land within tolerance — Pebble overhead
+	// (WAL, MANIFEST, L0 min SST) plus the auto-fill plan's per-contract code
+	// blob (~5 KiB mean × ~5000 contracts capped by the budget) sit above the
+	// target. The tight target-size check lives in TestTargetSizeStopsAccurately_Bintrie
+	// at 50 MB. Here we only assert "smaller than baseline".
+	fullDBSize, err := dirSize(dbPath)
+	if err != nil {
+		t.Fatalf("dirSize(baseline): %v", err)
 	}
-	ratio := diff / float64(target)
-	t.Logf("projected trie: accounts+contracts=%d slots=%d → %d B; target=%d diff=%.1f%% tol=%.1f%%",
-		stats.AccountsCreated+stats.ContractsCreated, stats.StorageSlotsCreated,
-		projected, target, ratio*100, tolerance*100)
-	if ratio > tolerance {
-		t.Errorf("projected trie size %.1f%% off target (%d vs %d), tolerance %.1f%%",
-			ratio*100, projected, target, tolerance*100)
+	targetDBSize, err := dirSize(dbPath2)
+	if err != nil {
+		t.Fatalf("dirSize(target): %v", err)
+	}
+	if targetDBSize >= fullDBSize {
+		t.Errorf("Target-size run DB (%d) should be smaller than baseline (%d)", targetDBSize, fullDBSize)
 	}
 }
 
@@ -941,17 +885,15 @@ func TestTargetSizeStopsAccurately_Bintrie(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "testdb")
 
+	// Generous Plan cap (5×target). Phase 2 stop trims to the target;
+	// mirrors main.go's pre-rewrite NumContracts auto-scaling.
+	plan := mustPlan(t, 5*target)
 	config := Config{
-		DBPath:       dbPath,
-		NumAccounts:  20,
-		NumContracts: 200_000, // Generous cap; Phase 2 stop fires ~130K. Mirrors main.go auto-scaling (userContracts × 5).
-		MaxSlots:     100,
-		MinSlots:     10,
-		Distribution: PowerLaw,
-		Seed:         42,
-		CodeSize:     256,
-		TrieMode:     TrieModeBinary,
-		TargetSize:   target,
+		DBPath:     dbPath,
+		AutoFill:   plan,
+		Seed:       42,
+		TrieMode:   TrieModeBinary,
+		TargetSize: target,
 	}
 
 	gen, err := New(config)
@@ -971,36 +913,35 @@ func TestTargetSizeStopsAccurately_Bintrie(t *testing.T) {
 	assertDBSizeWithin(t, dbPath, target, 0.40)
 }
 
-// TestTargetSizeStopsAccurately_MPT exercises the MPT path's origin-scoped
-// Phase 1 stop. The assertion measures the projected trie footprint
-// (bytesPerAccount × accounts + bytesPerSlot × slots) rather than dirSize,
-// because cfg.TargetSize is a TRIE-ONLY budget — geth's flat-state and
-// Pebble overhead add ~50% more disk on top, which is by design.
+// TestTargetSizeEmitsFullPlan_MPT asserts that the MPT generator path
+// emits exactly plan.NumEOAs + plan.NumContracts entities even when
+// cfg.TargetSize is set well below the plan's projected footprint.
+// Post-Fix-A, TargetSize is advisory — the autofill Plan is the single
+// source of truth for entity counts.
 //
-// Tolerance is ±5%: Phase 1 stops the moment projection ≥ target, so the
-// worst-case overshoot is one entity's projection (~14 KB for a max-slot
-// contract at ~100 slots × 140 B + 175 B). Within a 500 MB target that's
-// ~0.003 % — the ±5% bound is generous on top of that.
-func TestTargetSizeStopsAccurately_MPT(t *testing.T) {
+// Pre-Fix-A the geth writer's projection accumulator stopped emission
+// once the running projection hit TargetSize, truncating the plan
+// mid-loop. That gate (and its three per-client analogues in besu /
+// reth / nethermind) was the root cause of cross-client state-root
+// divergence at high-spec-utilization bench scales.
+func TestTargetSizeEmitsFullPlan_MPT(t *testing.T) {
 	if testing.Short() {
-		t.Skip("skipping long target-size test in -short mode")
+		t.Skip("skipping target-size test in -short mode")
 	}
-	const target uint64 = 500 * 1024 * 1024 // 500 MB
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "testdb")
 
+	plan := mustPlan(t, 1<<20) // 1 MiB → ~1.2K EOAs + ~20 contracts
 	config := Config{
 		DBPath:         dbPath,
-		NumAccounts:    20,
-		NumContracts:   1_000_000,
-		MaxSlots:       100,
-		MinSlots:       10,
-		Distribution:   PowerLaw,
+		AutoFill:       plan,
 		Seed:           43,
-		CodeSize:       256,
 		TrieMode:       TrieModeMPT,
 		WriteTrieNodes: true,
-		TargetSize:     target,
+		// TargetSize deliberately small: the OLD projection-based
+		// early-stop in client/geth would have fired after ~750 EOAs
+		// (175 B × 750 ≈ 128 KiB). The full plan MUST still emit.
+		TargetSize: 128 << 10,
 	}
 
 	gen, err := New(config)
@@ -1014,10 +955,17 @@ func TestTargetSizeStopsAccurately_MPT(t *testing.T) {
 	}
 	gen.Close()
 
-	t.Logf("MPT target=%s: %d contracts, %d slots, root=%s",
-		fmtBytes(target), stats.ContractsCreated, stats.StorageSlotsCreated,
+	t.Logf("MPT plan emit: %d accounts, %d contracts, %d slots, root=%s",
+		stats.AccountsCreated, stats.ContractsCreated, stats.StorageSlotsCreated,
 		stats.StateRoot.Hex())
-	assertProjectedTrieSizeNearTarget(t, stats, target, 0.05)
+	if stats.AccountsCreated != plan.NumEOAs {
+		t.Errorf("AccountsCreated: got %d, want %d (full plan)",
+			stats.AccountsCreated, plan.NumEOAs)
+	}
+	if stats.ContractsCreated != plan.NumContracts {
+		t.Errorf("ContractsCreated: got %d, want %d (full plan)",
+			stats.ContractsCreated, plan.NumContracts)
+	}
 }
 
 // TestTargetSizeApproxDeterministic asserts that two bintrie runs with
@@ -1035,17 +983,13 @@ func TestTargetSizeApproxDeterministic(t *testing.T) {
 	run := func(tag string) (*Stats, string) {
 		tmpDir := t.TempDir()
 		dbPath := filepath.Join(tmpDir, "testdb")
+		plan := mustPlan(t, 5*target)
 		config := Config{
-			DBPath:       dbPath,
-			NumAccounts:  20,
-			NumContracts: 100_000,
-			MaxSlots:     100,
-			MinSlots:     10,
-			Distribution: PowerLaw,
-			Seed:         777,
-			CodeSize:     256,
-			TrieMode:     TrieModeBinary,
-			TargetSize:   target,
+			DBPath:     dbPath,
+			AutoFill:   plan,
+			Seed:       777,
+			TrieMode:   TrieModeBinary,
+			TargetSize: target,
 		}
 		gen, err := New(config)
 		if err != nil {

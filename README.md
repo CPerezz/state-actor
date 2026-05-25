@@ -31,24 +31,22 @@
 
 You want a pre-populated Ethereum database that a client can boot against directly &mdash; for cross-client determinism tests, devnet bootstrapping, EIP-7702 / ERC-20 fixtures, or state-bloat experiments. The alternative (run the client's `init` against a genesis with millions of `alloc` entries) is slow and client-specific. State Actor writes each client's on-disk format directly: Pebble for geth, MDBX + RocksDB + nippy-jar for reth, single RocksDB + 8 Bonsai column families for besu, seven RocksDB instances for nethermind.
 
-Three flags carry most of the weight: `--client` (which client's format to write), `--spec` (concrete entities to include, declared in YAML), `--target-size` (upper bound on the whole DB; truncates spec entities to fit, stops synthetic fill at the cap). Everything else has a sane default.
+Three flags carry most of the weight: `--client` (which client's format to write), `--spec` (concrete entities to include, declared in YAML), `--target-size` (the DB-size budget; auto-fills mainnet-shaped 20 % / 10 % / 70 % across account-trie / bytecode / storage up to the cap). One of `--spec` or `--target-size` is required; everything else has a sane default.
 
 ## Quick start
 
 ```bash
-# Smoke test: a small geth DB, defaults, no spec.
+# Smoke test: a small geth DB, no spec — auto-fill emits mainnet-shaped state.
 go run . --client=geth --db=/tmp/sa-geth/geth/chaindata --target-size=100MB
 
 # Spec-driven: load a curated YAML verbatim (no --target-size, so the
-# spec is never truncated; --accounts=0 --contracts=0 suppresses
-# synthetic fill).
+# spec is never truncated and no auto-fill runs on top).
 go run . --client=geth --db=/tmp/sa-spec/geth/chaindata \
-  --spec=examples/spec-minimal.yaml \
-  --accounts=0 --contracts=0
+  --spec=examples/spec-minimal.yaml
 
 # Pick a different client (Docker required for cgo clients).
 go run . --client=reth --db=/tmp/sa-reth \
-  --spec=examples/spec-minimal.yaml --accounts=0 --contracts=0
+  --spec=examples/spec-minimal.yaml
 ```
 
 After the run, boot the client against the produced datadir &mdash; the per-client recipes are in [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
@@ -89,15 +87,14 @@ The `--spec` flag points at a YAML file describing exactly which contracts and E
 
 ```bash
 state-actor --client=geth --db=/tmp/sa/geth/chaindata \
-  --spec=examples/spec-erc20-mixed-sizes.yaml \
-  --accounts=0 --contracts=0
+  --spec=examples/spec-erc20-mixed-sizes.yaml
 ```
 
-When you use `--spec`, set `--accounts=0 --contracts=0` to suppress synthetic fill &mdash; otherwise random EOAs and contracts can collide with spec-derived addresses.
+Without `--target-size`, only the spec entities are written &mdash; no synthetic fill runs on top, so there's no risk of random EOAs colliding with spec-derived addresses.
 
 ### Cap the database size
 
-`--target-size` is an upper bound on the projected trie footprint of the whole generated database. Both spec entities and the synthetic-fill loop count toward the budget; if the spec alone would exceed the budget, the spec is silently truncated to the longest prefix that fits (with a warning on stderr). To generate a spec verbatim, omit `--target-size`.
+`--target-size` is an upper bound on the projected trie footprint of the whole generated database. When set, the auto-fill emits mainnet-shaped synthetic state (20 % account-trie / 10 % bytecode / 70 % storage) up to the cap. With `--spec`, the spec entities count first; the auto-fill fills the headroom after their projected cost. If the spec alone would exceed the budget, the spec is truncated to the longest prefix that fits, with a warning on stderr; no auto-fill runs in that case. To generate a spec verbatim with no synthetic fill, omit `--target-size`.
 
 ```bash
 state-actor --client=reth --db=/tmp/sa --target-size=10GB
@@ -154,14 +151,8 @@ Full schema: [`docs/SPEC.md`](docs/SPEC.md). Curated examples: [`examples/README
 |---|---|---|---|
 | `--db` | string | (required) | Path to the database directory |
 | `--client` | string | `geth` | Target client: `geth`, `nethermind`, `besu`, `reth` |
-| `--spec` | string | (none) | Path to a YAML state-spec file; see `docs/SPEC.md` |
-| `--target-size` | string | (none) | Upper bound on the whole DB (`5GB`, `500MB`, …). Truncates spec to the longest prefix that fits; synthetic fill stops at the cap. |
-| `--accounts` | int | 1000 | Number of synthetic EOAs |
-| `--contracts` | int | 100 | Number of synthetic contracts |
-| `--min-slots` | int | 1 | Min storage slots per synthetic contract |
-| `--max-slots` | int | 10000 | Max storage slots per synthetic contract |
-| `--distribution` | string | `power-law` | Synthetic storage distribution: `power-law`, `uniform`, `exponential` |
-| `--code-size` | int | 1024 | Average synthetic contract code size, bytes |
+| `--spec` | string | (none) | Path to a YAML state-spec file; see `docs/SPEC.md`. Required if `--target-size` is unset. |
+| `--target-size` | string | (none) | Upper bound on the whole DB (`5GB`, `500MB`, …). Required if `--spec` is unset. With `--spec`, auto-fill fills the headroom after the spec; without `--spec`, drives the whole DB. Auto-fill emits a fixed 20 % / 10 % / 70 % split across account-trie / bytecode / storage. |
 | `--seed` | int | 1 | Random seed; `--seed=0` randomises (footgun) |
 | `--fork` | string | (latest) | Hard fork active at genesis; `--list-forks` lists choices |
 | `--chain-id` | int | 1337 | Chain ID embedded in the synthesized chainspec |

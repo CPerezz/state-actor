@@ -4,8 +4,7 @@
 #
 # Run:
 #   state-actor --client=geth --db=/tmp/sa-minimal \
-#     --spec=examples/spec-minimal.yaml \
-#     --accounts=0 --contracts=0
+#     --spec=examples/spec-minimal.yaml
 #
 # Verify (after booting the client per docs/RUNBOOK.md):
 #   cast balance 0x1111111111111111111111111111111111111111 --rpc-url ...

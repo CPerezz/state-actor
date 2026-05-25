@@ -13,7 +13,6 @@ The simplest path: generate the DB once on your workstation, package it, mount i
 state-actor --client=geth \
     --db=./bloated-chaindata/geth/chaindata \
     --spec=examples/spec-erc20-mixed-sizes.yaml \
-    --accounts=0 --contracts=0 \
     --chain-id=32382 --fork=osaka --gas-limit=60000000
 
 # 2. Package for Kurtosis.
@@ -42,24 +41,25 @@ For reth / besu / nethermind participants, the equivalent mounts plus boot flags
 
 > [!WARNING]
 > `integration/stategen_launcher.star` predates the multi-client + `--spec`
-> work. It calls a `stategen:latest` Docker image (not built by this repo)
-> and passes flags that no longer exist on `state-actor` (`--genesis`,
-> `--batch-size`). It will not run against the current binary as-shipped.
-> Use Method 1 (pre-generate, then mount) until the Starlark module is
-> rewritten.
+> work AND the autofill rewrite. It calls a `stategen:latest` Docker image
+> (not built by this repo) and passes flags that no longer exist on
+> `state-actor` (`--genesis`, `--batch-size`, `--accounts`, `--contracts`,
+> `--max-slots`, `--min-slots`, `--distribution`). It will not run against
+> the current binary as-shipped. Use Method 1 (pre-generate, then mount)
+> until the Starlark module is rewritten.
 
-The module exposes only synthetic-fill knobs (no `--client`, no `--spec`, no `--target-size`); it is preserved so existing Kurtosis packages keep parsing. The actual signature is:
+The module's legacy signature (preserved so existing Kurtosis packages keep parsing) is:
 
 ```python
 generate_bloated_state(
     plan,
     output_artifact_name,
     genesis_artifact = None,
-    num_accounts     = 10000,
-    num_contracts    = 5000,
-    max_slots        = 10000,
-    min_slots        = 100,
-    distribution     = "power-law",
+    num_accounts     = 10000,    # removed flag — has no effect
+    num_contracts    = 5000,     # removed flag — has no effect
+    max_slots        = 10000,    # removed flag — has no effect
+    min_slots        = 100,      # removed flag — has no effect
+    distribution     = "power-law",  # removed flag — has no effect
     seed             = 0,
     binary_trie      = False,
     tolerations      = [],
@@ -98,7 +98,7 @@ cast chain-id --rpc-url <participant-rpc>
 
 ### Spec entity unreachable after boot
 
-If `eth_getCode` returns `0x` for an entity whose name you set in the spec, it's almost always a collision: the synthetic-fill loop wrote a random EOA / contract at the same name-derived address. Re-run with `--accounts=0 --contracts=0`.
+If `eth_getCode` returns `0x` for an entity whose name you set in the spec, it's almost always a collision: the auto-fill wrote a random EOA / contract at the same name-derived address. Re-run without `--target-size` (so no auto-fill runs at all), or with a smaller `--target-size` so the spec entities exhaust the headroom first.
 
 ### Participant boots but `eth_blockNumber` stays at `0x0`
 

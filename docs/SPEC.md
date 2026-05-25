@@ -14,8 +14,9 @@
 
 State-actor's `--spec` flag accepts a YAML file declaring concrete entities
 (EOAs + contracts) the writer must include in generated genesis state.
-Spec entities are written first; the synthetic-fill loop
-(`--accounts`/`--contracts`/`--target-size`) runs on top.
+Spec entities are written first; if `--target-size` is also set, the
+mainnet-shaped auto-fill (20 % account-trie / 10 % bytecode / 70 %
+storage) fills the headroom on top.
 
 ## Quick start
 
@@ -150,19 +151,20 @@ Built-in non-template handlers (no `template:` field needed):
   EOA when `code:` is `0xef0100<addr>`; storage-bloated EOA when
   `approximate_size_bytes:` is set.
 
-## Composability with existing flags
+## Composability with `--target-size`
 
-- `--accounts`, `--contracts`, `--min-slots`, `--max-slots`,
-  `--distribution`: still drive the synthetic-fill loop. Spec entities
-  are written first, then the loop runs on top.
 - `--target-size`: an upper bound on the projected trie footprint of
-  the whole generated database — spec entities AND synthetic fill both
-  count toward it. If the spec alone exceeds the budget,
+  the whole generated database — spec entities AND auto-fill both count
+  toward it. When set alongside `--spec`, the auto-fill emits
+  mainnet-shaped synthetic state (20 % account-trie / 10 % bytecode /
+  70 % storage) up to the headroom (`target_size` minus the spec's
+  projected cost). If the spec alone exceeds the budget,
   `internal/specbuild` truncates the entity list to the longest prefix
-  that fits and emits a `--target-size … truncated spec at entity[N]`
-  warning on stderr. To generate a spec verbatim, omit `--target-size`.
+  that fits, emits a `--target-size … truncated spec at entity[N]`
+  warning on stderr, and no auto-fill runs. To generate a spec verbatim
+  with no synthetic fill, omit `--target-size`.
 - `--seed`: drives both the spec's deterministic address derivation
-  AND the synthetic-fill loop's RNG. Same `--seed + --spec` always
+  AND the auto-fill RNG. Same `--seed + --spec + --target-size` always
   produces the same on-disk state on a given client.
 
 ## Determinism guarantees

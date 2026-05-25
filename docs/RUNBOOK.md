@@ -26,8 +26,7 @@ Reference: `client/geth/e2e_test.go` (`TestE2ESuite`).
 go run . \
   --client=geth \
   --db=/tmp/sa-geth/geth/chaindata \
-  --accounts=100 --contracts=15000 \
-  --code-size=128 --min-slots=5 --max-slots=50 \
+  --target-size=100MB \
   --seed=42 \
   --chain-id=1337 --gas-limit=60000000 \
   --timestamp=1700000000 --extra-data=0xdeadbeef
@@ -84,8 +83,7 @@ docker run --rm \
   state-actor-reth \
   ./state-actor \
   --client=reth --db=/data \
-  --accounts=100 --contracts=15000 \
-  --code-size=128 --min-slots=5 --max-slots=50 \
+  --target-size=100MB \
   --seed=42 \
   --chain-id=1337 --gas-limit=60000000 \
   --timestamp=1700000000 --extra-data=0xdeadbeef
@@ -153,8 +151,7 @@ docker run --rm \
   state-actor-besu \
   ./state-actor \
   --client=besu --db=/data \
-  --accounts=100 --contracts=15000 \
-  --code-size=128 --min-slots=5 --max-slots=50 \
+  --target-size=100MB \
   --seed=42 \
   --chain-id=1337 --gas-limit=60000000 \
   --timestamp=1700000000 --extra-data=0xdeadbeef
@@ -215,8 +212,7 @@ docker run --rm \
   state-actor-nethermind \
   ./state-actor \
   --client=nethermind --db=/data \
-  --accounts=100 --contracts=15000 \
-  --code-size=128 --min-slots=5 --max-slots=50 \
+  --target-size=100MB \
   --seed=42 \
   --chain-id=1337 --gas-limit=60000000 \
   --timestamp=1700000000 --extra-data=0xdeadbeef
@@ -264,7 +260,7 @@ docker run --rm \
 }
 ```
 
-The full template is in `client/nethermind/e2e_test.go`'s `nethermindE2EConfigTemplate`.
+The full template is in `client/nethermind/e2e_test.go`'s `nethermindE2EConfigTemplate`. `Init.BaseDbPath` must equal the datadir; its default is `<datadir>/nethermind_db/<network>/`, which is NOT where state-actor writes — omitting it silently creates an empty DB and `eth_getBlockByNumber("0x0").stateRoot` returns `0x56e81f17…` (empty-trie hash).
 
 **Boot.**
 
@@ -292,7 +288,7 @@ cast chain-id --rpc-url http://<container-ip>:8545   # → 0x539
 | `missing librocksdb` at build | cgo client built without the system RocksDB | Build via the per-client `Dockerfile.<client>` (see [Besu](#besu) / [Nethermind](#nethermind) / [Reth](#reth)) |
 | Reth: `mmap: cannot allocate memory` | `vm.max_map_count` too low | `sudo sysctl -w vm.max_map_count=1048576` (see [Reth](#reth) operational hygiene) |
 | Besu / Neth: empty `eth_blockNumber` indefinitely | No consensus layer driving the Engine API | Run a mock CL (see `internal/engineapi/`) or use `internal/e2e_testing.StartEngineDriver` ([Besu engine-API note](#besu), [Nethermind engine-API note](#nethermind)) |
-| `eth_getCode` returns `0x` for a name-derived spec entity | Synthetic fill collided with the derived address | Re-run with `--accounts=0 --contracts=0` |
+| `eth_getCode` returns `0x` for a name-derived spec entity | Auto-fill collided with the derived address | Re-run without `--target-size` (no auto-fill) or with a smaller `--target-size` |
 | Cross-client state-root divergence | Per-client `sizecal` drift, or missing canonical syscontracts | See [`ARCHITECTURE.md#cross-client-determinism`](ARCHITECTURE.md#cross-client-determinism); check `internal/clientpolicy/` calibration; ensure `syscontracts.AddCanonicalSystemContracts` ran |
 | Reth: `database.version mismatch` | Boot image's reth doesn't match state-actor's pinned codec version | Pin the reth image tag; see `internal/reth/constants.go` ([Reth section](#reth)) |
 

@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"log"
 	mrand "math/rand"
 	"runtime"
 	"sort"
@@ -20,7 +19,6 @@ import (
 	"github.com/nerolation/state-actor/internal/besu"
 	besurlp "github.com/nerolation/state-actor/internal/besu/rlp"
 	besutrie "github.com/nerolation/state-actor/internal/besu/trie"
-	"github.com/nerolation/state-actor/internal/entitygen"
 	"github.com/nerolation/state-actor/internal/streamingtrie"
 	"github.com/nerolation/state-actor/internal/streamsort"
 )
@@ -68,35 +66,23 @@ func writeStateAndCollectRoot(
 
 	rng := mrand.New(mrand.NewSource(int64(cfg.Seed)))
 
-	// Phase 1 target-size: tracks raw entity bytes (over-estimates the
-	// final Bonsai DB size, lands slightly under target).
-	totalRawBytes := uint64(0)
-	targetReached := false
-	checkTarget := func(blobLen int) bool {
-		totalRawBytes += uint64(32 + blobLen)
-		if cfg.TargetSize > 0 && totalRawBytes >= cfg.TargetSize {
-			if cfg.Verbose {
-				log.Printf("besu Phase 1: raw bytes %d MiB >= target %d MiB — stopping entity emission early",
-					totalRawBytes>>20, cfg.TargetSize>>20)
+	plan := cfg.AutoFill
+	if plan != nil {
+		for i := 0; i < plan.NumEOAs; i++ {
+			if err := ctx.Err(); err != nil {
+				return common.Hash{}, nil, nil, err
 			}
-			targetReached = true
-			return true
-		}
-		return false
-	}
-
-	for i := 0; i < cfg.NumAccounts && !targetReached; i++ {
-		if err := ctx.Err(); err != nil {
-			return common.Hash{}, nil, nil, err
-		}
-		acc := entitygen.GenerateEOA(rng)
-		addrHash := acc.AddrHash
-		blob := encodeEntityEOA(acc.StateAccount.Nonce, acc.StateAccount.Balance)
-		if err := sorter.Put(addrHash[:], blob); err != nil {
-			return common.Hash{}, nil, nil, err
-		}
-		if checkTarget(len(blob)) {
-			break
+			acc := plan.DrawEOA(rng)
+			addrHash := acc.AddrHash
+			var blob []byte
+			if len(acc.Code) > 0 {
+				blob = encodeEntityContract(acc.StateAccount.Nonce, acc.StateAccount.Balance, acc.Code, nil)
+			} else {
+				blob = encodeEntityEOA(acc.StateAccount.Nonce, acc.StateAccount.Balance)
+			}
+			if err := sorter.Put(addrHash[:], blob); err != nil {
+				return common.Hash{}, nil, nil, err
+			}
 		}
 	}
 
@@ -126,26 +112,21 @@ func writeStateAndCollectRoot(
 		}
 	}
 
-	codeSize := cfg.CodeSize
-	if codeSize <= 0 {
-		codeSize = 1024
-	}
-	for i := 0; i < cfg.NumContracts && !targetReached; i++ {
-		if err := ctx.Err(); err != nil {
-			return common.Hash{}, nil, nil, err
-		}
-		contract := entitygen.GenerateContractRoll(rng, cfg.Distribution, codeSize, cfg.MinSlots, cfg.MaxSlots)
-		slotMap := make(map[common.Hash]common.Hash, len(contract.Storage))
-		for _, s := range contract.Storage {
-			slotMap[s.Key] = s.Value
-		}
-		addrHash := contract.AddrHash
-		blob := encodeEntityContract(contract.StateAccount.Nonce, contract.StateAccount.Balance, contract.Code, slotMap)
-		if err := sorter.Put(addrHash[:], blob); err != nil {
-			return common.Hash{}, nil, nil, err
-		}
-		if checkTarget(len(blob)) {
-			break
+	if plan != nil {
+		for i := 0; i < plan.NumContracts; i++ {
+			if err := ctx.Err(); err != nil {
+				return common.Hash{}, nil, nil, err
+			}
+			contract := plan.DrawContract(rng)
+			slotMap := make(map[common.Hash]common.Hash, len(contract.Storage))
+			for _, s := range contract.Storage {
+				slotMap[s.Key] = s.Value
+			}
+			addrHash := contract.AddrHash
+			blob := encodeEntityContract(contract.StateAccount.Nonce, contract.StateAccount.Balance, contract.Code, slotMap)
+			if err := sorter.Put(addrHash[:], blob); err != nil {
+				return common.Hash{}, nil, nil, err
+			}
 		}
 	}
 

@@ -6,10 +6,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"log"
 	mrand "math/rand"
-	"os"
-	"path/filepath"
 	"sort"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -18,7 +15,6 @@ import (
 	gethrlp "github.com/ethereum/go-ethereum/rlp"
 
 	"github.com/nerolation/state-actor/generator"
-	"github.com/nerolation/state-actor/internal/entitygen"
 	nethtrie "github.com/nerolation/state-actor/internal/neth/trie"
 	"github.com/nerolation/state-actor/internal/streamsort"
 )
@@ -171,48 +167,39 @@ func writeSyntheticAccounts(
 
 	rng := mrand.New(mrand.NewSource(cfg.Seed))
 
-	// Phase 1 is hybrid: account stashing goes to the temp Pebble, but
-	// contract storage tries write directly to the State DB — so dirSize
-	// sampling must happen inside the contract loop, not just Phase 2.
-	targetReached := false
-	checkProductionSize := func() (uint64, bool) {
-		if cfg.TargetSize == 0 {
-			return 0, false
-		}
-		if err := sink.flush(); err != nil {
-			// Surfaced via sink.close() at function end; retry next sample.
-			return 0, false
-		}
-		size, err := dirSize(cfg.DBPath)
-		if err != nil {
-			return 0, false
-		}
-		return size, size >= cfg.TargetSize
-	}
+	plan := cfg.AutoFill
 
-	for i := 0; i < cfg.NumAccounts; i++ {
-		acc := entitygen.GenerateEOA(rng)
-		data, err := gethrlp.EncodeToBytes(acc.StateAccount)
-		if err != nil {
-			return common.Hash{}, fmt.Errorf("encode EOA %d: %w", i, err)
-		}
-		if err := sorter.Put(acc.AddrHash[:], data); err != nil {
-			return common.Hash{}, fmt.Errorf("queue EOA: %w", err)
-		}
-		if stats != nil {
-			stats.AccountBytes += uint64(len(data))
+	if plan != nil {
+		for i := 0; i < plan.NumEOAs; i++ {
+			acc := plan.DrawEOA(rng)
+			data, err := gethrlp.EncodeToBytes(acc.StateAccount)
+			if err != nil {
+				return common.Hash{}, fmt.Errorf("encode EOA %d: %w", i, err)
+			}
+			if err := sorter.Put(acc.AddrHash[:], data); err != nil {
+				return common.Hash{}, fmt.Errorf("queue EOA: %w", err)
+			}
+			if stats != nil {
+				stats.AccountBytes += uint64(len(data))
+				stats.AccountsCreated++
+			}
+			if len(acc.Code) > 0 {
+				if err := codeSink.put(acc.CodeHash[:], acc.Code); err != nil {
+					return common.Hash{}, fmt.Errorf("write EOA delegation code: %w", err)
+				}
+				if stats != nil {
+					stats.CodeBytes += uint64(len(acc.Code))
+				}
+			}
 		}
 	}
 
-	codeSize := cfg.CodeSize
-	if codeSize <= 0 {
-		codeSize = 1024
+	plannedContracts := 0
+	if plan != nil {
+		plannedContracts = plan.NumContracts
 	}
-
-	const contractSampleEvery = 100
-
-	for i := 0; i < cfg.NumContracts && !targetReached; i++ {
-		contract := entitygen.GenerateContractRoll(rng, cfg.Distribution, codeSize, cfg.MinSlots, cfg.MaxSlots)
+	for i := 0; i < plannedContracts; i++ {
+		contract := plan.DrawContract(rng)
 		numSlots := len(contract.Storage)
 
 		if err := codeSink.put(contract.CodeHash[:], contract.Code); err != nil {
@@ -267,15 +254,8 @@ func writeSyntheticAccounts(
 		}
 		if stats != nil {
 			stats.AccountBytes += uint64(len(data))
-		}
-		if (i+1)%contractSampleEvery == 0 {
-			if size, reached := checkProductionSize(); reached {
-				if cfg.Verbose {
-					log.Printf("nethermind Phase 1: dirSize %d MiB >= target %d MiB after %d contracts — stopping",
-						size>>20, cfg.TargetSize>>20, i+1)
-				}
-				targetReached = true
-			}
+			stats.ContractsCreated++
+			stats.StorageSlotsCreated += numSlots
 		}
 	}
 
@@ -327,25 +307,6 @@ func encodeStorageValueNeth(value common.Hash) ([]byte, error) {
 type hashedSlot struct {
 	keyHash common.Hash
 	value   common.Hash
-}
-
-// dirSize returns the total bytes used by all regular files under path.
-// Returns 0 + nil if path doesn't exist yet.
-func dirSize(path string) (uint64, error) {
-	var total uint64
-	err := filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
-		if err != nil {
-			if os.IsNotExist(err) {
-				return nil
-			}
-			return err
-		}
-		if !info.IsDir() {
-			total += uint64(info.Size())
-		}
-		return nil
-	})
-	return total, err
 }
 
 // nethermindStorageHashBuilder adapts nethtrie.Builder to

@@ -44,10 +44,7 @@ func TestMainBenchmarkPrintsStats(t *testing.T) {
 	dbDir := filepath.Join(binDir, "chaindata")
 	run := exec.Command(binPath,
 		"--db", dbDir,
-		"--accounts", "10",
-		"--contracts", "3",
-		"--min-slots", "1",
-		"--max-slots", "2",
+		"--target-size", "2MB",
 		"--seed", "42",
 		"--benchmark",
 	)
@@ -152,8 +149,6 @@ func TestMainSpecFlagSmoke(t *testing.T) {
 	cmd := exec.Command(binPath,
 		"--db", dbDir,
 		"--spec", specPath,
-		"--accounts", "0",
-		"--contracts", "0",
 		"--seed", "42",
 	)
 	out, err := cmd.CombinedOutput()
@@ -196,5 +191,65 @@ func TestMainInjectAccountsFlagRemoved(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "inject-accounts") {
 		t.Errorf("expected error to mention 'inject-accounts'; got:\n%s", out)
+	}
+}
+
+// TestMainRemovedSyntheticFillFlags pins the absence of every flag that
+// the autofill rewrite (#82 follow-up) removed. Users who still pass any
+// of the 6 must hit Go's "flag provided but not defined" error.
+func TestMainRemovedSyntheticFillFlags(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping removed-flag regression in short mode")
+	}
+	binDir := t.TempDir()
+	binPath := filepath.Join(binDir, "state-actor")
+	build := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, out)
+	}
+	cases := []struct {
+		flag string
+		val  string
+	}{
+		{"accounts", "10"},
+		{"contracts", "5"},
+		{"max-slots", "100"},
+		{"min-slots", "1"},
+		{"distribution", "power-law"},
+		{"code-size", "256"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.flag, func(t *testing.T) {
+			cmd := exec.Command(binPath, "--"+tc.flag+"="+tc.val, "--db=/tmp/never")
+			out, _ := cmd.CombinedOutput()
+			if cmd.ProcessState.ExitCode() == 0 {
+				t.Errorf("expected non-zero exit when passing removed --%s flag", tc.flag)
+			}
+			if !strings.Contains(string(out), tc.flag) {
+				t.Errorf("expected error to mention %q; got:\n%s", tc.flag, out)
+			}
+		})
+	}
+}
+
+// TestMainRequiresTargetSizeOrSpec confirms that running state-actor with
+// neither --spec nor --target-size errors out cleanly.
+func TestMainRequiresTargetSizeOrSpec(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping no-spec-no-target regression in short mode")
+	}
+	binDir := t.TempDir()
+	binPath := filepath.Join(binDir, "state-actor")
+	build := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, out)
+	}
+	cmd := exec.Command(binPath, "--db="+filepath.Join(binDir, "db"))
+	out, _ := cmd.CombinedOutput()
+	if cmd.ProcessState.ExitCode() == 0 {
+		t.Errorf("expected non-zero exit when --spec and --target-size are both absent")
+	}
+	if !strings.Contains(string(out), "target-size") {
+		t.Errorf("expected error to mention 'target-size'; got:\n%s", out)
 	}
 }

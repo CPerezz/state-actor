@@ -22,6 +22,7 @@ import (
 	"github.com/nerolation/state-actor/client/reth"
 	"github.com/nerolation/state-actor/generator"
 	"github.com/nerolation/state-actor/genesis"
+	"github.com/nerolation/state-actor/internal/autofill"
 	"github.com/nerolation/state-actor/internal/clientpolicy"
 	"github.com/nerolation/state-actor/internal/sizecal"
 	"github.com/nerolation/state-actor/internal/syscontracts"
@@ -31,19 +32,13 @@ import (
 )
 
 var (
-	dbPath       = flag.String("db", "", "Path to the database directory (required)")
-	accounts     = flag.Int("accounts", 1000, "Number of EOA accounts to create")
-	contracts    = flag.Int("contracts", 100, "Number of contracts to create")
-	maxSlots     = flag.Int("max-slots", 10000, "Maximum storage slots per contract")
-	minSlots     = flag.Int("min-slots", 1, "Minimum storage slots per contract")
-	distribution = flag.String("distribution", "power-law", "Storage distribution: 'power-law', 'uniform', or 'exponential'")
-	seed         = flag.Int64("seed", 1, "Random seed (deterministic; default 1). Pass --seed=0 to use the current wall-clock time (NON-reproducible).")
-	codeSize     = flag.Int("code-size", 1024, "Average contract code size in bytes")
-	verbose      = flag.Bool("verbose", false, "Verbose output")
-	benchmark    = flag.Bool("benchmark", false, "Run in benchmark mode (print detailed stats)")
-	binaryTrie   = flag.Bool("binary-trie", false, "Generate state for binary trie mode (EIP-7864)")
+	dbPath     = flag.String("db", "", "Path to the database directory (required)")
+	seed       = flag.Int64("seed", 1, "Random seed (deterministic; default 1). Pass --seed=0 to use the current wall-clock time (NON-reproducible).")
+	verbose    = flag.Bool("verbose", false, "Verbose output")
+	benchmark  = flag.Bool("benchmark", false, "Run in benchmark mode (print detailed stats)")
+	binaryTrie = flag.Bool("binary-trie", false, "Generate state for binary trie mode (EIP-7864)")
 
-	targetSize = flag.String("target-size", "", "Upper bound on the projected trie footprint of the whole DB (e.g. '5GB', '500MB'). Spec entities and synthetic fill both count toward it: synthetic fill stops at the cap, and if the spec alone exceeds the budget internal/specbuild truncates the entity list to the longest prefix that fits and emits a stderr warning. Omit to disable. Honored by geth, besu, nethermind, and reth.")
+	targetSize = flag.String("target-size", "", "Advisory budget (e.g. '5GB', '500MB') that sizes the auto-fill of 20/10/70 mainnet-shaped synthetic state. Required unless --spec is set. With --spec, fills the headroom after the spec's projected cost; if the spec already meets the target, no auto-fill runs. Not a hard on-disk cap — actual size may vary per client. Honored by geth, besu, nethermind, and reth.")
 
 	fork      = flag.String("fork", "", "Hard fork active at genesis. Empty (default) resolves to the latest fork the chosen --client can write. Use --list-forks to see all values.")
 	listForks = flag.Bool("list-forks", false, "Print the list of accepted --fork values and exit.")
@@ -81,6 +76,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	if *specFile == "" && *targetSize == "" {
+		fmt.Fprintln(os.Stderr, "Error: --target-size is required when --spec is not set (e.g. --target-size=5GB)")
+		flag.Usage()
+		os.Exit(1)
+	}
+
 	if *seed == 0 {
 		*seed = time.Now().UnixNano()
 	}
@@ -105,6 +106,10 @@ func main() {
 		if err != nil {
 			log.Fatalf("Invalid --target-size: %v", err)
 		}
+		if parsedTargetSize == 0 {
+			log.Fatalf("--target-size must be positive (got %q); set a positive value or omit the flag entirely",
+				*targetSize)
+		}
 	}
 
 	// Reject --archive for clients that have no archive code path.
@@ -118,13 +123,7 @@ func main() {
 
 	config := generator.Config{
 		DBPath:         *dbPath,
-		NumAccounts:    *accounts,
-		NumContracts:   *contracts,
-		MaxSlots:       *maxSlots,
-		MinSlots:       *minSlots,
-		Distribution:   generator.ParseDistribution(*distribution),
 		Seed:           *seed,
-		CodeSize:       *codeSize,
 		Verbose:        *verbose,
 		TrieMode:       trieMode,
 		CommitInterval: 500_000,
@@ -158,6 +157,7 @@ func main() {
 			chosenFork, genesisConfig.Config.ChainID, uint64(genesisConfig.GasLimit), uint64(genesisConfig.Timestamp), len(genesisConfig.ExtraData))
 	}
 
+	var specCost uint64
 	if *specFile != "" {
 		specDoc, err := spec.ParseFile(*specFile)
 		if err != nil {
@@ -170,12 +170,14 @@ func main() {
 		for _, w := range validateRes.Warnings {
 			log.Printf("--spec warning: %s", w)
 		}
-		preAlloc, diag, err := specbuild.Build(specDoc, specbuild.BuildOptions{
+		buildOpts := specbuild.BuildOptions{
 			Seed:       *seed,
 			ClientName: *client,
 			Sizer:      sizecal.Default(),
 			TargetSize: config.TargetSize,
-		})
+		}
+		specCost = specbuild.ProjectedCost(specDoc, buildOpts)
+		preAlloc, diag, err := specbuild.Build(specDoc, buildOpts)
 		if err != nil {
 			log.Fatalf("--spec build: %v", err)
 		}
@@ -184,7 +186,26 @@ func main() {
 		}
 		config.PreAlloc = preAlloc
 		if *verbose {
-			log.Printf("--spec: loaded %d entities from %s", len(preAlloc), *specFile)
+			log.Printf("--spec: loaded %d entities from %s (projected cost %s)", len(preAlloc), *specFile, formatBytes(specCost))
+		}
+	}
+
+	// Build the auto-fill Plan for any remaining budget after the spec.
+	if config.TargetSize > 0 {
+		topUp := config.TargetSize
+		if specCost < config.TargetSize {
+			topUp = config.TargetSize - specCost
+		} else {
+			topUp = 0
+		}
+		if topUp > 0 {
+			plan, err := autofill.PlanForBudget(topUp)
+			if err != nil {
+				log.Fatalf("auto-fill: %v", err)
+			}
+			config.AutoFill = plan
+		} else if *verbose {
+			log.Printf("auto-fill skipped: spec cost %s ≥ target_size %s", formatBytes(specCost), formatBytes(config.TargetSize))
 		}
 	}
 
@@ -198,19 +219,17 @@ func main() {
 	if *verbose {
 		log.Printf("Configuration:")
 		log.Printf("  Database:     %s", config.DBPath)
-		log.Printf("  Accounts:     %d", config.NumAccounts)
-		log.Printf("  Contracts:    %d", config.NumContracts)
-		log.Printf("  Max Slots:    %d", config.MaxSlots)
-		log.Printf("  Min Slots:    %d", config.MinSlots)
-		log.Printf("  Distribution: %s", *distribution)
 		log.Printf("  Seed:         %d", config.Seed)
-		log.Printf("  Code Size:    %d bytes", config.CodeSize)
 		log.Printf("  Trie Mode:    %s", config.TrieMode)
 		if config.GroupDepth > 0 {
-			log.Printf("  Group Depth:     %d", config.GroupDepth)
+			log.Printf("  Group Depth:  %d", config.GroupDepth)
 		}
 		if config.TargetSize > 0 {
 			log.Printf("  Target Size:  %s", formatBytes(config.TargetSize))
+		}
+		if config.AutoFill != nil {
+			log.Printf("  Auto-fill:    %d EOAs / %d contracts (mainnet 20/10/70)",
+				config.AutoFill.NumEOAs, config.AutoFill.NumContracts)
 		}
 		log.Printf("  Fork:         %s", chosenFork)
 		log.Printf("  Chain ID:     %d", *chainID)
@@ -390,6 +409,9 @@ func parseSize(s string) (uint64, error) {
 	val, err := strconv.ParseUint(s, 10, 64)
 	if err != nil {
 		return 0, fmt.Errorf("invalid size format %q (use e.g. '5GB', '500MB')", s)
+	}
+	if val == 0 {
+		return 0, fmt.Errorf("size must be positive: %s", s)
 	}
 	return val, nil
 }

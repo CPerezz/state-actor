@@ -23,11 +23,10 @@ For the schema (parser rules, address resolution algorithm, validation), see [`d
 
 ```bash
 state-actor --client=geth --db=/tmp/sa-spec \
-  --spec=examples/spec-minimal.yaml \
-  --accounts=0 --contracts=0
+  --spec=examples/spec-minimal.yaml
 ```
 
-`--accounts=0 --contracts=0` suppresses synthetic fill so the only entities written are those declared in the spec — recommended whenever you care about exact addresses, since name- and position-derived spec addresses can otherwise collide with randomly generated synthetic entities.
+Omitting `--target-size` suppresses the auto-fill so the only entities written are those declared in the spec — recommended whenever you care about exact addresses, since name- and position-derived spec addresses can otherwise collide with randomly generated auto-fill entities. Add `--target-size=<size>` only when you want auto-fill to pad the headroom with mainnet-shaped synthetic state.
 
 ## Field-by-field cheatsheet
 

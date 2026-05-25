@@ -24,7 +24,7 @@ Read these in this order. The first one is load-bearing — read it before you r
 |---|---|
 | `--client` | Which client format to write (`geth`, `reth`, `besu`, `nethermind`) |
 | `--spec` | Path to a YAML file declaring concrete entities (EOAs, contracts, ERC-20s, EIP-7702 delegations) |
-| `--target-size` | Upper bound on the projected trie footprint of the whole DB |
+| `--target-size` | Advisory budget that sizes the auto-fill of synthetic state. Not a hard on-disk cap — actual size may vary per client. |
 
 Everything else has a sane default. Run `state-actor --help` for the full list (22 flags).
 
@@ -78,7 +78,7 @@ The fixture is organised into six labelled sections; each one pins a feature clu
 2. **Copy the entity block** into your new YAML.
 3. **Edit the load-bearing fields** for your case — addresses, balances, template parameters, `approximate_size_bytes`. The field-by-field cheatsheet in [`examples/README.md`](../examples/README.md#field-by-field-cheatsheet) lists exactly which fields control what and what the constraints are (e.g. `decimals` must be 18 for the `erc20` template).
 4. **Address mode**: explicit (`address:` is set), name-derived (`name:` only), or position-derived (neither). The mode determines stability of the resulting address; see [`SPEC.md` § Address resolution](SPEC.md#address-resolution-three-deterministic-modes) for the algorithm.
-5. **Run with `--accounts=0 --contracts=0`** to suppress synthetic fill — otherwise random EOAs and contracts may collide with spec-derived addresses.
+5. **Omit `--target-size`** when running `--spec` alone — that way no auto-fill runs on top, eliminating the collision risk between random EOAs and spec-derived addresses. Set `--target-size` only when you intentionally want auto-fill to pad the headroom.
 6. **Verify the entities landed** at the addresses you expect: `cast code 0x<derived-address>` returns the bytecode (contracts) or `0x` plus the delegation marker (7702 EOAs); `cast balance 0x<address>` returns the spec's balance.
 
 For the schema-level details the fixture's per-entity comments don't cover — parser rules, validation errors, the address-derivation algorithm, `approximate_size_bytes` resolution semantics — read [`SPEC.md`](SPEC.md). It's the schema reference; the fixture is the syntax reference; you typically need both. Internal references: [`internal/spec/doc.go`](../internal/spec/doc.go) (parser + validator), [`internal/specbuild/doc.go`](../internal/specbuild/doc.go) (entity resolution), [`internal/templates/doc.go`](../internal/templates/doc.go) (template registry).
@@ -91,7 +91,7 @@ For the schema-level details the fixture's per-entity comments don't cover — p
 go run . --db=/tmp/sa-geth/geth/chaindata --client=geth --target-size=100MB
 ```
 
-Defaults: 1000 EOAs + 100 contracts of random storage, deterministic seed. Output is a Pebble database geth can boot with `--db.engine=pebble`. The `/geth/chaindata` suffix is mandatory — geth appends it to `--datadir`.
+Auto-fill emits mainnet-shaped state (20 % account-trie / 10 % bytecode / 70 % contract storage) up to the `--target-size` cap, with a deterministic seed. Output is a Pebble database geth can boot with `--db.engine=pebble`. The `/geth/chaindata` suffix is mandatory — geth appends it to `--datadir`.
 
 See [`RUNBOOK.md#geth`](RUNBOOK.md#geth) for the boot command, and [`client/geth/doc.go`](../client/geth/doc.go) for the on-disk layout and writer details.
 
@@ -127,7 +127,7 @@ cast code    0x<a-known-spec-contract> --rpc-url ... # → the spec's bytecode
 
 ### Reproduce a CI failure locally
 
-CI loads `examples/full-matrix-spec-feature.yaml` on top of `--seed=42 --accounts=100 --contracts=15000` (mirrored across all four `TestE2ESuite` constants). The synthetic-fill numbers add a ~100 MB warmup before spamoor; the spec entities are written on top of that. Re-run:
+CI loads `examples/full-matrix-spec-feature.yaml` on top of `--seed=42 --target-size=100MB` (mirrored across all four `TestE2ESuite` constants). The auto-fill (mainnet-shaped 20 / 10 / 70 split) emits synthetic state to fill the headroom between the spec's projected cost and `--target-size` — the spec entities are written first, the auto-fill fills the gap. Re-run:
 
 ```bash
 go test -run TestE2ESuite ./client/<client>/... -v
@@ -141,10 +141,10 @@ The cross-client genesis-root invariant says: same `--seed`, same spec, same cli
 
 - **Besu / reth / nethermind require Docker** for the writer side (cgo dependencies; no native build on macOS). Only geth has a pure-Go writer.
 - **`--seed=0` is a footgun**: `main.go` rewrites it to `time.Now().UnixNano()`, i.e. randomises. For determinism use any non-zero seed. Bench convention is `--seed=42`.
-- **`--target-size` is an upper bound on the whole database**: spec entities AND synthetic fill both count toward it. If the spec alone exceeds the budget, `internal/specbuild` silently truncates the entity list to the longest prefix that fits and emits a warning. To generate a spec verbatim without truncation risk, omit `--target-size`.
+- **`--target-size` is required when `--spec` is not set**: drives the mainnet-shaped auto-fill (20 % account-trie / 10 % bytecode / 70 % storage) over the whole budget. With `--spec`, spec entities count first; the auto-fill fills the headroom on top. If the spec alone exceeds the budget, `internal/specbuild` truncates the entity list to the longest prefix that fits and emits a `--target-size … truncated spec at entity[N]` warning to stderr; no auto-fill runs in that case.
 - **`--archive` is geth/reth only**: rejected for besu and nethermind.
 - **`--binary-trie` is geth-only** (EIP-7864).
-- **When using `--spec`, pair it with `--accounts=0 --contracts=0`** to suppress synthetic fill — otherwise random EOAs and contracts can collide with spec-derived addresses.
+- **When using `--spec` alone, omit `--target-size`** — that way no auto-fill runs on top and random EOAs can't collide with spec-derived addresses. Set both only when you want the auto-fill to pad the headroom.
 - **Nethermind boot needs a JSON `boot.cfg`** pointing at the chainspec + datadir (see `client/nethermind/e2e_test.go`'s `nethermindE2EConfigTemplate`). The other clients accept boot flags directly.
 
 ## Testing
