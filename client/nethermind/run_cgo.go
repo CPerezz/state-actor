@@ -111,7 +111,7 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 	// Write Parity-style chainspec next to the DB so --chain-id is honoured
 	// at boot (closes the B7 loop). Smoke scripts point Nethermind at this
 	// via the Init config's ChainSpecPath.
-	if _, err := writeChainSpec(cfg.DBPath, g); err != nil {
+	if _, err := writeChainSpec(cfg.DBPath, g, header.Root); err != nil {
 		return nil, fmt.Errorf("nethermind: %w", err)
 	}
 

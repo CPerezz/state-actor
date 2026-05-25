@@ -159,8 +159,6 @@ boot_client() {
     "MemoryHint": 256000000
   },
   "Sync": {
-    "NetworkingEnabled": false,
-    "SynchronizationEnabled": false,
     "PivotNumber": 0
   },
   "TxPool": { "Size": 128, "BlobsSupport": "Disabled" },

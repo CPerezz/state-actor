@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 
 	"github.com/nerolation/state-actor/genesis"
@@ -48,13 +49,18 @@ var osakaParamKeys = []string{
 // rejects the DB at boot with "Supplied genesis block does not match chain
 // data stored".
 //
+// stateRoot is the writer-computed state root; it is stamped into the
+// emitted "genesis" block alongside stateUnavailable: true so Nethermind's
+// GenesisBuilder.Build() does NOT recompute the root from chainspec.accounts
+// (which is {}) and overwrite the on-disk header with the empty-trie hash.
+//
 // Engine is Ethash + terminalTotalDifficulty=0 — the Kiln/Kintsugi merge-
 // from-genesis recipe. MergePlugin wraps EthashPlugin and routes every
 // block through the engine API; EthashPlugin's PoW path never runs because
 // TTD=0 means post-merge from block 0. MergePlugin's SealEngineType
 // allowlist is {BeaconChain, Clique, Ethash}, which is why we don't use
 // NethDev here.
-func writeChainSpec(dbPath string, g *genesis.Genesis) (string, error) {
+func writeChainSpec(dbPath string, g *genesis.Genesis, stateRoot common.Hash) (string, error) {
 	if g == nil {
 		return "", fmt.Errorf("nethermind writeChainSpec: nil genesis")
 	}
@@ -84,7 +90,7 @@ func writeChainSpec(dbPath string, g *genesis.Genesis) (string, error) {
 		}
 	}
 
-	spec["genesis"] = genesisBlockFromG(g)
+	spec["genesis"] = genesisBlockFromG(g, stateRoot)
 
 	out, err := json.MarshalIndent(spec, "", "  ")
 	if err != nil {
@@ -103,7 +109,11 @@ func writeChainSpec(dbPath string, g *genesis.Genesis) (string, error) {
 // nonce width. Every value is sourced from g so the chainspec and the
 // on-disk header (built by internal/genesisheader.Build from the same g)
 // cannot diverge.
-func genesisBlockFromG(g *genesis.Genesis) map[string]any {
+//
+// stateRoot + stateUnavailable=true are emitted so Nethermind's
+// GenesisBuilder.Build() treats the writer's root as authoritative instead
+// of recomputing from chainspec.accounts (= {}) and overwriting the header.
+func genesisBlockFromG(g *genesis.Genesis, stateRoot common.Hash) map[string]any {
 	difficulty := big.NewInt(0)
 	if g.Difficulty != nil {
 		difficulty = g.Difficulty.ToInt()
@@ -116,11 +126,13 @@ func genesisBlockFromG(g *genesis.Genesis) map[string]any {
 				"mixHash": g.Mixhash.Hex(),
 			},
 		},
-		"difficulty": fmt.Sprintf("0x%x", difficulty),
-		"author":     g.Coinbase.Hex(),
-		"timestamp":  fmt.Sprintf("0x%x", uint64(g.Timestamp)),
-		"parentHash": g.ParentHash.Hex(),
-		"extraData":  hexutil.Encode([]byte(g.ExtraData)),
-		"gasLimit":   fmt.Sprintf("0x%x", uint64(g.GasLimit)),
+		"difficulty":       fmt.Sprintf("0x%x", difficulty),
+		"author":           g.Coinbase.Hex(),
+		"timestamp":        fmt.Sprintf("0x%x", uint64(g.Timestamp)),
+		"parentHash":       g.ParentHash.Hex(),
+		"extraData":        hexutil.Encode([]byte(g.ExtraData)),
+		"gasLimit":         fmt.Sprintf("0x%x", uint64(g.GasLimit)),
+		"stateRoot":        stateRoot.Hex(),
+		"stateUnavailable": true,
 	}
 }

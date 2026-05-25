@@ -23,7 +23,7 @@ func readWrittenSpec(t *testing.T, fork string) map[string]any {
 		t.Fatalf("BuildSynthetic(%q): %v", fork, err)
 	}
 	dir := t.TempDir()
-	outPath, err := writeChainSpec(dir, g)
+	outPath, err := writeChainSpec(dir, g, common.Hash{})
 	if err != nil {
 		t.Fatalf("writeChainSpec: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestWriteChainSpec_OverrideChainID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildSynthetic: %v", err)
 	}
-	outPath, err := writeChainSpec(t.TempDir(), g)
+	outPath, err := writeChainSpec(t.TempDir(), g, common.Hash{})
 	if err != nil {
 		t.Fatalf("writeChainSpec: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestWriteChainSpec_ParityChainIDFormat(t *testing.T) {
 }
 
 func TestWriteChainSpec_NilGenesisRejected(t *testing.T) {
-	if _, err := writeChainSpec(t.TempDir(), nil); err == nil {
+	if _, err := writeChainSpec(t.TempDir(), nil, common.Hash{}); err == nil {
 		t.Error("writeChainSpec(nil) returned no error")
 	}
 }
@@ -153,7 +153,7 @@ func TestWriteChainSpec_NilGenesisRejected(t *testing.T) {
 func TestWriteChainSpec_FilePathIsConventional(t *testing.T) {
 	g, _ := genesis.BuildSynthetic("osaka", big.NewInt(1337), 30_000_000, 0, nil)
 	dir := t.TempDir()
-	out, err := writeChainSpec(dir, g)
+	out, err := writeChainSpec(dir, g, common.Hash{})
 	if err != nil {
 		t.Fatalf("writeChainSpec: %v", err)
 	}
@@ -173,7 +173,8 @@ func TestWriteChainSpec_ByteForByteDeterministic(t *testing.T) {
 		if err != nil {
 			t.Fatalf("BuildSynthetic: %v", err)
 		}
-		out, err := writeChainSpec(t.TempDir(), g)
+		// Fixed stateRoot so the byte-for-byte comparison stays deterministic.
+		out, err := writeChainSpec(t.TempDir(), g, common.HexToHash("0xabcd"))
 		if err != nil {
 			t.Fatalf("writeChainSpec: %v", err)
 		}
@@ -221,8 +222,9 @@ func TestWriteChainSpec_GenesisBlockFromG(t *testing.T) {
 	// the chainspec/header contract — POTENTIAL-divergence coverage.
 	g.Mixhash = common.HexToHash("0x1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff")
 	g.Coinbase = common.HexToAddress("0xcafe000000000000000000000000000000000000")
+	wantStateRoot := common.HexToHash("0xe86fef3b0000000000000000000000000000000000000000000000000032b900")
 
-	outPath, err := writeChainSpec(t.TempDir(), g)
+	outPath, err := writeChainSpec(t.TempDir(), g, wantStateRoot)
 	if err != nil {
 		t.Fatalf("writeChainSpec: %v", err)
 	}
@@ -272,5 +274,14 @@ func TestWriteChainSpec_GenesisBlockFromG(t *testing.T) {
 	// Nethermind's parser requires fixed 8-byte / 16-hex-char nonce width.
 	if got, _ := eth["nonce"].(string); got != "0x0000000000000000" || len(got) != 18 {
 		t.Errorf("nonce = %q; want exactly %q (18 chars / 0x + 16 hex)", got, "0x0000000000000000")
+	}
+	// stateRoot + stateUnavailable=true gate Nethermind's GenesisBuilder
+	// recompute path — without both, boot overwrites the on-disk root with
+	// the empty-trie hash (issue #81).
+	if got := gen["stateRoot"]; got != wantStateRoot.Hex() {
+		t.Errorf("stateRoot = %v; want %s", got, wantStateRoot.Hex())
+	}
+	if got := gen["stateUnavailable"]; got != true {
+		t.Errorf("stateUnavailable = %v (%T); want bool true", got, got)
 	}
 }
