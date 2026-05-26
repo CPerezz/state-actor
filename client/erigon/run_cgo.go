@@ -80,7 +80,9 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 	}
 
 	// 1. Build the alloc map from PreAlloc + AutoFill + GenesisAccounts.
-	alloc, stats, err := buildAllocMap(cfg)
+	// autofillStor carries per-autofill-contract storage out-of-band
+	// (deferred to Phase B direct-MDBX so it doesn't bloat genesis.json).
+	alloc, autofillStor, stats, err := buildAllocMap(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("client/erigon: build alloc: %w", err)
 	}
@@ -165,25 +167,30 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 		_ = err
 	}
 
-	// 7. Direct MDBX write of cfg.PreAlloc storage (Plan Phase B).
+	// 7. Direct MDBX write of state-actor's storage (Plan Phase B).
 	//
-	// erigon init writes account/code state from the genesis.json,
-	// but state-actor's buildAllocMap doesn't populate alloc[addr].Storage
-	// for cfg.PreAlloc entities (the storage lives on an iter.Seq2). All
-	// four other client backends drain that iter via a streaming Phase
-	// 0 pass; erigon's path never did, dropping ~25 GB of expected state
-	// silently for the bloatnet bench. The MPT clients then disagreed
-	// with Erigon on genesis_state_root.
+	// Two storage sources, both routed through internal/erigon/mdbx.WriteAlloc:
 	//
-	// Direct-MDBX (mirrors client/reth/spec_storage_streaming_cgo.go):
-	// open Erigon's chaindata MDBX env, drain the PreAlloc storage iter,
-	// write to TblStorageVals + history tables with txNum=1 / step=0.
+	//   (a) cfg.PreAlloc[i].Storage — iter.Seq2[Hash, Hash] from the spec
+	//       translator. Storage stays on the iter (per generator/config.go:134
+	//       "Storage is NOT drained"). Other clients drain via runPhase0;
+	//       erigon does it here.
+	//   (b) autofillStor — the side-data slice from buildAllocMap. Holds
+	//       per-autofill-contract []entitygen.StorageSlot deferred FROM the
+	//       JSON alloc map. Required because erigon init writes the WHOLE
+	//       genesis blob as ONE mdbx_put (kv.ConfigTable["genesis"]) — at
+	//       16 KB pages MDBX's per-value limit is ~2 GB, so the bench's
+	//       88k autofill contracts × ~615 slots × ~150 JSON bytes blow
+	//       past it with MDBX_BAD_VALSIZE. Routing the storage through
+	//       MDBX directly keeps genesis.json compact (header+code only).
+	//
 	// Erigon's daemon on first FCU sees the now-complete storage and
 	// rebuilds commitment over it — yielding the correct MPT-equivalent
 	// state root (H4-proven equivalence: HexPatriciaHashed root ==
 	// geth's MPT root for identical alloc).
-	if len(cfg.PreAlloc) > 0 {
+	if len(cfg.PreAlloc) > 0 || len(autofillStor) > 0 {
 		storageMap := make(map[[20]byte]map[[32]byte][32]byte)
+		// (a) PreAlloc — iter.Seq2 streaming source
 		for i := range cfg.PreAlloc {
 			pe := &cfg.PreAlloc[i]
 			if pe.Storage == nil {
@@ -201,6 +208,20 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 				storageMap[addr][sk] = sv
 			}
 		}
+		// (b) AutoFill contracts — side-data slice of []StorageSlot
+		for _, ent := range autofillStor {
+			var addr [20]byte
+			copy(addr[:], ent.addr[:])
+			if _, ok := storageMap[addr]; !ok {
+				storageMap[addr] = make(map[[32]byte][32]byte, len(ent.slots))
+			}
+			for _, s := range ent.slots {
+				var sk, sv [32]byte
+				copy(sk[:], s.Key[:])
+				copy(sv[:], s.Value[:])
+				storageMap[addr][sk] = sv
+			}
+		}
 		if len(storageMap) > 0 {
 			env, err := erigonmdbx.OpenForWrite(cfg.DBPath)
 			if err != nil {
@@ -212,10 +233,11 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 				return nil, fmt.Errorf("client/erigon: WriteAlloc: %w", err)
 			}
 			if cfg.Verbose {
-				fmt.Printf("client/erigon: wrote %d PreAlloc storage slots directly to MDBX\n", written)
+				fmt.Printf("client/erigon: wrote %d storage slots to MDBX directly (PreAlloc + autofill-contract); genesis.json kept header+code only for autofill contracts\n", written)
 			}
-			stats.StorageSlotsCreated += int(written)
-			stats.StorageBytes += uint64(written) * 64
+			// NOTE: stats.StorageSlotsCreated + StorageBytes already
+			// incremented in buildAllocMap; do NOT double-count here.
+			_ = written
 		}
 	}
 
@@ -244,15 +266,39 @@ func chmodRecursive(root string, mode os.FileMode) error {
 	})
 }
 
+// autofillContractStorage carries per-autofill-contract storage slots
+// out-of-band so they can be written directly to MDBX (Phase B) instead
+// of inflating the genesis.json. The receiver in runImpl drains these
+// alongside cfg.PreAlloc[i].Storage iters into a single storageMap that
+// internal/erigon/mdbx.WriteAlloc consumes.
+//
+// Why this exists: erigon init writes the WHOLE genesis blob as one
+// mdbx_put into kv.ConfigTable["genesis"]; the per-value limit at
+// 16 KB pages is ~2 GB. Without this split, 88k autofill contracts ×
+// ~615 storage slots × ~150 JSON bytes/slot ≈ 8 GB of storage entries
+// were going into the JSON, pushing the blob past the MDBX limit and
+// triggering MDBX_BAD_VALSIZE during erigon init's genesis write.
+type autofillContractStorage struct {
+	addr  common.Address
+	slots []entitygen.StorageSlot
+}
+
 // buildAllocMap materializes cfg.PreAlloc + cfg.GenesisAccounts +
 // cfg.AutoFill into a single alloc map. Iteration order is fixed
 // (sorted by address) so the resulting genesis.json is deterministic
 // for a given seed.
 //
-// Stats is populated as we go (counts + byte tallies). The state root
-// is filled in by runImpl after parsing erigon init's log output.
-func buildAllocMap(cfg generator.Config) (map[common.Address]*allocAccount, *generator.Stats, error) {
+// Returns three results:
+//   - alloc map (consumed by writeGenesisJSON — header + code only for
+//     autofill contracts; storage is deferred to direct-MDBX)
+//   - autofillStor side-data (consumed by runImpl's Phase B writer)
+//   - stats (populated as we go; counts + byte tallies)
+//
+// The state root is filled in by runImpl after parsing erigon init's
+// log output.
+func buildAllocMap(cfg generator.Config) (map[common.Address]*allocAccount, []autofillContractStorage, *generator.Stats, error) {
 	alloc := make(map[common.Address]*allocAccount)
+	var autofillStor []autofillContractStorage
 	stats := &generator.Stats{}
 
 	// 1. cfg.GenesisAccounts / GenesisCode / GenesisStorage —
@@ -343,10 +389,14 @@ func buildAllocMap(cfg generator.Config) (map[common.Address]*allocAccount, *gen
 				stats.CodeBytes += uint64(len(c.Code))
 			}
 			if len(c.Storage) > 0 {
-				entry.Storage = make(map[common.Hash]common.Hash, len(c.Storage))
-				for _, s := range c.Storage {
-					entry.Storage[s.Key] = s.Value
-				}
+				// Defer storage to Phase B direct-MDBX (see
+				// autofillContractStorage doc). Keep entry.Storage nil so
+				// writeGenesisJSON emits only header+code for this contract.
+				// The slice is reused as-is (no copy).
+				autofillStor = append(autofillStor, autofillContractStorage{
+					addr:  c.Address,
+					slots: c.Storage,
+				})
 				stats.StorageSlotsCreated += len(c.Storage)
 				stats.StorageBytes += uint64(len(c.Storage)) * 64
 			}
@@ -356,7 +406,7 @@ func buildAllocMap(cfg generator.Config) (map[common.Address]*allocAccount, *gen
 	}
 
 	stats.TotalBytes = stats.StorageBytes + stats.CodeBytes
-	return alloc, stats, nil
+	return alloc, autofillStor, stats, nil
 }
 
 // init-time sanity check: silence imports of types we may temporarily not
