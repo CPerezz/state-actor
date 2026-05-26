@@ -222,24 +222,48 @@ NETH_CFG
             # --dev-validator-count / --dev.slot-time) DO NOT EXIST in
             # v3.4.2 — Erigon's main rewrote dev-mode bootstrapping
             # post-tag.
-            # --chain dev: needed to enable block production via
-            #   --dev.period in v3.4.2. Without it, erigon boots, RPC
-            #   works, but no blocks are mined → spamoor stalls at
-            #   block 0.
-            # --networkid 1337: explicit override. Setting it (via
-            #   ctx.IsSet(NetworkIdFlag.Name)) short-circuits the
-            #   "chain name is not recognized: dev" Fatal in
-            #   cmd/utils/flags.go:1923 because the ChainSpecByName
-            #   lookup is skipped when NetworkID is set externally.
+            # v3.4.2's --chain dev + --dev.period mode failed to mine
+            # blocks against state-actor's init'd chaindata (block 0
+            # forever). The mechanism likely expects a fresh dev-chain
+            # genesis, not our custom-init'd one. Bench iteration
+            # confirmed this empirically across 5 boot variants.
+            #
+            # Solution: drive block production via Engine API (same as
+            # besu / nethermind). engine-driver issues
+            # engine_forkchoiceUpdated + engine_newPayload calls on a
+            # wall-clock interval. erigon executes them via its
+            # consensus-less PoS-style stage runner.
+            #
+            # Flags:
+            #   --networkid 1337         match chainID in genesis.json
+            #   --authrpc.addr 127.0.0.1 engine API listener
+            #   --authrpc.port 8551
+            #   --no-downloader          skip snapshot peer download
+            #   --port 0                 random p2p port
+            #   --nodiscover             disable peer discovery
+            #   --http.*                 eth RPC for spamoor + verify
+            #
+            # We deliberately omit --chain dev (v3.4.2 daemon fails
+            # with "chain name is not recognized: dev" against
+            # populated chaindata; see flags.go:1923) and let chain
+            # config come from MDBX.
+            #
+            # JWT file pre-existing at /data/jwt.hex (created by the
+            # bench script's setup phase). The erigon container needs
+            # --authrpc.jwtsecret to enable Engine API; geth/reth use
+            # different mechanisms.
+            cp $JWT_HEX $data/jwt.hex 2>/dev/null || true
+            chmod 0644 $data/jwt.hex 2>/dev/null || true
             docker run -d --name $ct \
                 --network host \
                 -v $data:/data \
                 erigontech/erigon:v3.4.2 \
                 --datadir /data \
-                --chain dev \
                 --networkid 1337 \
                 --no-downloader \
-                --dev.period 2 \
+                --authrpc.addr 127.0.0.1 \
+                --authrpc.port 8551 \
+                --authrpc.jwtsecret /data/jwt.hex \
                 --port 0 \
                 --http --http.addr=127.0.0.1 --http.port=8545 \
                 --http.api=eth,net,web3,txpool,debug \
@@ -250,12 +274,16 @@ NETH_CFG
     esac
 }
 
-# Starts engine-driver for besu+nethermind (geth+reth self-mine via --dev.*).
-# Returns 1 if the driver dies within 1s of launch (bad config, port wedged).
+# Starts engine-driver for besu+nethermind+erigon (geth+reth self-mine
+# via --dev.*). Returns 1 if the driver dies within 1s of launch (bad
+# config, port wedged). Erigon v3.4.2 needs the engine-driver because
+# its --chain dev + --dev.period block production fails to advance
+# blocks against state-actor's custom-init'd chaindata (see bench
+# attempt-12 finding); the Engine API path works around this.
 start_engine_driver_if_needed() {
     local client=$1 logdir=$2
     case $client in
-        besu|nethermind) ;;
+        besu|nethermind|erigon) ;;
         *) return 0 ;;
     esac
     echo "=== starting engine-driver for $client ==="
