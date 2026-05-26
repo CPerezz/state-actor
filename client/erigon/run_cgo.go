@@ -50,6 +50,7 @@ import (
 
 	"github.com/nerolation/state-actor/generator"
 	"github.com/nerolation/state-actor/internal/entitygen"
+	erigonmdbx "github.com/nerolation/state-actor/internal/erigon/mdbx"
 )
 
 // erigonBinary is the path to the erigon CLI inside the Docker image
@@ -164,7 +165,61 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 		_ = err
 	}
 
-	// 7. Optional Phase B/C path: emit pure-Go snapshot files alongside
+	// 7. Direct MDBX write of cfg.PreAlloc storage (Plan Phase B).
+	//
+	// erigon init writes account/code state from the genesis.json,
+	// but state-actor's buildAllocMap doesn't populate alloc[addr].Storage
+	// for cfg.PreAlloc entities (the storage lives on an iter.Seq2). All
+	// four other client backends drain that iter via a streaming Phase
+	// 0 pass; erigon's path never did, dropping ~25 GB of expected state
+	// silently for the bloatnet bench. The MPT clients then disagreed
+	// with Erigon on genesis_state_root.
+	//
+	// Direct-MDBX (mirrors client/reth/spec_storage_streaming_cgo.go):
+	// open Erigon's chaindata MDBX env, drain the PreAlloc storage iter,
+	// write to TblStorageVals + history tables with txNum=1 / step=0.
+	// Erigon's daemon on first FCU sees the now-complete storage and
+	// rebuilds commitment over it — yielding the correct MPT-equivalent
+	// state root (H4-proven equivalence: HexPatriciaHashed root ==
+	// geth's MPT root for identical alloc).
+	if len(cfg.PreAlloc) > 0 {
+		storageMap := make(map[[20]byte]map[[32]byte][32]byte)
+		for i := range cfg.PreAlloc {
+			pe := &cfg.PreAlloc[i]
+			if pe.Storage == nil {
+				continue
+			}
+			var addr [20]byte
+			copy(addr[:], pe.Address[:])
+			if _, ok := storageMap[addr]; !ok {
+				storageMap[addr] = make(map[[32]byte][32]byte)
+			}
+			for k, v := range pe.Storage {
+				var sk, sv [32]byte
+				copy(sk[:], k[:])
+				copy(sv[:], v[:])
+				storageMap[addr][sk] = sv
+			}
+		}
+		if len(storageMap) > 0 {
+			env, err := erigonmdbx.OpenForWrite(cfg.DBPath)
+			if err != nil {
+				return nil, fmt.Errorf("client/erigon: open MDBX for storage write: %w", err)
+			}
+			written, err := erigonmdbx.WriteAlloc(env, storageMap)
+			env.Close()
+			if err != nil {
+				return nil, fmt.Errorf("client/erigon: WriteAlloc: %w", err)
+			}
+			if cfg.Verbose {
+				fmt.Printf("client/erigon: wrote %d PreAlloc storage slots directly to MDBX\n", written)
+			}
+			stats.StorageSlotsCreated += int(written)
+			stats.StorageBytes += uint64(written) * 64
+		}
+	}
+
+	// 8. Optional Phase B/C path: emit pure-Go snapshot files alongside
 	// the `erigon init` MDBX chaindata. Default is OFF (bench works via
 	// `erigon init` alone). See client/erigon/options.go::WriteSnapshots
 	// for the long-term Architect-B transition plan.
