@@ -260,6 +260,14 @@ NETH_CFG
             # the workaround is to drive block production via Engine
             # API + an external consensus-layer mock — exactly what
             # our engine-driver provides.
+            # --snap.stop / --snap.state.stop: critical for state-actor
+            # boot. Without them, erigon's `StageSnapshots` stage tries
+            # to wait for snapshot downloads from peers (even with
+            # --no-downloader) and `engine_forkchoiceUpdated` calls
+            # respond SYNCING forever instead of accepting our genesis
+            # as head. Discovered via bench attempt 14:
+            #   "[rpc] download of segments not complete yet. please
+            #   wait StageSnapshots to finish"
             docker run -d --name $ct \
                 --network host \
                 -v $data:/data \
@@ -267,6 +275,8 @@ NETH_CFG
                 --datadir /data \
                 --networkid 1337 \
                 --no-downloader \
+                --snap.stop \
+                --snap.state.stop \
                 --externalcl \
                 --authrpc.addr 127.0.0.1 \
                 --authrpc.port 8551 \
