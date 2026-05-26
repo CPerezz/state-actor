@@ -14,25 +14,22 @@ import (
 	"github.com/holiman/uint256"
 )
 
-// TestH4_HexPatriciaHashed_VS_MPT is the empirical resolution to
-// Hypothesis H4 from the deferred-items plan: does Erigon's
-// HexPatriciaHashed produce the same root as geth's standard MPT
-// for the same alloc?
+// TestH4_HexPatriciaHashed_MatchesMPT pins the empirical resolution
+// to Hypothesis H4: Erigon's HexPatriciaHashed produces the SAME
+// state root as geth's standard MPT for an identical alloc.
 //
-// If this test passes (roots match) → H4 is REFUTED. Algorithms are
-// byte-for-byte equivalent on genesis input. The cross-client state-
-// root divergence observed in the 25 GB bench must be due to
-// state-content differences (e.g., the dedup bug already fixed in
-// client/erigon/run_cgo.go), not the trie algorithm.
-//
-// If this test fails → H4 is CONFIRMED. The two clients will never
-// agree on a state root for the same alloc without modifying one of
-// the algorithms; the bench's cross-client invariance gate must be
-// bucketed by trie algorithm (per the strategic reviewer's
-// recommendation).
+// Initial test runs (2026-05-26) showed divergence (geth 0x639b…
+// vs Erigon 0x020b…), which was diagnosed and traced via a 3-Opus-
+// agent investigation to a byte-alignment bug in this test's own
+// Erigon-side input construction. Specifically, the storage Update's
+// Storage field was being populated right-aligned via erigonHash(value)
+// while Erigon's TouchStorage invariant (commitment.go:1746-1753)
+// requires LEFT alignment at Storage[0:StorageLen]. The fix in
+// commitment.go now copies trimmed bytes to Storage[0] and the
+// algorithms produce byte-identical roots.
 //
 // Tests run with `go test -tags "cgo_erigon_commitment gofuzz"`.
-func TestH4_HexPatriciaHashed_VS_MPT(t *testing.T) {
+func TestH4_HexPatriciaHashed_MatchesMPT(t *testing.T) {
 	addrEOA1 := common.HexToAddress("0x000000000000000000000000000000000000beef")
 	addrEOA2 := common.HexToAddress("0x000000000000000000000000000000000000cafe")
 	addrEOA3 := common.HexToAddress("0x00000000000000000000000000000000deadbeef")
@@ -87,20 +84,11 @@ func TestH4_HexPatriciaHashed_VS_MPT(t *testing.T) {
 	t.Logf("geth   MPT root:          %s", gethRoot.Hex())
 	t.Logf("erigon HexPatriciaHashed: %s", res.Root.Hex())
 
-	// H4 was confirmed empirically on 2026-05-26: the two algorithms
-	// produce different roots for the SAME alloc. This test now PINS
-	// that divergence — if these algorithms ever become equivalent
-	// (e.g., a future Erigon hard-fork), this test will flag it.
-	if gethRoot == res.Root {
-		t.Errorf("H4 became REFUTED: HexPatriciaHashed now matches MPT. The bench's bucketed cross-client invariance check can be tightened to compare all clients in one group again.")
-		return
+	if gethRoot != res.Root {
+		t.Fatalf("MPT ≢ HexPatriciaHashed on identical alloc — the algorithms diverged again:\n  geth MPT: %s\n  Erigon HPH: %s\nThis is a regression. Re-run the 3-Opus-agent root-cause investigation documented in the plan.",
+			gethRoot.Hex(), res.Root.Hex())
 	}
-	t.Logf("H4 CONFIRMED (expected): HexPatriciaHashed ≢ MPT.")
-	t.Logf("  This is an empirical finding, not a bug. The bench's")
-	t.Logf("  cross-client invariance check buckets clients by trie")
-	t.Logf("  algorithm: MPT clients (geth/besu/reth/nethermind) must")
-	t.Logf("  agree among themselves; Erigon's HexPatriciaHashed root")
-	t.Logf("  is consistent with itself but won't match the MPT bucket.")
+	t.Logf("MPT ≡ HexPatriciaHashed confirmed on this fixture.")
 }
 
 // srcAccount is the shared test-input shape consumed by both the

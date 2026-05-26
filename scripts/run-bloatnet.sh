@@ -560,39 +560,19 @@ echo " Overall wall time: $((overall_end - overall_start)) seconds"
 echo "═══════════════════════════════════════════════"
 
 # Cross-client genesis state-root invariance: same YAML through every
-# client must produce the same root WITHIN ITS TRIE-ALGORITHM BUCKET.
-#
-# Clients fall into two algorithm groups (empirically verified by
-# internal/erigon/commitment/h4_test.go on 2026-05-26):
-#
-#   MPT bucket: geth, besu, reth, nethermind
-#     - Standard Modified Patricia Trie
-#     - Roots must AGREE within the bucket
-#
-#   HexPatriciaHashed bucket: erigon
-#     - Erigon-internal commitment trie with custom nibble layout
-#     - Produces a DIFFERENT root than MPT for the same alloc — this
-#       is empirical, not a bug. Each commitment-domain client must
-#       agree with itself across runs but not with MPT clients.
-#
-# A future second commitment-domain client (none today) would join
-# erigon's bucket. The buckets only fail if clients within the SAME
-# bucket diverge.
+# client must produce the same root. Erigon uses HexPatriciaHashed and
+# the rest use a standard MPT, but they are SPEC-equivalent on genesis
+# input (proven byte-for-byte by
+# internal/erigon/_fixtures/commitment/h4_test.go's
+# TestH4_HexPatriciaHashed_MatchesMPT — both produce identical
+# 32-byte roots over the same alloc). Compares only clients with
+# status=ok.
 echo
 echo "═══════════════════════════════════════════════════════════════"
-echo " Cross-client genesis state-root invariance (bucketed by algorithm)"
+echo " Cross-client genesis state-root invariance"
 echo "═══════════════════════════════════════════════════════════════"
 INV_GREEN=$'\033[0;32m'; INV_RED=$'\033[0;31m'; INV_YELLOW=$'\033[0;33m'; INV_RESET=$'\033[0m'
-
-is_commitment_domain_client() {
-    case "$1" in
-        erigon) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
-inv_ref_mpt=""
-inv_ref_hph=""
+inv_ref=""
 inv_fail=0
 for c in $CLIENTS; do
     inv_file=$WORK/results/$c-result.json
@@ -613,30 +593,19 @@ for c in $CLIENTS; do
         inv_fail=1
         continue
     fi
-    if is_commitment_domain_client "$c"; then
-        bucket="HPH"
-        ref=$inv_ref_hph
+    if [ -z "$inv_ref" ]; then
+        inv_ref=$inv_root
+        echo "  ref:   $c  $inv_root"
+    elif [ "$inv_root" = "$inv_ref" ]; then
+        echo "  ${INV_GREEN}MATCH${INV_RESET} $c  $inv_root"
     else
-        bucket="MPT"
-        ref=$inv_ref_mpt
-    fi
-    if [ -z "$ref" ]; then
-        if [ "$bucket" = "MPT" ]; then
-            inv_ref_mpt=$inv_root
-        else
-            inv_ref_hph=$inv_root
-        fi
-        echo "  ref[$bucket]:   $c  $inv_root"
-    elif [ "$inv_root" = "$ref" ]; then
-        echo "  ${INV_GREEN}MATCH${INV_RESET}[$bucket] $c  $inv_root"
-    else
-        echo "  ${INV_RED}DIVERGE${INV_RESET}[$bucket] $c  $inv_root  (expected $ref)"
+        echo "  ${INV_RED}DIVERGE${INV_RESET} $c  $inv_root  (expected $inv_ref)"
         inv_fail=1
     fi
 done
 echo
 if [ $inv_fail -eq 0 ]; then
-    echo "${INV_GREEN}=== CROSS-CLIENT INVARIANCE: PASS (per-bucket) ===${INV_RESET}"
+    echo "${INV_GREEN}=== CROSS-CLIENT INVARIANCE: PASS ===${INV_RESET}"
 else
     echo "${INV_RED}=== CROSS-CLIENT INVARIANCE: FAIL ===${INV_RESET}"
 fi

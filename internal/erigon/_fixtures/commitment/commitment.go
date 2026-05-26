@@ -85,18 +85,29 @@ func ComputeGenesisRoot(accounts []Account) (Result, error) {
 		updates = append(updates, acctUpd)
 		ctx.state[string(addrKey)] = acctUpd.Encode(nil, ctx.numBuf[:])
 
-		// 2. Storage slots (one Touch per slot).
+		// 2. Storage slots (one Touch per slot). Storage bytes must be
+		// LEFT-aligned at Storage[0:StorageLen] — matching Erigon's
+		// TouchStorage invariant at commitment.go:1746-1753 (the trie
+		// reader at hex_patricia_hashed.go:946,1019,1033 unpacks the
+		// value as Storage[0:StorageLen]).
+		//
+		// All-zero values are skipped: they're equivalent to "no entry"
+		// in Erigon's storage domain, same as in geth's MPT (no leaf
+		// for a never-set slot).
 		for slot, value := range a.Storage {
+			trimmed := trimLeadingZeros(value[:])
+			if len(trimmed) == 0 {
+				continue
+			}
 			storKey := make([]byte, 0, 52)
 			storKey = append(storKey, a.Address[:]...)
 			storKey = append(storKey, slot[:]...)
 
-			trimmed := trimLeadingZeros(value[:])
 			storUpd := erigoncommitment.Update{
 				Flags:      erigoncommitment.StorageUpdate,
-				Storage:    erigonHash(value),
 				StorageLen: int8(len(trimmed)),
 			}
+			copy(storUpd.Storage[:], trimmed)
 			plainKeys = append(plainKeys, storKey)
 			updates = append(updates, storUpd)
 			ctx.state[string(storKey)] = storUpd.Encode(nil, ctx.numBuf[:])
