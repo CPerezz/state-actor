@@ -199,32 +199,38 @@ NETH_CFG
                 --http --http.addr=127.0.0.1 --http.port=8545
             ;;
         erigon)
-            # Erigon v3.4.2 dev mode triggers on `--chain dev`. The dev-mode
-            # Caplin scaffolding (--dev-validator-seed / --dev-validator-count
-            # / --dev.slot-time) was added on `main` AFTER v3.4.2 was cut;
-            # the v3.4.2 release uses the older `--dev.period <seconds>`
-            # to drive block production (0 = mine only when tx pending).
-            # Verified empirically on the bench host 2026-05-26 — passing
-            # the main-branch flags makes erigon crash with
-            # "Error: flag provided but not defined: -dev-validator-seed".
-            #
-            # Flags in use (all verified in `erigon --help` on
-            # erigontech/erigon:v3.4.2):
-            #   --datadir         the bench host's per-client volume
-            #   --chain dev       triggers "Starting Erigon in ephemeral
-            #                     dev mode" (networkname.Dev = "dev")
+            # Erigon v3.4.2 dev-mode flag set:
+            #   --dev.period 2    wall-clock block production (2 s slot)
+            #   --networkid 1337  match the chainID in genesis.json
             #   --no-downloader   skip snapshot peer download
-            #   --dev.period 2    wall-clock block production (2 s)
-            #   --http etc.       RPC config matching besu/reth defaults
             #   --nodiscover      disable peer discovery
+            #   --port :0         random p2p port (no inbound peers
+            #                     needed for a dev-mode bench)
+            #   --http etc.       RPC config matching besu/reth defaults
+            #
+            # We deliberately DO NOT pass --chain dev:
+            # v3.4.2's daemon path rejects "--chain dev" against an
+            # existing-chaindata boot with "Fatal: chain name is not
+            # recognized: dev" (a code-path quirk where the dev short-
+            # circuit at flags.go:1923 does not apply during the
+            # populated-DB validation). Letting --chain default to
+            # "mainnet" + --networkid 1337 makes the daemon honor the
+            # chain config from MDBX (chainID 1337, post-Prague forks)
+            # rather than trying to migrate to a built-in dev config.
+            #
+            # The main-branch flags (--dev-validator-seed /
+            # --dev-validator-count / --dev.slot-time) DO NOT EXIST in
+            # v3.4.2 — Erigon's main rewrote dev-mode bootstrapping
+            # post-tag.
             docker run -d --name $ct \
                 --network host \
                 -v $data:/data \
                 erigontech/erigon:v3.4.2 \
                 --datadir /data \
-                --chain dev \
+                --networkid 1337 \
                 --no-downloader \
                 --dev.period 2 \
+                --port :0 \
                 --http --http.addr=127.0.0.1 --http.port=8545 \
                 --http.api=eth,net,web3,txpool,debug \
                 --nodiscover

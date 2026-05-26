@@ -101,13 +101,16 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 	// parser silently falls back to the default DataDir
 	// (`/root/.local/share/erigon`) and writes chaindata there.
 	//
-	// --chain dev: must match what the downstream `erigon` daemon will
-	// pass at boot time. If init writes with --chain=mainnet (the default)
-	// and boot uses --chain=dev, erigon's "Renamed 0 directories" step
-	// at boot tries to migrate between chain configs and the RPC server
-	// hangs (RPC at 8545 never responds). Found via the v1 bench-iteration
-	// loop — see plan § Earlier Bench-Iteration Unlock.
-	cmd := exec.CommandContext(ctx, bin, "init", "--datadir", cfg.DBPath, "--chain", "dev", genesisPath)
+	// We deliberately do NOT pass --chain to init. The default is
+	// "mainnet"; the chain ID in genesis.json (1337) is what actually
+	// goes into MDBX. The downstream `erigon` daemon must also NOT
+	// pass --chain dev: v3.4.2's daemon rejects --chain dev against an
+	// existing-chaindata boot with "Fatal: chain name is not recognized:
+	// dev" (a chain-name lookup that bypasses Dev's short-circuit on
+	// the daemon path; init has its own validator that doesn't trip).
+	// Block production at boot is driven by --dev.period + miner flags
+	// instead. Found via the v1 bench-iteration loop.
+	cmd := exec.CommandContext(ctx, bin, "init", "--datadir", cfg.DBPath, genesisPath)
 	out, runErr := cmd.CombinedOutput()
 	if runErr != nil {
 		return nil, fmt.Errorf("client/erigon: erigon init failed: %w\nOutput:\n%s", runErr, string(out))
