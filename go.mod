@@ -5,7 +5,7 @@ go 1.25.7
 require (
 	github.com/RoaringBitmap/roaring/v2 v2.18.0
 	github.com/cockroachdb/pebble v1.1.5
-	github.com/erigontech/mdbx-go v0.38.4
+	github.com/erigontech/mdbx-go v0.40.1
 	github.com/ethereum/go-ethereum v1.17.2-0.20260323171428-745b0a8c09ad
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/holiman/bloomfilter/v2 v2.0.3
@@ -18,9 +18,38 @@ require (
 )
 
 require (
+	github.com/VictoriaMetrics/fastcache v1.13.0 // indirect
+	github.com/anacrolix/envpprof v1.5.0 // indirect
+	github.com/anacrolix/generics v0.2.0 // indirect
+	github.com/anacrolix/log v0.17.1-0.20251118025802-918f1157b7bb // indirect
+	github.com/anacrolix/missinggo/v2 v2.10.0 // indirect
+	github.com/benesch/cgosymbolizer v0.0.0-20190515212042-bec6fe6e597b // indirect
+	github.com/c2h5oh/datasize v0.0.0-20231215233829-aa82cc1e6500 // indirect
+	github.com/cilium/ebpf v0.16.0 // indirect
+	github.com/containerd/cgroups/v3 v3.0.5 // indirect
+	github.com/containerd/log v0.1.0 // indirect
+	github.com/coreos/go-systemd/v22 v22.5.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
+	github.com/docker/go-units v0.5.0 // indirect
+	github.com/erigontech/fastkeccak v0.1.1-0.20260408010752-08e7b6602268 // indirect
+	github.com/erigontech/secp256k1 v1.2.1-0.20260218182123-377cc1bd6410 // indirect
+	github.com/felixge/fgprof v0.9.5 // indirect
+	github.com/go-stack/stack v1.8.1 // indirect
+	github.com/godbus/dbus/v5 v5.1.0 // indirect
+	github.com/google/btree v1.1.3 // indirect
+	github.com/google/pprof v0.0.0-20260115054156-294ebfa9ad83 // indirect
+	github.com/mattn/go-colorable v0.1.14 // indirect
+	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/moby/sys/userns v0.1.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
+	github.com/opencontainers/runtime-spec v1.2.0 // indirect
+	github.com/pbnjay/memory v0.0.0-20210728143218-7b4eea64cf58 // indirect
+	github.com/pelletier/go-toml/v2 v2.3.1 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
+	github.com/puzpuzpuz/xsync/v4 v4.5.0 // indirect
+	github.com/sirupsen/logrus v1.9.4 // indirect
+	github.com/stretchr/testify v1.11.1 // indirect
+	github.com/ugorji/go/codec v1.2.13 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
 )
 
@@ -40,6 +69,7 @@ require (
 	github.com/crate-crypto/go-eth-kzg v1.5.0 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0 // indirect
 	github.com/emicklei/dot v1.6.2 // indirect
+	github.com/erigontech/erigon v0.0.0-00010101000000-000000000000
 	github.com/ethereum/c-kzg-4844/v2 v2.1.6 // indirect
 	github.com/ferranbt/fastssz v0.1.4 // indirect
 	github.com/getsentry/sentry-go v0.27.0 // indirect
@@ -74,3 +104,5 @@ require (
 )
 
 replace github.com/holiman/bloomfilter/v2 => github.com/AskAlexSharov/bloomfilter/v2 v2.0.9
+
+replace github.com/erigontech/erigon => /Users/random_anon/dev/clients/erigon

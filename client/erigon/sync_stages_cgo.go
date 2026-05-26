@@ -42,7 +42,11 @@ import (
 func writeSyncStageMarkers(dbPath string) error {
 	chaindataDir := filepath.Join(dbPath, "chaindata")
 
-	env, err := mdbx.NewEnv()
+	// mdbx-go v0.40+ requires a Label argument to NewEnv. The label is
+	// telemetry-only; using "chaindata" for parity with Erigon's own naming
+	// (db/kv/kv_mdbx.go labels its primary env "chaindata"). The empty/zero
+	// label is also accepted by the binding.
+	env, err := mdbx.NewEnv(mdbx.Label("chaindata"))
 	if err != nil {
 		return fmt.Errorf("mdbx.NewEnv: %w", err)
 	}
