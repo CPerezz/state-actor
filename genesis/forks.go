@@ -151,13 +151,11 @@ func SortedForks() []string {
 //     writers emit shanghaiTime/cancunTime/pragueTime/osakaTime/
 //     terminalTotalDifficulty/blobSchedule conditionally based on
 //     g.Config — same activation set the writer encodes.
-//   - erigon: prague (conservative). Erigon v3.4.2's chainConfig parser
-//     handles Cancun + most of Prague; OsakaTime field handling is
-//     unverified at writer-ship time. Bumping to osaka requires
-//     empirical verification on the bench host that the produced
-//     chainspec.json round-trips through Erigon's startup without
-//     "unknown field" rejection. Tracked in
-//     /Users/random_anon/.claude/plans/so-i-have-a-declarative-owl.md
+//   - erigon: osaka. Verified empirically on the bloatnet bench host
+//     2026-05-26: `erigon init` accepts a genesis.json with OsakaTime
+//     active and emits a valid chaindata. The earlier prague-floor was
+//     a Verifier A conservative guess that empirical testing retired.
+//     Tracked in /Users/random_anon/.claude/plans/so-i-have-a-declarative-owl.md
 //     Part 5+6 Task 67.
 //
 // Osaka adds zero new genesis-block fields per go-ethereum v1.17.2
@@ -169,10 +167,8 @@ func SortedForks() []string {
 // corresponding header fields.
 func MaxForkForClient(client string) string {
 	switch client {
-	case "geth", "reth", "besu", "nethermind":
+	case "geth", "reth", "besu", "nethermind", "erigon":
 		return "osaka"
-	case "erigon":
-		return "prague"
 	default:
 		return DefaultFork
 	}

@@ -80,11 +80,11 @@ func TestValidateForClient_ForkCeiling(t *testing.T) {
 		{"besu", "osaka", true},
 		{"nethermind", "prague", true},
 		{"nethermind", "osaka", true},
-		// Erigon's writer ceiling is prague (conservative — Erigon v3.4.2
-		// chainConfig parser handling of OsakaTime is unverified at
-		// writer-ship time). Bump after empirical verification.
+		// Erigon's writer ceiling is osaka — verified empirically on the
+		// bloatnet bench host that `erigon init` accepts a genesis.json
+		// with OsakaTime active. Matches the other four clients.
 		{"erigon", "prague", true},
-		{"erigon", "osaka", false},
+		{"erigon", "osaka", true},
 	}
 	for _, tc := range cases {
 		err := ValidateForClient(tc.client, FlagValues{Fork: tc.fork})
