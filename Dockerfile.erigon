@@ -48,7 +48,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV CGO_ENABLED=1
 WORKDIR /app
 
+# Clone Erigon at the pinned tag (v3.4.2) into the build context.
+# state-actor's go.mod has a `replace github.com/erigontech/erigon =>
+# /erigon-src` directive (rewritten below for Docker) — this gives us
+# the exact source tree state-actor's commitment vendor depends on
+# without poisoning the Go module proxy with pseudo-versions.
+RUN git clone --depth 1 --branch v3.4.2 https://github.com/erigontech/erigon.git /erigon-src
+
 COPY go.mod go.sum ./
+# Rewrite the local-dev replace path to the Docker location.
+RUN sed -i 's|/Users/random_anon/dev/clients/erigon|/erigon-src|' go.mod
 RUN go mod download
 
 COPY . .
