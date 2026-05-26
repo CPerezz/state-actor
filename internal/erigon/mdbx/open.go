@@ -75,6 +75,15 @@ func OpenForWrite(dbPath string) (*Env, error) {
 		TblCommitmentVals,
 		Headers,
 		HeaderCanonical,
+		TblAccountIdx,
+		TblAccountHistoryKeys,
+		TblAccountHistoryVals,
+		TblStorageIdx,
+		TblStorageHistoryKeys,
+		TblStorageHistoryVals,
+		TblCodeIdx,
+		TblCodeHistoryKeys,
+		TblCodeHistoryVals,
 	} {
 		var dbi mdbx.DBI
 		if err := env.View(func(txn *mdbx.Txn) error {

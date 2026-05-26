@@ -49,4 +49,27 @@ const (
 	// Key:   block_num_u64
 	// Value: hash[32]
 	HeaderCanonical = "CanonicalHeader"
+
+	// History tables. All three for the Accounts/Storage/Code domains;
+	// CommitmentDomain has HistoryDisabled=true so no history writes
+	// even though the table names exist.
+	//
+	// Schema (per the schema investigation):
+	//   TblXxxIdx (DupSort)         : key=primary_key, value=txNum[8]
+	//   TblXxxHistoryKeys (DupSort) : key=txNum[8],    value=primary_key
+	//   TblXxxHistoryVals (DupSort) : key=primary_key, value=txNum[8]||prevValue
+	//
+	// At genesis prevValue is empty — TblXxxHistoryVals values are
+	// exactly 8 bytes (the txNum).
+	TblAccountIdx         = "AccountIdx"
+	TblAccountHistoryKeys = "AccountHistoryKeys"
+	TblAccountHistoryVals = "AccountHistoryVals"
+
+	TblStorageIdx         = "StorageIdx"
+	TblStorageHistoryKeys = "StorageHistoryKeys"
+	TblStorageHistoryVals = "StorageHistoryVals"
+
+	TblCodeIdx         = "CodeIdx"
+	TblCodeHistoryKeys = "CodeHistoryKeys"
+	TblCodeHistoryVals = "CodeHistoryVals"
 )
