@@ -92,10 +92,20 @@ func WriteStorageSlot(txn *mdbx.Txn, env *Env, address [20]byte, slot [32]byte, 
 	return nil
 }
 
+// chunkSize is the number of storage slots we commit per MDBX
+// transaction. A single transaction over millions of slots blows
+// MDBX's dirty-page budget and triggers spill_slowpath (mdbx writes
+// dirty pages to disk mid-transaction, ~50x slower than batched).
+// 10_000 is small enough to stay under the default 64K dirty-page
+// limit (assuming ~3 inserts per slot × 8-byte key + small value =
+// well under 4 KiB per dirty page).
+const chunkSize = 10_000
+
 // WriteAlloc walks an alloc map and stream-writes every storage slot
-// to MDBX via WriteStorageSlot. Single transaction — fast for small
-// allocs but does not chunk; callers with 1M+ slots should use a
-// chunked variant (not yet implemented).
+// to MDBX via WriteStorageSlot. Chunks writes into transactions of
+// `chunkSize` slots — single-transaction writes over millions of
+// slots hit MDBX's spill_slowpath and become orders of magnitude
+// slower than chunked.
 //
 // Returns the count of slots written (post-trim, post-zero-skip).
 //
@@ -103,19 +113,38 @@ func WriteStorageSlot(txn *mdbx.Txn, env *Env, address [20]byte, slot [32]byte, 
 // Callers are expected to pre-build this from `cfg.PreAlloc[i].Storage`
 // (via the streaming iter drain in the orchestrator).
 func WriteAlloc(env *Env, alloc map[[20]byte]map[[32]byte][32]byte) (uint64, error) {
+	// Flatten into a slice so we can chunk by count rather than per-
+	// address (entities have wildly different storage sizes).
+	type entry struct {
+		addr  [20]byte
+		slot  [32]byte
+		value [32]byte
+	}
+	flat := make([]entry, 0, 1024)
+	for addr, slots := range alloc {
+		for slot, value := range slots {
+			flat = append(flat, entry{addr, slot, value})
+		}
+	}
+
 	var written uint64
-	if err := env.Env.Update(func(txn *mdbx.Txn) error {
-		for addr, slots := range alloc {
-			for slot, value := range slots {
-				if err := WriteStorageSlot(txn, env, addr, slot, value); err != nil {
-					return fmt.Errorf("address=%x slot=%x: %w", addr[:], slot[:], err)
+	for start := 0; start < len(flat); start += chunkSize {
+		end := start + chunkSize
+		if end > len(flat) {
+			end = len(flat)
+		}
+		batch := flat[start:end]
+		if err := env.Env.Update(func(txn *mdbx.Txn) error {
+			for _, e := range batch {
+				if err := WriteStorageSlot(txn, env, e.addr, e.slot, e.value); err != nil {
+					return fmt.Errorf("address=%x slot=%x: %w", e.addr[:], e.slot[:], err)
 				}
 				written++
 			}
+			return nil
+		}); err != nil {
+			return 0, err
 		}
-		return nil
-	}); err != nil {
-		return 0, err
 	}
 	return written, nil
 }
