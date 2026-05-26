@@ -228,10 +228,32 @@ func buildAllocMap(cfg generator.Config) (map[common.Address]*allocAccount, *gen
 
 	// 2. AutoFill EOAs + contracts. Drained via entitygen so the RNG
 	// sequence matches state-actor's cross-client determinism contract.
+	//
+	// Dedup against PreAlloc addresses — mirrors client/geth/state_writer.go:
+	// 120-124 and :145-148. Without this, a PreAlloc-colliding draw
+	// silently OVERWRITES the PreAlloc entry on erigon's side (geth
+	// redraws on collision, advancing its RNG sequence). For seeds where
+	// collisions occur, the divergence cascades — every subsequent draw
+	// uses different RNG state, producing a different alloc and a
+	// different cross-client genesis state-root.
+	genesisAddrs := make(map[common.Address]struct{}, len(alloc))
+	for addr := range alloc {
+		genesisAddrs[addr] = struct{}{}
+	}
 	if cfg.AutoFill != nil {
 		rng := mrand.New(mrand.NewSource(cfg.Seed))
 		for i := 0; i < cfg.AutoFill.NumEOAs; i++ {
 			acc := cfg.AutoFill.DrawEOA(rng)
+			if acc == nil || acc.StateAccount == nil {
+				continue
+			}
+			for _, dup := genesisAddrs[acc.Address]; dup; {
+				acc = cfg.AutoFill.DrawEOA(rng)
+				if acc == nil || acc.StateAccount == nil {
+					break
+				}
+				_, dup = genesisAddrs[acc.Address]
+			}
 			if acc == nil || acc.StateAccount == nil {
 				continue
 			}
@@ -244,6 +266,16 @@ func buildAllocMap(cfg generator.Config) (map[common.Address]*allocAccount, *gen
 		}
 		for i := 0; i < cfg.AutoFill.NumContracts; i++ {
 			c := cfg.AutoFill.DrawContract(rng)
+			if c == nil || c.StateAccount == nil {
+				continue
+			}
+			for _, dup := genesisAddrs[c.Address]; dup; {
+				c = cfg.AutoFill.DrawContract(rng)
+				if c == nil || c.StateAccount == nil {
+					break
+				}
+				_, dup = genesisAddrs[c.Address]
+			}
 			if c == nil || c.StateAccount == nil {
 				continue
 			}
