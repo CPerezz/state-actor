@@ -50,7 +50,18 @@ echo "=== spec: $(ls -lh $SPEC | awk '{print $5}') ==="
 
 ENGINE_DRIVER=$WORK/bin/engine-driver
 mkdir -p $WORK/bin
-if [ ! -x "$ENGINE_DRIVER" ] || [ "$REPO/scripts/engine-driver/main.go" -nt "$ENGINE_DRIVER" ]; then
+# Rebuild if missing, or if main.go or any internal/engineapi source
+# is newer (engine-driver embeds internal/engineapi.EngineDriver, so
+# changes there must trigger a rebuild — bit attempt 16).
+need_rebuild=0
+if [ ! -x "$ENGINE_DRIVER" ]; then
+    need_rebuild=1
+elif [ "$REPO/scripts/engine-driver/main.go" -nt "$ENGINE_DRIVER" ]; then
+    need_rebuild=1
+elif [ -n "$(find "$REPO/internal/engineapi" -type f -name '*.go' -newer "$ENGINE_DRIVER" -print -quit 2>/dev/null)" ]; then
+    need_rebuild=1
+fi
+if [ "$need_rebuild" = 1 ]; then
     echo "=== building engine-driver ==="
     cd $REPO
     go build -o $ENGINE_DRIVER ./scripts/engine-driver/
