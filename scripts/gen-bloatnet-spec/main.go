@@ -83,7 +83,11 @@ func bloatedSpecForTarget(targetGB int) []bloatedSpec {
 			balance: "200" + weiPerEth, code: "0xef0100" + strings.Repeat("11", 20)},
 		{name: "", sizeBytes: 5 * G, mode: "position",
 			nonce: 42, balance: "5" + weiPerEth},
-		{name: "bloat-15gb-explicit", sizeBytes: 15 * G, mode: "explicit",
+		// Verify-bloatnet expects the 0x...0b0f00 explicit-address entity
+		// with nonce=7 + 7702 delegation code. Storage size doesn't
+		// matter for the verify checks (they're metadata-only), so we
+		// pin to 3 GB instead of 15 GB to keep the 25 GB bench bounded.
+		{name: "bloat-15gb-explicit", sizeBytes: 3 * G, mode: "explicit",
 			addr: "0x00000000000000000000000000000000000b0f00", balance: "15" + weiPerEth,
 			code: "0xef0100" + strings.Repeat("22", 20), nonce: 7},
 		{name: "bloat-30gb-named", sizeBytes: 30 * G, mode: "name",
