@@ -5,7 +5,7 @@ go 1.25.7
 require (
 	github.com/RoaringBitmap/roaring/v2 v2.18.0
 	github.com/cockroachdb/pebble v1.1.5
-	github.com/erigontech/mdbx-go v0.40.1
+	github.com/erigontech/mdbx-go v0.38.4
 	github.com/ethereum/go-ethereum v1.17.2-0.20260323171428-745b0a8c09ad
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/holiman/bloomfilter/v2 v2.0.3

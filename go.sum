@@ -41,8 +41,8 @@ github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0 h1:NMZiJj8QnKe1LgsbDayM4UoHwbvw
 github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0/go.mod h1:ZXNYxsqcloTdSy/rNShjYzMhyjf0LaoftYK0p+A3h40=
 github.com/emicklei/dot v1.6.2 h1:08GN+DD79cy/tzN6uLCT84+2Wk9u+wvqP+Hkx/dIR8A=
 github.com/emicklei/dot v1.6.2/go.mod h1:DeV7GvQtIw4h2u73RKBkkFdvVAz0D9fzeJrgPW6gy/s=
-github.com/erigontech/mdbx-go v0.40.1 h1:d8aeokoiLnT4MrRq4bFdqnPO714743d7bd6hC2tKy1w=
-github.com/erigontech/mdbx-go v0.40.1/go.mod h1:VTGwYzepS9Wg38jVfreOsSVlh73OBGPZluu7kHo6X6g=
+github.com/erigontech/mdbx-go v0.38.4 h1:S9T7mTe9KPcFe4dOoOtVdI6gPzht9y7wMnYfUBgrQLo=
+github.com/erigontech/mdbx-go v0.38.4/go.mod h1:IcOLQDPw3VM/asP6T5JVPPN4FHHgJtY16XfYjzWKVNI=
 github.com/ethereum/c-kzg-4844/v2 v2.1.6 h1:xQymkKCT5E2Jiaoqf3v4wsNgjZLY0lRSkZn27fRjSls=
 github.com/ethereum/c-kzg-4844/v2 v2.1.6/go.mod h1:8HMkUZ5JRv4hpw/XUrYWSQNAUzhHMg2UDb/U+5m+XNw=
 github.com/ethereum/go-ethereum v1.17.2-0.20260323171428-745b0a8c09ad h1:o+0Z159irdHvf040Df2eWq0hEsF2X71rgaGBL3x5GBY=
@@ -70,6 +70,7 @@ github.com/hashicorp/golang-lru/v2 v2.0.7 h1:a+bsQ5rvGLjzHuww6tVxozPZFVghXaHOwFs
 github.com/hashicorp/golang-lru/v2 v2.0.7/go.mod h1:QeFd9opnmA6QUJc5vARoKUSoFhyfM2/ZepoAG6RGpeM=
 github.com/holiman/uint256 v1.3.3-0.20260228135838-087f4b32f234 h1:KWA7rdkMmM/gBfL5zb8BOmRT9yDT6mh6of+lTlYywvU=
 github.com/holiman/uint256 v1.3.3-0.20260228135838-087f4b32f234/go.mod h1:EOMSn4q6Nyt9P6efbI3bueV4e1b3dGlUCXeiRV4ng7E=
+github.com/ianlancetaylor/cgosymbolizer v0.0.0-20240503222823-736c933a666d/go.mod h1:DvXTE/K/RtHehxU8/GtDs4vFtfw64jJ3PaCnFri8CRg=
 github.com/ianlancetaylor/cgosymbolizer v0.0.0-20241129212102-9c50ad6b591e h1:8AnObPi8WmIgjwcidUxaREhXMSpyUJeeSrIkZTXdabw=
 github.com/ianlancetaylor/cgosymbolizer v0.0.0-20241129212102-9c50ad6b591e/go.mod h1:DvXTE/K/RtHehxU8/GtDs4vFtfw64jJ3PaCnFri8CRg=
 github.com/kisielk/errcheck v1.5.0/go.mod h1:pFxgyoBC7bSaBwPgfKdkLd5X25qrDl4LWUI2bnpBCr8=
