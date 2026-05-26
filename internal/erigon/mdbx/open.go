@@ -67,27 +67,39 @@ func OpenForWrite(dbPath string) (*Env, error) {
 		DBIs: make(map[string]mdbx.DBI, 6),
 	}
 	// Open the DBIs we will write to. They MUST already exist (erigon
-	// init created them in Phase A) — pass flags=0, not Create.
-	for _, name := range []string{
-		TblAccountVals,
-		TblStorageVals,
-		TblCodeVals,
-		TblCommitmentVals,
-		Headers,
-		HeaderCanonical,
-		TblAccountIdx,
-		TblAccountHistoryKeys,
-		TblAccountHistoryVals,
-		TblStorageIdx,
-		TblStorageHistoryKeys,
-		TblStorageHistoryVals,
-		TblCodeIdx,
-		TblCodeHistoryKeys,
-		TblCodeHistoryVals,
-	} {
+	// init created them in Phase A); pass the SAME flags Erigon used
+	// at creation so MDBX's compatibility check passes.
+	//
+	// DupSort: tables where multiple values can share a key. Identified
+	// via grep against db/kv/tables.go's ChaindataTablesCfg DupSort map.
+	// All "Vals", "Idx", "HistoryKeys", "HistoryVals" for non-large-vals
+	// domains are DupSort. TblCodeVals is the exception (LargeValues=true,
+	// not DupSort).
+	type dbiSpec struct {
+		name  string
+		flags uint
+	}
+	specs := []dbiSpec{
+		{TblAccountVals, mdbx.DupSort},
+		{TblStorageVals, mdbx.DupSort},
+		{TblCodeVals, 0}, // LargeValues=true, plain
+		{TblCommitmentVals, mdbx.DupSort},
+		{Headers, 0},
+		{HeaderCanonical, 0},
+		{TblAccountIdx, mdbx.DupSort},
+		{TblAccountHistoryKeys, mdbx.DupSort},
+		{TblAccountHistoryVals, mdbx.DupSort},
+		{TblStorageIdx, mdbx.DupSort},
+		{TblStorageHistoryKeys, mdbx.DupSort},
+		{TblStorageHistoryVals, mdbx.DupSort},
+		{TblCodeIdx, mdbx.DupSort},
+		{TblCodeHistoryKeys, mdbx.DupSort},
+		{TblCodeHistoryVals, 0}, // CodeHistoryLargeValues=true
+	}
+	for _, s := range specs {
 		var dbi mdbx.DBI
 		if err := env.View(func(txn *mdbx.Txn) error {
-			d, err := txn.OpenDBI(name, 0, nil, nil)
+			d, err := txn.OpenDBI(s.name, s.flags, nil, nil)
 			if err != nil {
 				return err
 			}
@@ -95,9 +107,9 @@ func OpenForWrite(dbPath string) (*Env, error) {
 			return nil
 		}); err != nil {
 			out.Close()
-			return nil, fmt.Errorf("mdbx.OpenDBI(%s): %w", name, err)
+			return nil, fmt.Errorf("mdbx.OpenDBI(%s, flags=0x%x): %w", s.name, s.flags, err)
 		}
-		out.DBIs[name] = dbi
+		out.DBIs[s.name] = dbi
 	}
 	return out, nil
 }
