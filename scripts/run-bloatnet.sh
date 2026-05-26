@@ -254,6 +254,12 @@ NETH_CFG
             # different mechanisms.
             cp $JWT_HEX $data/jwt.hex 2>/dev/null || true
             chmod 0644 $data/jwt.hex 2>/dev/null || true
+            # --externalcl: required because v3.4.2's --chain dev path
+            # is broken (PoW mining was removed in #17813; no block
+            # production without external CL). Per Erigon issue #18827
+            # the workaround is to drive block production via Engine
+            # API + an external consensus-layer mock — exactly what
+            # our engine-driver provides.
             docker run -d --name $ct \
                 --network host \
                 -v $data:/data \
@@ -261,6 +267,7 @@ NETH_CFG
                 --datadir /data \
                 --networkid 1337 \
                 --no-downloader \
+                --externalcl \
                 --authrpc.addr 127.0.0.1 \
                 --authrpc.port 8551 \
                 --authrpc.jwtsecret /data/jwt.hex \
