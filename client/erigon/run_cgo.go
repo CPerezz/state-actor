@@ -164,6 +164,16 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 		_ = err
 	}
 
+	// 7. Optional Phase B/C path: emit pure-Go snapshot files alongside
+	// the `erigon init` MDBX chaindata. Default is OFF (bench works via
+	// `erigon init` alone). See client/erigon/options.go::WriteSnapshots
+	// for the long-term Architect-B transition plan.
+	if opts.WriteSnapshots {
+		if err := writeSnapshots(ctx, cfg.DBPath, cfg.Seed, alloc); err != nil {
+			return nil, fmt.Errorf("client/erigon: writeSnapshots: %w", err)
+		}
+	}
+
 	stats.GenerationTime = time.Since(startedAt)
 	return stats, nil
 }

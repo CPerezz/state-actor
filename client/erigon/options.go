@@ -48,4 +48,17 @@ type Options struct {
 	// SkipBootValidation skips the post-write Erigon boot smoke in
 	// oracle tests. Currently unused; reserved for follow-up wiring.
 	SkipBootValidation bool
+
+	// WriteSnapshots, when true, runs the pure-Go snap.Writer pass
+	// AFTER `erigon init`, emitting .kv/.bt/.kvei (value domains) and
+	// .kv/.kvi/.kvei (commitment domain) under <dbPath>/snapshots/.
+	//
+	// Defaults to FALSE: the bench's working path is `erigon init` alone
+	// (Phase A.5 hot-tier scaffolding). The snap.Writer pass is layered
+	// in as a side-by-side artifact for byte-equality verification + the
+	// long-term Architect-B transition; flipping the default to true
+	// requires the commitment-trie computation to ship (Plan Task 72)
+	// since Erigon's reader needs commitment in EITHER MDBX or cold
+	// snapshots, not neither.
+	WriteSnapshots bool
 }
