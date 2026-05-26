@@ -141,6 +141,15 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 		_ = err
 	}
 
+	// 5b. Write SyncStage progress markers so erigon's daemon-boot
+	// AllSegmentsDownloadComplete gate clears (>0 OtterSync). Without
+	// this, engine_forkchoiceUpdated returns SYNCING forever and no
+	// blocks are produced. See sync_stages_cgo.go for the mechanism +
+	// source citations from Erigon's stagedsync.
+	if err := writeSyncStageMarkers(cfg.DBPath); err != nil {
+		return nil, fmt.Errorf("client/erigon: writeSyncStageMarkers: %w", err)
+	}
+
 	// 6. Make the datadir world-readable + group-writable. The state-actor
 	// container runs as root, so erigon init writes chaindata as root.
 	// The downstream `erigontech/erigon:v3.4.2` container runs as a

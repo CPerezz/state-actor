@@ -161,7 +161,16 @@ func (d *EngineDriver) Step(ctx context.Context, headHash common.Hash, ts uint64
 	const fcVer = "engine_forkchoiceUpdatedV3"
 	getVer, newVer := d.versions()
 
-	// 1. forkchoiceUpdated with payloadAttributes → payloadId
+	// 1. forkchoiceUpdated with payloadAttributes → payloadId.
+	//
+	// Erigon v3.4.x returns SYNCING on the FIRST FCU after daemon boot
+	// because `exec_module.go:649-668 Ready()` polls
+	// `blockReader.Ready(ctx, 1s)` and the in-memory `s.ready` signal
+	// only fires after `SpawnStageSnapshots` runs its first cycle. Erigon's
+	// own MockCl mirrors this by retrying FCU on SYNCING with 50 ms
+	// backoff (execution/engineapi/engineapitester/mock_cl.go:289-321).
+	// We follow the same pattern: retry until VALID or 60 s elapsed
+	// (well past Erigon's first-cycle latency).
 	fcParams := []any{
 		map[string]string{
 			"headBlockHash":      headHash.Hex(),
@@ -176,14 +185,35 @@ func (d *EngineDriver) Step(ctx context.Context, headHash common.Hash, ts uint64
 			"parentBeaconBlockRoot": zeroHash32,
 		},
 	}
-	fcResp, err := d.callEngine(ctx, fcVer, fcParams)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("fc with attrs: %w", err)
+	var fcResp map[string]any
+	var payloadID string
+	{
+		retryCtx, retryCancel := context.WithTimeout(ctx, 60*time.Second)
+		defer retryCancel()
+		for {
+			resp, err := d.callEngine(retryCtx, fcVer, fcParams)
+			if err != nil {
+				return common.Hash{}, fmt.Errorf("fc with attrs: %w", err)
+			}
+			status := fcResponseStatus(resp)
+			if status == "SYNCING" {
+				select {
+				case <-retryCtx.Done():
+					return common.Hash{}, fmt.Errorf("fc with attrs: still SYNCING after 60s — daemon never opened RoSnapshots.ready")
+				case <-time.After(50 * time.Millisecond):
+					continue
+				}
+			}
+			pid, ok := resp["payloadId"].(string)
+			if !ok || pid == "" {
+				return common.Hash{}, fmt.Errorf("fc with attrs: missing payloadId in response (status=%q)", status)
+			}
+			fcResp = resp
+			payloadID = pid
+			break
+		}
 	}
-	payloadID, ok := fcResp["payloadId"].(string)
-	if !ok || payloadID == "" {
-		return common.Hash{}, fmt.Errorf("fc with attrs: missing payloadId in response")
-	}
+	_ = fcResp // referenced via payloadID + status branch
 
 	// 2. Wait for the EL to assemble the payload. besu's
 	// PragueAcceptanceTestHelper hardcodes 500ms; we scale with BlockTime
@@ -240,6 +270,17 @@ func (d *EngineDriver) Step(ctx context.Context, headHash common.Hash, ts uint64
 		return common.Hash{}, fmt.Errorf("fc advance: %w", err)
 	}
 	return common.HexToHash(newBlockHashStr), nil
+}
+
+// fcResponseStatus extracts payloadStatus.status from an
+// engine_forkchoiceUpdated response. Returns "" if absent.
+func fcResponseStatus(resp map[string]any) string {
+	ps, ok := resp["payloadStatus"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	s, _ := ps["status"].(string)
+	return s
 }
 
 func (d *EngineDriver) versions() (getVer, newVer string) {
