@@ -10,9 +10,11 @@ require (
 	github.com/erigontech/mdbx-go v0.38.4
 	github.com/ethereum/go-ethereum v1.17.2-0.20260323171428-745b0a8c09ad
 	github.com/hashicorp/golang-lru/v2 v2.0.7
+	github.com/holiman/bloomfilter/v2 v2.0.3
 	github.com/holiman/uint256 v1.3.2
 	github.com/linxGnu/grocksdb v1.10.8
 	github.com/pierrec/lz4/v4 v4.1.22
+	github.com/spaolacci/murmur3 v1.1.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -66,3 +68,5 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
+
+replace github.com/holiman/bloomfilter/v2 => github.com/AskAlexSharov/bloomfilter/v2 v2.0.9
