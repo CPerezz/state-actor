@@ -31,32 +31,23 @@ func (c FileCompression) Has(flag FileCompression) bool {
 	return c&flag != 0
 }
 
-// FeatureFlag bits matching `db/seg/seg_interface.go:32-38`. Stored in
-// the file's byte[1] header position. state-actor v1 always writes zero
-// (no page-level compression, no key/val flag distinction in the wire —
-// that information lives in the caller's per-domain config).
-type featureFlag uint8
-
-const (
-	flagPageLevelCompression featureFlag = 1 << iota // 0b001
-	flagKeyCompression                               // 0b010
-	flagValCompression                               // 0b100
-)
-
-// featureFlagBitmask is a packed byte at file offset 1.
+// featureFlagBitmask is the packed byte at file offset 1 (the second
+// byte of the V1 header). Bits, matching `db/seg/seg_interface.go:32-38`:
+//
+//	bit 0: PageLevelCompressionEnabled (followed by 1-byte compPageValuesCount)
+//	bit 1: KeyCompressionEnabled
+//	bit 2: ValCompressionEnabled
+//
+// state-actor v1 always writes 0 (none of these features are implemented).
+// NewDecompressor rejects any file with non-zero featureFlagBitmask to
+// avoid silently mis-decoding extended-format files.
 type featureFlagBitmask uint8
 
-func (m featureFlagBitmask) has(flag featureFlag) bool {
-	return m&featureFlagBitmask(flag) == featureFlagBitmask(flag)
-}
-
-// File-format version constants from `db/seg/seg_interface.go:27-30`.
-// V0 had no header byte (data started immediately); V1 prepends a
-// (version, featureFlagBitmask) pair. state-actor only emits V1.
-const (
-	fileCompressionFormatV0 uint8 = 0
-	fileCompressionFormatV1 uint8 = 1
-)
+// fileCompressionFormatV1 is the version byte at file offset 0 of V1
+// files. Mirrors `db/seg/seg_interface.go:29 FileCompressionFormatV1`.
+// V0 had no version byte (data started immediately); state-actor only
+// emits and reads V1.
+const fileCompressionFormatV1 uint8 = 1
 
 // compressedMinSize is Erigon's sanity-check at decompress.go:207.
 // A file smaller than 32 bytes can't contain the 8+8+8+8 (count, empty,

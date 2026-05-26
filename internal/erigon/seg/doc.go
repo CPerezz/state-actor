@@ -69,22 +69,27 @@
 //	}
 //	d.Close()
 //
-// # v1 scope (no-pattern fast path)
+// # v1 scope (no-pattern path only)
 //
 // For state-actor's first 10/100/1K-word fixtures with Erigon's default
 // `MinPatternScore = 1024`, the dictionary-pattern extraction phase
 // (parallel_compress.go:967-1029) produces zero patterns because no
-// 5+-byte substring occurs ≥1024 times in 10–1K random key/value pairs.
-// In this regime `Compressor.Compress` takes the `compressNoWordPatterns`
-// fast path (compress.go:359-368), and we produce byte-identical output
-// without needing a Patricia tree, MatchFinder3, or the recursive
-// dynamic-programming cover algorithm.
+// 5+-byte substring occurs ≥1024 times in 10–1K random key/value
+// pairs. In this regime, Erigon's writer takes the FULL Compress path
+// but yields an empty `patternList` (patternsSize=0 in the file
+// header) and the encoded body is functionally identical to the
+// `compressNoWordPatterns` fast path. Verified empirically by the
+// 4 golden fixtures under `testdata/erigon_golden.json` (`patternList.Len=0`
+// in Erigon's log output for all four; the resulting files round-trip
+// through this pure-Go writer with bytes.Equal).
 //
 // Inputs that would actually populate the pattern dictionary (highly
-// repetitive 100K+ word inputs) are out of scope for v1. The plan
+// repetitive 100K+ word inputs) are NOT supported in v1. The plan
 // (Part 1a Task 10) gates that test under `-short=false`; this package
-// implements only the small-input path. The Patricia-tree pattern-cover
-// implementation is deferred to v2.
+// implements only the no-pattern path. The Patricia-tree pattern-cover
+// implementation (mfPatricia3 + dynamic-programming DP cover) is
+// deferred to v2. NewCompressor accepts Config{Compression: CompressNone}
+// only; CompressKeys / CompressVals return ErrPatternCoverUnsupported.
 //
 // # Algorithm sketch
 //

@@ -10,10 +10,16 @@ import (
 )
 
 // OffsetEntry is one (key, value, keyOffset, valueOffset) tuple yielded
-// by Decompressor.Iterate. Offsets are byte positions in the .kv file
-// (relative to the start of the file, i.e. including the V1 header and
-// the data-section header). Downstream accessor builders (BTree,
-// RecSplit, Bloom) use ValueOffset as the per-key offset value.
+// by Decompressor.Iterate. Offsets are byte positions RELATIVE TO THE
+// START OF THE BIT-STREAM (i.e., after the V1 header + data-section
+// header + position dictionary). This matches Erigon's `Getter.dataP`
+// semantics — `MakeGetter` slices `d.data[d.wordsStart:]` so all
+// downstream offsets are relative to `wordsStart`.
+//
+// Downstream accessor builders (BTree, RecSplit, Bloom) consume
+// ValueOffset directly as the per-key offset value to embed in their
+// indexes — those indexes are then read via `Getter.Reset(off);
+// Getter.Next(buf)` which also expects bit-stream-relative offsets.
 type OffsetEntry struct {
 	// Key is the decoded key bytes (the even-index word). Backing
 	// storage is owned by the iterator and may be overwritten on the
@@ -22,13 +28,13 @@ type OffsetEntry struct {
 	// Value is the decoded value bytes (the odd-index word). Same
 	// retention rules as Key.
 	Value []byte
-	// KeyOffset is the byte offset (from file start) of the key's
-	// length-prefix bits. This is the offset Erigon's BinarySearch +
-	// MatchPrefix calls operate on.
+	// KeyOffset is the byte offset of the key's length-prefix bits,
+	// relative to the start of the bit-stream.
 	KeyOffset uint64
-	// ValueOffset is the byte offset of the value's length-prefix bits.
-	// Per `db/state/simple_accessor_builder.go:194-216`, this is the
-	// value the accessor index (.bt / .kvi) stores against the key.
+	// ValueOffset is the byte offset of the value's length-prefix bits,
+	// relative to the start of the bit-stream. Per
+	// `db/state/simple_accessor_builder.go:194-216`, this is the value
+	// the accessor index (.bt / .kvi) stores against the key.
 	ValueOffset uint64
 }
 
@@ -42,17 +48,15 @@ var ErrCorruptedFile = errors.New("seg: corrupted file")
 // — no mmap; state-actor only iterates for offset discovery, not for
 // random access).
 type Decompressor struct {
-	filePath string
-	data     []byte // full file contents
-	// Parsed header offsets:
-	headerEnd  int    // index of first byte of the data-section header
+	filePath   string
+	data       []byte // full file contents
 	wordsCount uint64
 	emptyCount uint64
 	// Pattern Huffman tables are absent in v1's no-pattern fast path;
-	// we'll detect & reject pattern dictionaries at NewDecompressor.
-	posList []*position // sorted as the file holds them
-	pos2code map[uint64]*position
-	wordsStart uint64 // byte offset (from start of `data`) where Huffman bitstream begins
+	// NewDecompressor rejects files with a non-empty pattern dictionary.
+	posList    []*position // in on-disk order
+	pos2code   map[uint64]*position
+	wordsStart uint64 // byte offset (in d.data) where the Huffman bitstream begins
 }
 
 // NewDecompressor opens path and parses the V1 header + position
@@ -152,7 +156,6 @@ func NewDecompressor(path string) (*Decompressor, error) {
 	// alternative: re-derive codes from depths via canonical Huffman.
 	d.posList, d.pos2code = codesFromDepths(raw)
 
-	d.headerEnd = pos
 	d.wordsStart = uint64(pos)
 	return d, nil
 }
@@ -185,9 +188,11 @@ func (d *Decompressor) Iterate(ctx context.Context) iter.Seq2[OffsetEntry, error
 			return
 		}
 
+		// Match Erigon's Getter semantics: bitstream is the
+		// subslice starting at wordsStart, and dataP is relative.
 		g := &bitReader{
-			data:     d.data,
-			dataP:    d.wordsStart,
+			data:     d.data[d.wordsStart:],
+			dataP:    0,
 			posList:  d.posList,
 			pos2code: d.pos2code,
 		}

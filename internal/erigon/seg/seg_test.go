@@ -151,6 +151,149 @@ func TestPatternCoverRejected(t *testing.T) {
 	}
 }
 
+// TestAddUncompressedWordRoundTrips ensures the AddUncompressedWord
+// path (which sets the .idt entry's "uncompressed" flag) round-trips
+// identically to AddWord in v1 (no patterns → both flags are
+// observationally equivalent).
+func TestAddUncompressedWordRoundTrips(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "ucw.kv")
+	c, err := NewCompressor(out, dir, DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewCompressor: %v", err)
+	}
+	defer c.Close()
+	// Pair 0: AddWord for both.
+	if err := c.AddWord([]byte("k1")); err != nil {
+		t.Fatalf("AddWord: %v", err)
+	}
+	if err := c.AddWord([]byte("v1")); err != nil {
+		t.Fatalf("AddWord: %v", err)
+	}
+	// Pair 1: AddUncompressedWord for the value.
+	if err := c.AddWord([]byte("k2")); err != nil {
+		t.Fatalf("AddWord: %v", err)
+	}
+	if err := c.AddUncompressedWord([]byte("v2-uncompressed-marker")); err != nil {
+		t.Fatalf("AddUncompressedWord: %v", err)
+	}
+	if err := c.Compress(); err != nil {
+		t.Fatalf("Compress: %v", err)
+	}
+	c.Close()
+	d, err := NewDecompressor(out)
+	if err != nil {
+		t.Fatalf("NewDecompressor: %v", err)
+	}
+	defer d.Close()
+	if got := d.Count(); got != 4 {
+		t.Fatalf("Count: got %d, want 4", got)
+	}
+	want := [][2]string{
+		{"k1", "v1"},
+		{"k2", "v2-uncompressed-marker"},
+	}
+	i := 0
+	for entry, err := range d.Iterate(context.Background()) {
+		if err != nil {
+			t.Fatalf("iterate err: %v", err)
+		}
+		if got := string(entry.Key); got != want[i][0] {
+			t.Errorf("[%d] key: got %q, want %q", i, got, want[i][0])
+		}
+		if got := string(entry.Value); got != want[i][1] {
+			t.Errorf("[%d] val: got %q, want %q", i, got, want[i][1])
+		}
+		i++
+	}
+	if i != 2 {
+		t.Fatalf("iterated %d, want 2", i)
+	}
+}
+
+// TestNewDecompressorRejectsShortFile verifies the < compressedMinSize
+// guard at the top of NewDecompressor.
+func TestNewDecompressorRejectsShortFile(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "short.kv")
+	// Write a 10-byte file (less than the 32-byte minimum).
+	if err := os.WriteFile(p, []byte("0123456789"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_, err := NewDecompressor(p)
+	if !errors.Is(err, ErrCorruptedFile) {
+		t.Fatalf("want ErrCorruptedFile, got %v", err)
+	}
+}
+
+// TestNewDecompressorRejectsBadVersion verifies the version-byte guard.
+func TestNewDecompressorRejectsBadVersion(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "v99.kv")
+	// 32-byte file with version byte 0x99.
+	buf := make([]byte, 32)
+	buf[0] = 0x99
+	if err := os.WriteFile(p, buf, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_, err := NewDecompressor(p)
+	if !errors.Is(err, ErrCorruptedFile) {
+		t.Fatalf("want ErrCorruptedFile, got %v", err)
+	}
+}
+
+// TestNewDecompressorRejectsNonzeroFlags verifies that unsupported
+// feature-flag bits cause a decode error (v1 supports only flags == 0).
+func TestNewDecompressorRejectsNonzeroFlags(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "flags.kv")
+	buf := make([]byte, 64)
+	buf[0] = 0x01 // V1
+	buf[1] = 0x01 // PageLevelCompression bit
+	if err := os.WriteFile(p, buf, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_, err := NewDecompressor(p)
+	if !errors.Is(err, ErrCorruptedFile) {
+		t.Fatalf("want ErrCorruptedFile, got %v", err)
+	}
+}
+
+// TestAddWordAfterCloseFails verifies the closed-state guard.
+func TestAddWordAfterCloseFails(t *testing.T) {
+	dir := t.TempDir()
+	c, err := NewCompressor(filepath.Join(dir, "x.kv"), dir, DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewCompressor: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := c.AddWord([]byte("k")); !errors.Is(err, ErrAlreadyClosed) {
+		t.Fatalf("AddWord after close: want ErrAlreadyClosed, got %v", err)
+	}
+	if err := c.AddUncompressedWord([]byte("v")); !errors.Is(err, ErrAlreadyClosed) {
+		t.Fatalf("AddUncompressedWord after close: want ErrAlreadyClosed, got %v", err)
+	}
+	if err := c.Compress(); !errors.Is(err, ErrAlreadyClosed) {
+		t.Fatalf("Compress after close: want ErrAlreadyClosed, got %v", err)
+	}
+}
+
+// TestFileCompressionHas verifies the Has helper on the bit-mask type.
+func TestFileCompressionHas(t *testing.T) {
+	both := CompressKeys | CompressVals
+	if !both.Has(CompressKeys) {
+		t.Error("Keys|Vals should Has(Keys)")
+	}
+	if !both.Has(CompressVals) {
+		t.Error("Keys|Vals should Has(Vals)")
+	}
+	if CompressNone.Has(CompressKeys) {
+		t.Error("None should not Has(Keys)")
+	}
+}
+
 // TestCloseAfterCompress verifies multiple Close calls are safe.
 func TestCloseAfterCompress(t *testing.T) {
 	dir := t.TempDir()
