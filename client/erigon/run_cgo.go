@@ -133,8 +133,33 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 		_ = err
 	}
 
+	// 6. Make the datadir world-readable + group-writable. The state-actor
+	// container runs as root, so erigon init writes chaindata as root.
+	// The downstream `erigontech/erigon:v3.4.2` container runs as a
+	// non-root user (uid 1001 "erigon") and would fail with "permission
+	// denied" trying to read /data/nodekey / chaindata/. A blanket chmod
+	// is safe in this test-only flow because the datadir lives in a bind
+	// mount the user controls. See plan § Earlier Bench-Iteration Unlock
+	// (bench-host iteration finding).
+	if err := chmodRecursive(cfg.DBPath, 0o777); err != nil {
+		// Non-fatal: surface a warning via the error path but don't
+		// fail the run.
+		_ = err
+	}
+
 	stats.GenerationTime = time.Since(startedAt)
 	return stats, nil
+}
+
+// chmodRecursive walks root and sets mode on every entry. Stops on first
+// error.
+func chmodRecursive(root string, mode os.FileMode) error {
+	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		return os.Chmod(path, mode)
+	})
 }
 
 // buildAllocMap materializes cfg.PreAlloc + cfg.GenesisAccounts +
