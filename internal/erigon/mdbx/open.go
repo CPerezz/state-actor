@@ -75,26 +75,18 @@ func OpenForWrite(dbPath string) (*Env, error) {
 	// All "Vals", "Idx", "HistoryKeys", "HistoryVals" for non-large-vals
 	// domains are DupSort. TblCodeVals is the exception (LargeValues=true,
 	// not DupSort).
+	// MVP scope: only open the storage-write tables. Account/code tables
+	// and headers are owned by `erigon init`; extending into them lands
+	// in Phase C+D of the plan.
 	type dbiSpec struct {
 		name  string
 		flags uint
 	}
 	specs := []dbiSpec{
-		{TblAccountVals, mdbx.DupSort},
 		{TblStorageVals, mdbx.DupSort},
-		{TblCodeVals, 0}, // LargeValues=true, plain
-		{TblCommitmentVals, mdbx.DupSort},
-		{Headers, 0},
-		{HeaderCanonical, 0},
-		{TblAccountIdx, mdbx.DupSort},
-		{TblAccountHistoryKeys, mdbx.DupSort},
-		{TblAccountHistoryVals, mdbx.DupSort},
 		{TblStorageIdx, mdbx.DupSort},
 		{TblStorageHistoryKeys, mdbx.DupSort},
 		{TblStorageHistoryVals, mdbx.DupSort},
-		{TblCodeIdx, mdbx.DupSort},
-		{TblCodeHistoryKeys, mdbx.DupSort},
-		{TblCodeHistoryVals, 0}, // CodeHistoryLargeValues=true
 	}
 	for _, s := range specs {
 		var dbi mdbx.DBI
