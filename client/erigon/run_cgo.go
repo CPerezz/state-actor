@@ -226,42 +226,6 @@ func buildAllocMap(cfg generator.Config) (map[common.Address]*allocAccount, *gen
 		}
 	}
 
-	// 1b. Drain cfg.PreAlloc[i].Storage iter — mirrors what the other
-	// four client backends do in their Phase 0 streaming pass (see
-	// client/geth/state_writer.go:534-662 runPhase0,
-	// client/reth/spec_storage_streaming_cgo.go:65-100 streamSpecStorage,
-	// client/besu/state_writer_cgo.go:286-359 runPhase0,
-	// client/nethermind/phase0_cgo.go:20-86 runPhase0).
-	//
-	// generator/config.go:134 explicitly leaves PreAlloc storage as an
-	// iter.Seq2 ("Storage is NOT drained — it stays as iter.Seq2 on
-	// c.PreAlloc for streaming consumers"); the erigon path never
-	// became a streaming consumer until now.
-	//
-	// Without this drain, every spec-defined storage-heavy entity
-	// (bloat-15gb, bloat-100mb, raw-fat, BigShowcase ERC-20 init slots)
-	// reaches `erigon init`'s genesis.json with only account+code+nonce
-	// — silently dropping ~25 GB of expected state and producing a
-	// state root that diverges from MPT clients on the same alloc.
-	for i := range cfg.PreAlloc {
-		pe := &cfg.PreAlloc[i]
-		if pe.Storage == nil {
-			continue
-		}
-		a, ok := alloc[pe.Address]
-		if !ok || a == nil {
-			continue
-		}
-		if a.Storage == nil {
-			a.Storage = make(map[common.Hash]common.Hash)
-		}
-		for k, v := range pe.Storage {
-			a.Storage[k] = v
-			stats.StorageSlotsCreated++
-			stats.StorageBytes += 64
-		}
-	}
-
 	// 2. AutoFill EOAs + contracts. Drained via entitygen so the RNG
 	// sequence matches state-actor's cross-client determinism contract.
 	//
@@ -296,18 +260,6 @@ func buildAllocMap(cfg generator.Config) (map[common.Address]*allocAccount, *gen
 			entry := &allocAccount{Nonce: acc.StateAccount.Nonce}
 			if acc.StateAccount.Balance != nil {
 				entry.Balance = acc.StateAccount.Balance.ToBig()
-			}
-			// EIP-7702 delegation: ~30 % of EOAs carry a 23-byte delegation
-			// marker (0xef01 || 0x00 || target20). Geth's state_writer.go
-			// branches on len(acc.Code) > 0 and persists the code so the
-			// account's CodeHash becomes keccak256(code), changing the
-			// per-account RLP leaf. Without this propagation the erigon
-			// path's CodeHash stays EmptyCodeHash for delegated EOAs, the
-			// account leaves diverge from geth's, and the cross-client
-			// state root diverges. Mirrors client/geth/state_writer.go:125-130.
-			if len(acc.Code) > 0 {
-				entry.Code = acc.Code
-				stats.CodeBytes += uint64(len(acc.Code))
 			}
 			alloc[acc.Address] = entry
 			stats.AccountsCreated++
