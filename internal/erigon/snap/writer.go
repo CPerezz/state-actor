@@ -12,6 +12,7 @@ import (
 	"github.com/nerolation/state-actor/internal/erigon"
 	"github.com/nerolation/state-actor/internal/erigon/btindex"
 	"github.com/nerolation/state-actor/internal/erigon/existence"
+	"github.com/nerolation/state-actor/internal/erigon/recsplit"
 	"github.com/nerolation/state-actor/internal/erigon/seg"
 )
 
@@ -224,15 +225,25 @@ func (w *Writer) WriteDomain(ctx context.Context, d Domain, r StepRange, keyCoun
 		}
 	}
 
-	// AccessorHashMap (recsplit) is commitment-domain only. Wiring left
-	// as a TODO until internal/erigon/recsplit/ spike lands.
+	// AccessorHashMap (.kvi via recsplit) — commitment-domain default.
+	// Recsplit may need to retry on hash collisions; for v1 we surface
+	// the collision as an error rather than auto-retry (caller can
+	// bump Settings.Salt and re-invoke).
+	var hashm *recsplit.Writer
 	if mask.Has(AccessorHashMap) {
-		// TODO(plan Task 72 / recsplit): once internal/erigon/recsplit
-		// exposes a Writer matching the plan's API contract, instantiate
-		// it here and call AddKey(key, keyOffset) on every iterated
-		// entry. Skipping for now keeps the value domains (Accounts,
-		// Storage, Code) fully functional.
-		_ = mask
+		hmPath := BuildHashMapFilename(domainDir, w.settings.SnapshotVersion, d, r)
+		saltCopy := w.settings.Salt // recsplit needs a *uint32 to mutate on collision
+		hashm, err = recsplit.New(recsplit.Args{
+			KeyCount:   int(keyCount),
+			BucketSize: 100,
+			Salt:       &saltCopy,
+			LeafSize:   8,
+			TmpDir:     tmpDir,
+			IndexFile:  hmPath,
+		})
+		if err != nil {
+			return fmt.Errorf("snap.WriteDomain: recsplit.New: %w", err)
+		}
 	}
 
 	// Salt-prehash for the existence filter (per Verifier B's note in
@@ -253,6 +264,11 @@ func (w *Writer) WriteDomain(ctx context.Context, d Domain, r StepRange, keyCoun
 				return fmt.Errorf("snap.WriteDomain: btindex.AddKey: %w", err)
 			}
 		}
+		if hashm != nil {
+			if err := hashm.AddKey(entry.Key, entry.KeyOffset); err != nil {
+				return fmt.Errorf("snap.WriteDomain: recsplit.AddKey: %w", err)
+			}
+		}
 		if exist != nil {
 			lo, _ := murmur3.Sum128WithSeed(entry.Key, w.settings.Salt)
 			if err := exist.AddHash(lo); err != nil {
@@ -267,6 +283,17 @@ func (w *Writer) WriteDomain(ctx context.Context, d Domain, r StepRange, keyCoun
 		}
 		if err := bt.Close(); err != nil {
 			return fmt.Errorf("snap.WriteDomain: btindex.Close: %w", err)
+		}
+	}
+	if hashm != nil {
+		if err := hashm.Build(ctx); err != nil {
+			if hashm.Collision() {
+				return fmt.Errorf("snap.WriteDomain: recsplit hash collision — bump Settings.Salt and retry: %w", err)
+			}
+			return fmt.Errorf("snap.WriteDomain: recsplit.Build: %w", err)
+		}
+		if err := hashm.Close(); err != nil {
+			return fmt.Errorf("snap.WriteDomain: recsplit.Close: %w", err)
 		}
 	}
 	if exist != nil {

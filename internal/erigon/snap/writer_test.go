@@ -89,6 +89,58 @@ func TestWriterRoundTrip(t *testing.T) {
 	}
 }
 
+// TestWriterCommitmentDomain exercises the AccessorHashMap (.kvi
+// via recsplit) path that's commitment-domain-only. The mix is
+// HashMap + Existence (no BTree).
+func TestWriterCommitmentDomain(t *testing.T) {
+	dir := t.TempDir()
+	w, err := NewWriter(dir, Settings{Seed: 42})
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	defer w.Close()
+
+	// 128 keys is enough to exercise the bucket/recursion path
+	// (BucketSize=100 default → 2 buckets).
+	const n = 128
+	entries := make([]DomainEntry, n)
+	for i := range entries {
+		k := []byte{byte(i >> 8), byte(i), 0x55, 0xaa}
+		entries[i] = DomainEntry{Key: k, Value: []byte{byte(i)}}
+	}
+	push := func(yield func(DomainEntry) bool) {
+		for _, e := range entries {
+			if !yield(e) {
+				return
+			}
+		}
+	}
+	r := StepRange{From: 0, To: 256}
+	if err := w.WriteDomain(context.Background(), DomainCommitment, r, n, push); err != nil {
+		t.Fatalf("WriteDomain(Commitment): %v", err)
+	}
+
+	domain := DomainDir(dir)
+	for _, want := range []string{
+		BuildDataFilename(domain, "v1.0", DomainCommitment, r),
+		BuildHashMapFilename(domain, "v1.0", DomainCommitment, r),
+		BuildExistenceFilename(domain, "v1.0", DomainCommitment, r),
+	} {
+		info, err := os.Stat(want)
+		if err != nil {
+			t.Fatalf("expected commitment file %s: %v", want, err)
+		}
+		if info.Size() == 0 {
+			t.Errorf("file %s is empty", want)
+		}
+	}
+	// .bt MUST NOT exist for commitment (per Verifier B's per-domain mix).
+	btPath := BuildBTreeFilename(domain, "v1.0", DomainCommitment, r)
+	if _, err := os.Stat(btPath); err == nil {
+		t.Errorf("commitment domain should not emit .bt; found %s", btPath)
+	}
+}
+
 func TestFilenameTemplate(t *testing.T) {
 	r := StepRange{From: 0, To: 256}
 	want := filepath.Join("/tmp", "v1.0-accounts.0-256.kv")
