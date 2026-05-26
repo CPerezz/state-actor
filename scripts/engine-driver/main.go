@@ -8,19 +8,23 @@
 //	  -engine http://127.0.0.1:8551 \
 //	  -eth http://127.0.0.1:8545 \
 //	  -fork osaka \
-//	  -block-time 1s
+//	  -block-time 1s \
+//	  [-jwt /path/to/jwt.hex]
 //
-// Runs DriveLoop until SIGINT/SIGTERM. JWT is NOT supported — boot the
-// EL with --engine-jwt-disabled or equivalent.
+// Runs DriveLoop until SIGINT/SIGTERM. JWT is optional — required by
+// erigon (which has no --engine-jwt-disabled flag), unused by besu /
+// nethermind (which boot with --engine-jwt-disabled).
 package main
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -32,13 +36,34 @@ func main() {
 	ethURL := flag.String("eth", "http://127.0.0.1:8545", "JSON-RPC URL")
 	fork := flag.String("fork", "osaka", "engine method version: cancun | prague | osaka")
 	blockTime := flag.Duration("block-time", time.Second, "slot duration")
+	jwtPath := flag.String("jwt", "", "path to JWT secret hex file (32 random bytes); empty disables JWT")
 	flag.Parse()
+
+	var jwtSecret []byte
+	if *jwtPath != "" {
+		raw, err := os.ReadFile(*jwtPath)
+		if err != nil {
+			log.Fatalf("read JWT secret %q: %v", *jwtPath, err)
+		}
+		// Allow whitespace / "0x" prefix.
+		s := strings.TrimSpace(string(raw))
+		s = strings.TrimPrefix(s, "0x")
+		jwtSecret, err = hex.DecodeString(s)
+		if err != nil {
+			log.Fatalf("decode JWT secret %q: %v", *jwtPath, err)
+		}
+		if len(jwtSecret) != 32 {
+			log.Fatalf("JWT secret must be 32 bytes, got %d", len(jwtSecret))
+		}
+		log.Printf("engine-driver: JWT enabled (32-byte secret loaded from %s)", *jwtPath)
+	}
 
 	driver := &engineapi.EngineDriver{
 		EngineURL: *engineURL,
 		EthRPCURL: *ethURL,
 		BlockTime: *blockTime,
 		Fork:      engineapi.Fork(*fork),
+		JWTSecret: jwtSecret,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

@@ -294,11 +294,17 @@ start_engine_driver_if_needed() {
         *) return 0 ;;
     esac
     echo "=== starting engine-driver for $client ==="
+    # erigon has no --engine-jwt-disabled flag; it requires JWT.
+    # besu / nethermind boot with --engine-jwt-disabled and ignore
+    # the -jwt arg (empty = no auth header).
+    local jwt_arg=""
+    case $client in erigon) jwt_arg="-jwt $JWT_HEX" ;; esac
     nohup $ENGINE_DRIVER \
         -engine http://127.0.0.1:8551 \
         -eth http://127.0.0.1:8545 \
         -fork osaka \
         -block-time 1s \
+        $jwt_arg \
         > $logdir/engine-driver.log 2>&1 &
     local pid=$!
     echo $pid > $logdir/engine-driver.pid
