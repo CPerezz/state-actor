@@ -1,9 +1,10 @@
 .PHONY: all build test test-race test-coverage bench clean install lint fmt tidy deps help \
-	image-reth image-besu image-nethermind \
+	image-reth image-besu image-nethermind image-erigon \
 	docker-nethermind smoke-nethermind smoke-nethermind-spamoor \
 	docker-besu smoke-besu smoke-besu-spamoor \
 	docker-geth smoke-geth \
-	test-besu-suite test-geth-suite test-nethermind-suite test-reth-suite \
+	docker-erigon smoke-erigon smoke-erigon-spamoor \
+	test-besu-suite test-geth-suite test-nethermind-suite test-reth-suite test-erigon-suite \
 	spamoor-install
 
 # Binary name
@@ -365,6 +366,48 @@ test-geth-suite:
 	mkdir -p $(RESULT_DIR)
 	RESULT_PATH=$(RESULT_DIR)/geth-result.json SPAMOOR=$(SPAMOOR) REQUIRE_SPAMOOR=1 \
 	  $(GOTEST) -tags oracle -run TestE2ESuite -v -timeout 1800s ./client/geth/...
+
+# ---------------------------------------------------------------------------
+# Erigon / cgo image. Pure-Go primitives (Architect B's choice) — no
+# RocksDB, no system libmdbx. mdbx-go vendors its own C sources, which is
+# why CGO_ENABLED=1 alone is enough.
+# ---------------------------------------------------------------------------
+
+## image-erigon: Build the cgo_erigon Docker builder image for direct-write erigon
+##   Used by test-erigon-suite. Also reused by CI's per-job docker build.
+image-erigon:
+	docker build -f Dockerfile.erigon --target builder -t state-actor-erigon-builder:latest .
+
+## docker-erigon: Build the runtime image (state-actor + erigon smoke).
+##   Emits both `state-actor-erigon:latest` (canonical) and
+##   `state-actor:erigon` (alias consumed by scripts/run-bloatnet.sh:279
+##   which references `state-actor:$client`).
+docker-erigon:
+	docker build -f Dockerfile.erigon \
+	  -t state-actor-erigon:latest \
+	  -t state-actor-erigon:$(VERSION) \
+	  -t state-actor:erigon .
+
+## test-erigon-suite: Run the erigon end-to-end suite (db-gen → boot → spamoor → re-query)
+ERIGON_SUITE_VOL ?= erigon-suite-datadir
+test-erigon-suite: image-erigon
+	mkdir -p $(RESULT_DIR)
+	docker volume rm -f $(ERIGON_SUITE_VOL) >/dev/null 2>&1 || true
+	docker volume create $(ERIGON_SUITE_VOL)
+	docker run --rm \
+	  -v $(ERIGON_SUITE_VOL):/oracle-data \
+	  -v $(RESULT_DIR):/result \
+	  -v $(shell command -v $(SPAMOOR) 2>/dev/null || echo /dev/null):/usr/local/bin/spamoor:ro \
+	  -v /var/run/docker.sock:/var/run/docker.sock \
+	  -e ERIGON_ORACLE_DATADIR=/oracle-data \
+	  -e ERIGON_ORACLE_VOL=$(ERIGON_SUITE_VOL) \
+	  -e ERIGON_DOCKER_PLATFORM \
+	  -e RESULT_PATH=/result/erigon-result.json \
+	  -e SPAMOOR=/usr/local/bin/spamoor \
+	  -e REQUIRE_SPAMOOR=1 \
+	  state-actor-erigon-builder:latest \
+	  go test -tags 'cgo_erigon oracle' ./client/erigon/ -v -timeout 3600s
+	docker volume rm -f $(ERIGON_SUITE_VOL) >/dev/null 2>&1 || true
 
 ## help: Show this help
 help:

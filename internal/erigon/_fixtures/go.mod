@@ -1,0 +1,70 @@
+// Separate Go submodule that pulls github.com/erigontech/erigon to
+// produce byte-equality fixtures for the pure-Go writers under
+// /Users/random_anon/dev/state-actor-reth-direct-wt/internal/erigon/.
+//
+// The state-actor main module deliberately does NOT depend on Erigon
+// (Architect B's "long-term-maintainability" choice). This submodule
+// isolates the Erigon dep so fixture-regen can pull it without
+// poisoning the production build.
+//
+// During development this submodule uses a `replace` directive to point
+// at the local Erigon checkout at /Users/random_anon/dev/clients/erigon/.
+// For CI / reproducible regeneration the replace is removed and Erigon
+// is pinned to `v3.4.2` via the public Go module proxy.
+//
+// Build subcommands with `-tags erigon_gen`. Untagged builds produce no
+// Go output (every cmd/*/main.go has the build tag at the top).
+
+module github.com/nerolation/state-actor/internal/erigon/_fixtures
+
+go 1.25.7
+
+// During development, point at the local Erigon checkout. For CI /
+// reproducible regen, comment out the replace and let go.mod fetch
+// v3.4.2 from the public proxy.
+replace github.com/erigontech/erigon => /Users/random_anon/dev/clients/erigon
+
+// Erigon's own go.mod replaces the bloomfilter; we must mirror because
+// Go module resolution does NOT propagate replaces from dependencies.
+replace github.com/holiman/bloomfilter/v2 => github.com/AskAlexSharov/bloomfilter/v2 v2.0.9
+
+require (
+	github.com/erigontech/erigon v0.0.0-00010101000000-000000000000
+	github.com/holiman/uint256 v1.3.3-0.20260228135838-087f4b32f234
+	golang.org/x/crypto v0.52.0
+)
+
+require (
+	github.com/anacrolix/envpprof v1.5.0 // indirect
+	github.com/anacrolix/generics v0.2.0 // indirect
+	github.com/anacrolix/log v0.17.1-0.20251118025802-918f1157b7bb // indirect
+	github.com/anacrolix/missinggo/v2 v2.10.0 // indirect
+	github.com/benesch/cgosymbolizer v0.0.0-20190515212042-bec6fe6e597b // indirect
+	github.com/c2h5oh/datasize v0.0.0-20231215233829-aa82cc1e6500 // indirect
+	github.com/cilium/ebpf v0.16.0 // indirect
+	github.com/containerd/cgroups/v3 v3.0.5 // indirect
+	github.com/containerd/log v0.1.0 // indirect
+	github.com/coreos/go-systemd/v22 v22.5.0 // indirect
+	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
+	github.com/docker/go-units v0.5.0 // indirect
+	github.com/edsrzf/mmap-go v1.2.0 // indirect
+	github.com/erigontech/fastkeccak v0.1.1-0.20260408010752-08e7b6602268 // indirect
+	github.com/felixge/fgprof v0.9.5 // indirect
+	github.com/go-stack/stack v1.8.1 // indirect
+	github.com/godbus/dbus/v5 v5.1.0 // indirect
+	github.com/google/pprof v0.0.0-20260115054156-294ebfa9ad83 // indirect
+	github.com/ianlancetaylor/cgosymbolizer v0.0.0-20241129212102-9c50ad6b591e // indirect
+	github.com/mattn/go-colorable v0.1.14 // indirect
+	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/moby/sys/userns v0.1.0 // indirect
+	github.com/opencontainers/runtime-spec v1.2.0 // indirect
+	github.com/pbnjay/memory v0.0.0-20210728143218-7b4eea64cf58 // indirect
+	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
+	github.com/sirupsen/logrus v1.9.4 // indirect
+	github.com/stretchr/testify v1.11.1 // indirect
+	golang.org/x/exp v0.0.0-20260508232706-74f9aab9d74a // indirect
+	golang.org/x/sync v0.20.0 // indirect
+	golang.org/x/sys v0.45.0 // indirect
+	google.golang.org/protobuf v1.36.11 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
+)

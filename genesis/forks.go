@@ -143,7 +143,7 @@ func SortedForks() []string {
 // ceiling should be rejected at parse time so the resulting DB doesn't
 // boot with a "wrong genesis hash" mismatch.
 //
-// Today's ceilings (all 4 clients on Osaka after the writer migration to internal/genesisheader.Build):
+// Today's ceilings:
 //   - geth, reth, besu, nethermind: osaka. Header construction flows
 //     through internal/genesisheader.Build for besu/reth/nethermind
 //     (geth uses go-ethereum's native genesis builder, which handles
@@ -151,6 +151,14 @@ func SortedForks() []string {
 //     writers emit shanghaiTime/cancunTime/pragueTime/osakaTime/
 //     terminalTotalDifficulty/blobSchedule conditionally based on
 //     g.Config — same activation set the writer encodes.
+//   - erigon: prague (conservative). Erigon v3.4.2's chainConfig parser
+//     handles Cancun + most of Prague; OsakaTime field handling is
+//     unverified at writer-ship time. Bumping to osaka requires
+//     empirical verification on the bench host that the produced
+//     chainspec.json round-trips through Erigon's startup without
+//     "unknown field" rejection. Tracked in
+//     /Users/random_anon/.claude/plans/so-i-have-a-declarative-owl.md
+//     Part 5+6 Task 67.
 //
 // Osaka adds zero new genesis-block fields per go-ethereum v1.17.2
 // (Header struct unchanged from Prague's RequestsHash; OsakaTime gates
@@ -163,6 +171,8 @@ func MaxForkForClient(client string) string {
 	switch client {
 	case "geth", "reth", "besu", "nethermind":
 		return "osaka"
+	case "erigon":
+		return "prague"
 	default:
 		return DefaultFork
 	}

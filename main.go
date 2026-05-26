@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/nerolation/state-actor/client/besu"
+	"github.com/nerolation/state-actor/client/erigon"
 	"github.com/nerolation/state-actor/client/geth"
 	"github.com/nerolation/state-actor/client/nethermind"
 	"github.com/nerolation/state-actor/client/reth"
@@ -113,11 +114,14 @@ func main() {
 	}
 
 	// Reject --archive for clients that have no archive code path.
+	// Erigon accepts --archive but treats it as a no-op (the snapshot
+	// tier is archive-by-design once history files ship; until then
+	// archive-mode reads degrade gracefully to the value domains).
 	if *archive {
 		switch *client {
-		case "geth", "reth":
+		case "geth", "reth", "erigon":
 		default:
-			log.Fatalf("--archive is only supported on geth and reth; got --client=%s. Re-run without --archive.", *client)
+			log.Fatalf("--archive is only supported on geth, reth, and erigon (no-op for erigon); got --client=%s. Re-run without --archive.", *client)
 		}
 	}
 
@@ -299,6 +303,13 @@ func main() {
 		stats, err = reth.RunCgo(context.Background(), config, reth.Options{})
 		if err != nil {
 			log.Fatalf("Failed to populate Reth DB: %v", err)
+		}
+
+	case "erigon":
+		var err error
+		stats, err = erigon.Run(context.Background(), config, erigon.Options{})
+		if err != nil {
+			log.Fatalf("Failed to populate Erigon DB: %v", err)
 		}
 	}
 

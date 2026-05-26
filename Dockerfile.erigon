@@ -1,0 +1,81 @@
+# syntax=docker/dockerfile:1
+# Dockerfile.erigon — builds state-actor with the cgo_erigon tag so
+# --client=erigon works, AND embeds the pinned `erigon` CLI binary so
+# the v1 orchestrator can invoke `erigon init <genesis.json> --datadir`
+# to bootstrap chaindata. The pure-Go snapshot writer (Phase A/B in the
+# plan) lands as a follow-up that retires the erigon-init invocation.
+#
+# Storage strategy:
+#   - v1 (this image): orchestrator writes genesis.json with the full
+#     synthetic alloc (PreAlloc + AutoFill EOAs/contracts/storage/code),
+#     then execs the embedded `erigon init` binary. Erigon writes ALL
+#     state to MDBX (`TblAccountVals` / `TblStorageVals` / `TblCodeVals`)
+#     in its canonical encoding. State lives in HOT tier on first boot;
+#     Erigon's normal collation moves it to cold tier as blocks elapse.
+#     This is the "Phase A.5 scaffolding" path documented in the plan
+#     ([§ Earlier Bench-Iteration Unlock]).
+#   - v2 (next): replace `erigon init` with `internal/erigon/snap.Writer`
+#     pure-Go snapshot writer (Architect B's "own the format" choice).
+#     The state-actor encoder primitives (internal/erigon/eliasfano,
+#     internal/erigon/account) are already in place and exercised by
+#     unit tests; v2 wires them into the orchestrator.
+#
+# Run:
+#   docker build -f Dockerfile.erigon -t state-actor-erigon:latest .
+#   docker run --rm -v $(pwd)/_artifacts/erigon:/data state-actor-erigon:latest \
+#     --client=erigon --db=/data --target-size=4MB --seed=42
+
+# ---------- Stage 1: builder (state-actor + cgo_erigon) ----------
+FROM golang:1.24-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    git \
+    build-essential \
+    pkg-config \
+    gnupg \
+    && install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg \
+       | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
+    && chmod a+r /etc/apt/keyrings/docker.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+       https://download.docker.com/linux/debian bookworm stable" \
+       > /etc/apt/sources.list.d/docker.list \
+    && apt-get update && apt-get install -y --no-install-recommends docker-ce-cli \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV CGO_ENABLED=1
+WORKDIR /app
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+RUN mkdir -p /out && go build -tags cgo_erigon -ldflags "-s -w" -o /out/state-actor ./
+
+# ---------- Stage 2: extract erigon binary (pinned digest) ----------
+# We pull the erigon CLI from the upstream image (digest-pinned per
+# internal/erigon/constants.go PinnedErigonDigest) and copy just the
+# binary into the runtime stage. This keeps the runtime small and
+# guarantees the exact `erigon init` semantics state-actor depends on.
+FROM erigontech/erigon@sha256:bac6b266367ec59f82576cd8cef047171601fce3f0bbbef36e3e4db24727ff6e AS erigon-bin
+
+# ---------- Stage 3: minimal runtime image ----------
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+
+# state-actor binary (cgo_erigon-tagged).
+COPY --from=builder /out/state-actor /usr/local/bin/state-actor
+
+# erigon binary from the pinned upstream image. Place at /usr/local/bin/
+# so $PATH lookup finds it without extra args. PATH inheritance from the
+# debian-slim base already includes /usr/local/bin.
+COPY --from=erigon-bin /usr/local/bin/erigon /usr/local/bin/erigon
+
+ENTRYPOINT ["/usr/local/bin/state-actor"]

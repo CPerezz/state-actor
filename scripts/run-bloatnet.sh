@@ -13,7 +13,7 @@ export PATH=$HOME/.foundry/bin:/usr/local/go/bin:$PATH
 
 WORK=${WORK:-$HOME/work/bloatnet}
 REPO=${STATE_ACTOR_REPO:-$HOME/state-actor}
-CLIENTS=${CLIENTS:-geth reth nethermind besu}
+CLIENTS=${CLIENTS:-geth reth nethermind besu erigon}
 SPEC=$WORK/spec-bloatnet-100gb.yaml
 SEED=${SEED:-42}
 SPAMOOR_PRIVKEY=0x0000000000000000000000000000000000000000000000000000000000000001
@@ -198,6 +198,45 @@ NETH_CFG
                 --datadir /data \
                 --http --http.addr=127.0.0.1 --http.port=8545
             ;;
+        erigon)
+            # Erigon v3 dev mode embeds Caplin (CL) into the node binary
+            # via --dev-validator-seed; no external engine-driver is
+            # needed. Flags verified against cmd/utils/flags.go in the
+            # local Erigon checkout (v3.4.2):
+            #   --no-downloader        prevent snapshot peer download
+            #   --chain dev            use built-in dev network name
+            #                          (networkname.Dev = "dev")
+            #   --dev-validator-seed   embeds a Caplin validator (default "devnet")
+            #   --dev-validator-count  1 → minimal single-validator devnet
+            #   --dev.slot-time 2      minimum allowed (Erigon enforces ≥2);
+            #                          matches reth's --dev.block-time=1s
+            #                          intent — drive blocks on wall-clock
+            #                          rather than tx-instant. 2s vs 1s
+            #                          means slower bench: 500 blocks ≈
+            #                          1000s vs reth's ~500s.
+            #
+            # NOTE: chain config from state-actor's writer lands in MDBX
+            # ConfigTable; --chain dev provides Caplin's static config
+            # but Erigon's runtime chain-config comes from the DB. If
+            # this combo rejects our writer output on the bench host
+            # ("unknown chainID" or similar), iterate by replacing
+            # --chain dev with --chain /data/chainspec.json (Erigon
+            # accepts a path) and/or adding --caplin.custom-config
+            # /data/chainspec.json + --caplin.custom-genesis.
+            docker run -d --name $ct \
+                --network host \
+                -v $data:/data \
+                erigontech/erigon:v3.4.2 \
+                --datadir /data \
+                --chain dev \
+                --no-downloader \
+                --dev-validator-seed devnet \
+                --dev-validator-count 1 \
+                --dev.slot-time 2 \
+                --http --http.addr=127.0.0.1 --http.port=8545 \
+                --http.api=eth,net,web3,txpool,debug \
+                --nodiscover
+            ;;
         *)
             echo "unknown client: $client" >&2; return 1 ;;
     esac
@@ -265,10 +304,14 @@ run_one_client() {
     local db_path="/data"
     [ "$client" = "geth" ] && db_path="/data/geth/chaindata"
 
-    # --archive is geth/reth only (besu/nethermind reject at parse).
+    # --archive is geth/reth/erigon only (besu/nethermind reject at parse;
+    # erigon accepts it as a no-op per genesis/forks.go MaxForkForClient
+    # and main.go's allow-list — the snapshot tier is archive-by-design
+    # once history files ship, and absent that the value-domain reads
+    # degrade gracefully).
     local archive_arg=""
     if [ -n "$ARCHIVE" ]; then
-        case $client in geth|reth) archive_arg="--archive" ;; esac
+        case $client in geth|reth|erigon) archive_arg="--archive" ;; esac
     fi
 
     echo "=== state-actor generation (writing to $data, container path $db_path${archive_arg:+, archive=on}) ==="

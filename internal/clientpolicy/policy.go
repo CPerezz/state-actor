@@ -32,19 +32,17 @@ type FlagValues struct {
 // CI and documentation that grep for these strings keep working.
 //
 // Two layers:
-//  1. Client recognition: erigon → not-yet-implemented; unknown → reject.
+//  1. Client recognition: unknown → reject.
 //  2. Per-client compatibility: --binary-trie is geth-only (the others
 //     lack EIP-7864 support); --fork is clamped at each client's writer
 //     ceiling (see genesis.MaxForkForClient). --target-size is honored
 //     by every client.
 func ValidateForClient(client string, fv FlagValues) error {
 	switch client {
-	case "geth", "nethermind", "besu", "reth":
+	case "geth", "nethermind", "besu", "reth", "erigon":
 		// recognized; per-flag checks below
-	case "erigon":
-		return fmt.Errorf("--client=%s is not yet implemented (planned in a follow-up PR); use --client=geth, --client=nethermind, --client=besu, or --client=reth", client)
 	default:
-		return fmt.Errorf("--client=%s is not recognized; valid values: geth, nethermind, besu, reth", client)
+		return fmt.Errorf("--client=%s is not recognized; valid values: geth, nethermind, besu, reth, erigon", client)
 	}
 
 	// EIP-7864 binary trie — geth-only.
@@ -56,6 +54,8 @@ func ValidateForClient(client string, fv FlagValues) error {
 			return fmt.Errorf("--binary-trie is not supported with --client=besu (Besu does not implement EIP-7864)")
 		case "reth":
 			return fmt.Errorf("--binary-trie is not supported with --client=reth (Reth does not implement EIP-7864)")
+		case "erigon":
+			return fmt.Errorf("--binary-trie is not supported with --client=erigon (Erigon does not implement EIP-7864)")
 		}
 	}
 

@@ -6,17 +6,22 @@ import (
 )
 
 func TestValidateForClient_RecognizedClients(t *testing.T) {
-	for _, c := range []string{"geth", "nethermind", "besu", "reth"} {
+	for _, c := range []string{"geth", "nethermind", "besu", "reth", "erigon"} {
 		if err := ValidateForClient(c, FlagValues{}); err != nil {
 			t.Errorf("ValidateForClient(%q, zero FV): unexpected error: %v", c, err)
 		}
 	}
 }
 
-func TestValidateForClient_ErigonNotImplemented(t *testing.T) {
-	err := ValidateForClient("erigon", FlagValues{})
-	if err == nil || !strings.Contains(err.Error(), "not yet implemented") {
-		t.Fatalf("expected 'not yet implemented' for erigon, got %v", err)
+// TestValidateForClient_ErigonBinaryTrieRejected replaces the prior
+// TestValidateForClient_ErigonNotImplemented now that the erigon dispatch
+// arm is wired (it returns errNotImplemented at runtime through the
+// !cgo_erigon stub, but the recognition layer accepts it). The flag-level
+// policy still rejects --binary-trie for erigon per the EIP-7864 absence.
+func TestValidateForClient_ErigonBinaryTrieRejected(t *testing.T) {
+	err := ValidateForClient("erigon", FlagValues{BinaryTrie: true})
+	if err == nil || !strings.Contains(err.Error(), "EIP-7864") {
+		t.Fatalf("expected EIP-7864 rejection for erigon + --binary-trie, got %v", err)
 	}
 }
 
@@ -25,13 +30,19 @@ func TestValidateForClient_UnknownRejected(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "is not recognized") {
 		t.Fatalf("expected 'not recognized' for unknown client, got %v", err)
 	}
+	// The "valid values" hint must list every recognized client so users
+	// can typo-correct without re-reading the docs. Verifies erigon is
+	// included alongside the other four.
+	if !strings.Contains(err.Error(), "erigon") {
+		t.Fatalf("expected 'valid values' hint to include 'erigon', got %v", err)
+	}
 }
 
 func TestValidateForClient_BinaryTrieGethOnly(t *testing.T) {
 	if err := ValidateForClient("geth", FlagValues{BinaryTrie: true}); err != nil {
 		t.Errorf("geth + --binary-trie should be allowed: %v", err)
 	}
-	for _, c := range []string{"nethermind", "besu", "reth"} {
+	for _, c := range []string{"nethermind", "besu", "reth", "erigon"} {
 		err := ValidateForClient(c, FlagValues{BinaryTrie: true})
 		if err == nil || !strings.Contains(err.Error(), "EIP-7864") {
 			t.Errorf("%s + --binary-trie should reject with EIP-7864 reason, got %v", c, err)
@@ -44,7 +55,7 @@ func TestValidateForClient_BinaryTrieGethOnly(t *testing.T) {
 // nethermind (Phase 2) and reth (per-batch). Previously reth rejected the
 // flag at parse time; that rejection is gone.
 func TestValidateForClient_TargetSizeAllowed(t *testing.T) {
-	for _, c := range []string{"geth", "nethermind", "besu", "reth"} {
+	for _, c := range []string{"geth", "nethermind", "besu", "reth", "erigon"} {
 		if err := ValidateForClient(c, FlagValues{TargetSize: "5GB"}); err != nil {
 			t.Errorf("%s + --target-size should be allowed: %v", c, err)
 		}
@@ -69,6 +80,11 @@ func TestValidateForClient_ForkCeiling(t *testing.T) {
 		{"besu", "osaka", true},
 		{"nethermind", "prague", true},
 		{"nethermind", "osaka", true},
+		// Erigon's writer ceiling is prague (conservative — Erigon v3.4.2
+		// chainConfig parser handling of OsakaTime is unverified at
+		// writer-ship time). Bump after empirical verification.
+		{"erigon", "prague", true},
+		{"erigon", "osaka", false},
 	}
 	for _, tc := range cases {
 		err := ValidateForClient(tc.client, FlagValues{Fork: tc.fork})
