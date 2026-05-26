@@ -230,7 +230,7 @@ NETH_CFG
                 --networkid 1337 \
                 --no-downloader \
                 --dev.period 2 \
-                --port :0 \
+                --port 0 \
                 --http --http.addr=127.0.0.1 --http.port=8545 \
                 --http.api=eth,net,web3,txpool,debug \
                 --nodiscover
