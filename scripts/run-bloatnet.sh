@@ -222,11 +222,21 @@ NETH_CFG
             # --dev-validator-count / --dev.slot-time) DO NOT EXIST in
             # v3.4.2 — Erigon's main rewrote dev-mode bootstrapping
             # post-tag.
+            # --chain dev: needed to enable block production via
+            #   --dev.period in v3.4.2. Without it, erigon boots, RPC
+            #   works, but no blocks are mined → spamoor stalls at
+            #   block 0.
+            # --networkid 1337: explicit override. Setting it (via
+            #   ctx.IsSet(NetworkIdFlag.Name)) short-circuits the
+            #   "chain name is not recognized: dev" Fatal in
+            #   cmd/utils/flags.go:1923 because the ChainSpecByName
+            #   lookup is skipped when NetworkID is set externally.
             docker run -d --name $ct \
                 --network host \
                 -v $data:/data \
                 erigontech/erigon:v3.4.2 \
                 --datadir /data \
+                --chain dev \
                 --networkid 1337 \
                 --no-downloader \
                 --dev.period 2 \
