@@ -199,30 +199,24 @@ NETH_CFG
                 --http --http.addr=127.0.0.1 --http.port=8545
             ;;
         erigon)
-            # Erigon v3 dev mode embeds Caplin (CL) into the node binary
-            # via --dev-validator-seed; no external engine-driver is
-            # needed. Flags verified against cmd/utils/flags.go in the
-            # local Erigon checkout (v3.4.2):
-            #   --no-downloader        prevent snapshot peer download
-            #   --chain dev            use built-in dev network name
-            #                          (networkname.Dev = "dev")
-            #   --dev-validator-seed   embeds a Caplin validator (default "devnet")
-            #   --dev-validator-count  1 → minimal single-validator devnet
-            #   --dev.slot-time 2      minimum allowed (Erigon enforces ≥2);
-            #                          matches reth's --dev.block-time=1s
-            #                          intent — drive blocks on wall-clock
-            #                          rather than tx-instant. 2s vs 1s
-            #                          means slower bench: 500 blocks ≈
-            #                          1000s vs reth's ~500s.
+            # Erigon v3.4.2 dev mode triggers on `--chain dev`. The dev-mode
+            # Caplin scaffolding (--dev-validator-seed / --dev-validator-count
+            # / --dev.slot-time) was added on `main` AFTER v3.4.2 was cut;
+            # the v3.4.2 release uses the older `--dev.period <seconds>`
+            # to drive block production (0 = mine only when tx pending).
+            # Verified empirically on the bench host 2026-05-26 — passing
+            # the main-branch flags makes erigon crash with
+            # "Error: flag provided but not defined: -dev-validator-seed".
             #
-            # NOTE: chain config from state-actor's writer lands in MDBX
-            # ConfigTable; --chain dev provides Caplin's static config
-            # but Erigon's runtime chain-config comes from the DB. If
-            # this combo rejects our writer output on the bench host
-            # ("unknown chainID" or similar), iterate by replacing
-            # --chain dev with --chain /data/chainspec.json (Erigon
-            # accepts a path) and/or adding --caplin.custom-config
-            # /data/chainspec.json + --caplin.custom-genesis.
+            # Flags in use (all verified in `erigon --help` on
+            # erigontech/erigon:v3.4.2):
+            #   --datadir         the bench host's per-client volume
+            #   --chain dev       triggers "Starting Erigon in ephemeral
+            #                     dev mode" (networkname.Dev = "dev")
+            #   --no-downloader   skip snapshot peer download
+            #   --dev.period 2    wall-clock block production (2 s)
+            #   --http etc.       RPC config matching besu/reth defaults
+            #   --nodiscover      disable peer discovery
             docker run -d --name $ct \
                 --network host \
                 -v $data:/data \
@@ -230,9 +224,7 @@ NETH_CFG
                 --datadir /data \
                 --chain dev \
                 --no-downloader \
-                --dev-validator-seed devnet \
-                --dev-validator-count 1 \
-                --dev.slot-time 2 \
+                --dev.period 2 \
                 --http --http.addr=127.0.0.1 --http.port=8545 \
                 --http.api=eth,net,web3,txpool,debug \
                 --nodiscover
