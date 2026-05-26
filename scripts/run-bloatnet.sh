@@ -14,7 +14,8 @@ export PATH=$HOME/.foundry/bin:/usr/local/go/bin:$PATH
 WORK=${WORK:-$HOME/work/bloatnet}
 REPO=${STATE_ACTOR_REPO:-$HOME/state-actor}
 CLIENTS=${CLIENTS:-geth reth nethermind besu erigon}
-SPEC=$WORK/spec-bloatnet-100gb.yaml
+SPEC_TARGET_GB=${SPEC_TARGET_GB:-25}
+SPEC=$WORK/spec-bloatnet-${SPEC_TARGET_GB}gb.yaml
 SEED=${SEED:-42}
 SPAMOOR_PRIVKEY=0x0000000000000000000000000000000000000000000000000000000000000001
 SPAMOOR_TARGET_BLOCK_DELTA=${SPAMOOR_BLOCKS:-500}
@@ -44,7 +45,7 @@ done
 if [ ! -s "$SPEC" ]; then
     echo "=== generating spec → $SPEC ==="
     cd $REPO
-    go run ./scripts/gen-bloatnet-spec -out $SPEC -seed 4242
+    go run ./scripts/gen-bloatnet-spec -out $SPEC -seed 4242 -target-gb $SPEC_TARGET_GB
 fi
 echo "=== spec: $(ls -lh $SPEC | awk '{print $5}') ==="
 
