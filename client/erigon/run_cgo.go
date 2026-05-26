@@ -100,9 +100,14 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 	// the <genesisPath> positional. With the flag AFTER the path the
 	// parser silently falls back to the default DataDir
 	// (`/root/.local/share/erigon`) and writes chaindata there.
-	// Found via the v1 bench-iteration loop — see plan § Earlier
-	// Bench-Iteration Unlock.
-	cmd := exec.CommandContext(ctx, bin, "init", "--datadir", cfg.DBPath, genesisPath)
+	//
+	// --chain dev: must match what the downstream `erigon` daemon will
+	// pass at boot time. If init writes with --chain=mainnet (the default)
+	// and boot uses --chain=dev, erigon's "Renamed 0 directories" step
+	// at boot tries to migrate between chain configs and the RPC server
+	// hangs (RPC at 8545 never responds). Found via the v1 bench-iteration
+	// loop — see plan § Earlier Bench-Iteration Unlock.
+	cmd := exec.CommandContext(ctx, bin, "init", "--datadir", cfg.DBPath, "--chain", "dev", genesisPath)
 	out, runErr := cmd.CombinedOutput()
 	if runErr != nil {
 		return nil, fmt.Errorf("client/erigon: erigon init failed: %w\nOutput:\n%s", runErr, string(out))
