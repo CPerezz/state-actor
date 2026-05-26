@@ -26,7 +26,7 @@
 #     --client=erigon --db=/data --target-size=4MB --seed=42
 
 # ---------- Stage 1: builder (state-actor + cgo_erigon) ----------
-FROM golang:1.24-bookworm AS builder
+FROM golang:1.25-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
