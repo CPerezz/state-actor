@@ -1,14 +1,8 @@
 //go:build !cgo_erigon
 
-// Build without the cgo_erigon tag: no internal/erigon/* primitives
-// imported, no SnapshotWriter wired up. runImpl returns the canned
-// errNotImplemented error so `--client=erigon` fails fast with a clear
-// message pointing at Docker.
-//
-// This file is the only one in client/erigon/ that compiles without the tag;
-// everything else under client/erigon/ that touches the Erigon writer
-// pipeline is gated behind `//go:build cgo_erigon` and excluded from the
-// build entirely.
+// runImpl stub for the !cgo_erigon build. Returns errNotImplemented so
+// `--client=erigon` fails fast with a clear Docker-pointing message
+// when the build tag is not set.
 
 package erigon
 

@@ -12,7 +12,7 @@ import (
 // Geometry constants. Mirrors Erigon's kv_mdbx.go defaults:
 //
 //   - PageSize 4096: explicit pin to avoid darwin (16 KiB) vs linux
-//     (4 KiB) divergence — Verifier A's Correction 6.
+//     (4 KiB) divergence.
 //   - MapSize 4 TiB: matches reth's pin (internal/reth/dbs_cgo.go) and
 //     gives headroom for 25 GB bench plus post-spamoor growth.
 //   - GrowthStep 4 GiB: faster commits than Erigon's default 2 GiB at

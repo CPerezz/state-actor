@@ -15,14 +15,7 @@ import (
 // TestRun_StubReturnsNotImplemented pins the !cgo_erigon build behavior:
 // Run returns a clearly-labeled error directing the user at Docker so
 // `--client=erigon` on a vanilla `go build` doesn't panic, return nil, or
-// silently no-op.
-//
-// Skipped when built with -tags cgo_erigon — that path is exercised by the
-// differential-oracle test inside the Docker context (Part 7 Tasks 84-88
-// in /Users/random_anon/.claude/plans/so-i-have-a-declarative-owl.md).
-//
-// Mirrors client/besu/run_test.go's pattern exactly so reviewers can diff
-// the two and confirm both follow the same stub contract.
+// silently no-op. Mirrors client/besu/run_test.go.
 func TestRun_StubReturnsNotImplemented(t *testing.T) {
 	// Pass a Validate-clean config (AutoFill set) so Run reaches runImpl;
 	// the stub there returns errNotImplemented unconditionally.

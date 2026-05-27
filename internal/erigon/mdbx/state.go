@@ -10,11 +10,10 @@ import (
 )
 
 // GenesisTxNum is the txNum Erigon assigns to genesis-state writes.
-// Per genesis_write.go:397: "txNum := uint64(1) — 2 system txs in
+// Per Erigon's genesis_write.go: "txNum := uint64(1) — 2 system txs in
 // begin/end of block. Attribute state-writes to first, consensus
 // state-changes to second." For block 0 (zero user txs), MaxTxNum[0]
-// = 0 + 1 = 1 (Verifier A's Correction 7, confirmed by the schema
-// investigation).
+// = 0 + 1 = 1.
 const GenesisTxNum uint64 = 1
 
 // GenesisStep is txNum / DefaultStepSize. For txNum=1 and

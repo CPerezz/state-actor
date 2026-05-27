@@ -1,35 +1,22 @@
 //go:build cgo_erigon
 
-// runImpl orchestrates v1 chaindata generation by:
+// runImpl writes a bootable Erigon v3 chaindata directory in two phases:
 //
-//  1. Building a `types.Genesis`-compatible genesis.json that carries
-//     the full synthetic alloc (cfg.PreAlloc + cfg.AutoFill EOAs +
-//     contracts + storage + code).
-//  2. Executing the pinned `erigon init` CLI against the genesis.json.
-//     Erigon's init writes ALL state into MDBX (TblAccountVals,
-//     TblStorageVals, TblCodeVals) using its canonical encoding,
-//     plus the required headers, chain config, sync stages, and
-//     DBSchemaVersion that state-actor would otherwise need to mirror
-//     by hand.
-//  3. Writing a chainspec.json sidecar (informational; Erigon reads
-//     chain config from ConfigTable in MDBX).
-//  4. Returning Stats with the genesis state-root parsed from
-//     erigon's stdout log line.
+//  1. Build a types.Genesis-compatible genesis.json (cfg.PreAlloc +
+//     cfg.AutoFill EOAs + contracts + code; storage is held back) and
+//     exec the pinned `erigon init` CLI, which writes accounts, code,
+//     headers, chain config, sync stages, and DBSchemaVersion into
+//     MDBX using Erigon's canonical encoding.
+//  2. Open MDBX directly via internal/erigon/mdbx and stream the
+//     PreAlloc + autofill-contract storage slots into TblStorageVals +
+//     the three storage history tables. Storage is split out of
+//     genesis.json because erigon init serializes the whole Genesis
+//     as a single mdbx_put, and MDBX's per-value limit (~2 GB at
+//     16 KB pages) is exceeded by autofill storage at bench scale.
 //
-// This is the "Phase A.5 scaffolding" path documented in the plan
-// (`/Users/random_anon/.claude/plans/so-i-have-a-declarative-owl.md`
-// § Earlier Bench-Iteration Unlock). It satisfies the immediate
-// bench-iteration unlock — state-actor produces a fully bootable
-// Erigon datadir at 25 GB scale, validating dispatch + Docker + bench
-// script flow — while the pure-Go snapshot writer (Architect B's
-// "own the format" choice) is built incrementally in parallel under
-// `internal/erigon/{seg,recsplit,btindex,existence,snap}/`.
-//
-// v2 replaces `erigon init` with the pure-Go snapshot writer once
-// Parts 1a-1d + 2 of the plan land. Architect B's invariant — no
-// `github.com/erigontech/erigon` Go-module dependency in state-actor's
-// main module — is preserved: this orchestrator invokes erigon as a
-// CLI (`exec.Command`), not as a Go library import.
+// state-actor's main module does NOT import github.com/erigontech/erigon;
+// erigon is invoked as a CLI from the Docker image built by
+// Dockerfile.erigon.
 
 package erigon
 
@@ -94,10 +81,7 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 	}
 
 	// 3. Exec `erigon init <genesis.json> --datadir <dbPath>`.
-	bin := opts.ErigonBin
-	if bin == "" {
-		bin = erigonBinary
-	}
+	bin := erigonBinary
 	// Arg order matters: erigon's urfave/cli parser binds --datadir to
 	// the `init` subcommand's flag table ONLY if the flag comes BEFORE
 	// the <genesisPath> positional. With the flag AFTER the path the
@@ -238,16 +222,6 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 			// NOTE: stats.StorageSlotsCreated + StorageBytes already
 			// incremented in buildAllocMap; do NOT double-count here.
 			_ = written
-		}
-	}
-
-	// 8. Optional Phase B/C path: emit pure-Go snapshot files alongside
-	// the `erigon init` MDBX chaindata. Default is OFF (bench works via
-	// `erigon init` alone). See client/erigon/options.go::WriteSnapshots
-	// for the long-term Architect-B transition plan.
-	if opts.WriteSnapshots {
-		if err := writeSnapshots(ctx, cfg.DBPath, cfg.Seed, alloc); err != nil {
-			return nil, fmt.Errorf("client/erigon: writeSnapshots: %w", err)
 		}
 	}
 

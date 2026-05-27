@@ -2,11 +2,10 @@
 
 package mdbx
 
-// Erigon E3 chaindata DBI names. Mirrored from
-// /Users/random_anon/dev/clients/erigon/db/kv/tables.go at PinnedErigonCommit
-// (internal/erigon/constants.go). Re-running `grep -nE
-// "Tbl(Account|Storage|Code|Commitment)Vals" tables.go` against a newer
-// Erigon checkout will catch any rename.
+// Erigon E3 chaindata DBI names. Mirrored from erigon's
+// db/kv/tables.go at the version pinned in internal/erigon/constants.go.
+// Re-running `grep -nE "Tbl(Account|Storage|Code|Commitment)Vals"
+// tables.go` against a newer Erigon checkout will catch any rename.
 //
 // Schema reference (db/kv/tables.go:144-159):
 //
@@ -25,8 +24,7 @@ const (
 	TblAccountVals = "AccountVals"
 
 	// TblStorageVals — latest-state storage table.
-	// Key:   address[20] || slot[32] (52 bytes; NO incarnation, NO hashing
-	//        — per Verifier B's Correction 4 against the plan)
+	// Key:   address[20] || slot[32] (52 bytes; no incarnation, no hashing)
 	// Value: trimmed-leading-zero value bytes
 	TblStorageVals = "StorageVals"
 
