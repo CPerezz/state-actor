@@ -56,7 +56,14 @@ WORKDIR /app
 # /erigon-src` directive (rewritten below for Docker) — this gives us
 # the exact source tree state-actor's commitment vendor depends on
 # without poisoning the Go module proxy with pseudo-versions.
-RUN git clone --depth 1 --branch v3.4.2 https://github.com/erigontech/erigon.git /erigon-src
+# Clone Erigon at a specific master commit that matches the API our
+# vendored commitment package expects. v3.4.2's execution/commitment
+# package has API drift (TouchPlainKeyDirect renamed; PatriciaContext
+# gained a TxNum method); the commit below is the local-dev reference
+# checkout this codebase has always been tested against.
+RUN git clone https://github.com/erigontech/erigon.git /erigon-src \
+    && cd /erigon-src \
+    && git checkout 7827ec7268ffc9f4c4b97cfab6740d2f8fb1fdb2
 
 COPY go.mod go.sum ./
 # Rewrite the local-dev replace path to the Docker location.
