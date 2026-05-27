@@ -38,10 +38,12 @@ const (
 	// Value: BranchData encoding (as produced by commitment.PutBranch)
 	TblCommitmentVals = "CommitmentVals"
 
-	// Headers — block headers.
+	// Headers — block headers. Erigon's Go identifier is `Headers` but
+	// the actual MDBX bucket name is the singular "Header" (per
+	// db/kv/tables.go:60 in the pinned erigon source).
 	// Key:   block_num_u64 || hash[32]
 	// Value: RLP(header)
-	Headers = "Headers"
+	Headers = "Header"
 
 	// HeaderCanonical — canonical chain markers.
 	// Key:   block_num_u64
