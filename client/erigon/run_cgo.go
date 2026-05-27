@@ -212,8 +212,8 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 				return nil, fmt.Errorf("client/erigon: open MDBX for storage write: %w", err)
 			}
 			written, err := erigonmdbx.WriteAlloc(env, storageMap)
-			env.Close()
 			if err != nil {
+				env.Close()
 				return nil, fmt.Errorf("client/erigon: WriteAlloc: %w", err)
 			}
 			if cfg.Verbose {
@@ -222,6 +222,24 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 			// NOTE: stats.StorageSlotsCreated + StorageBytes already
 			// incremented in buildAllocMap; do NOT double-count here.
 			_ = written
+
+			// Phase C+D: compute HPH commitment over the full alloc +
+			// post-Phase-B storage, write branch nodes to
+			// TblCommitmentVals, and patch block 0's header.stateRoot.
+			// Without the cgo_erigon_commitment build tag this is a no-op
+			// stub (in commitment_cgo_stub.go) — the daemon recomputes on
+			// first FCU and the init-time stats.StateRoot stays.
+			hphRoot, computed, err := runCommitmentPhase(env, alloc, storageMap)
+			env.Close()
+			if err != nil {
+				return nil, fmt.Errorf("client/erigon: runCommitmentPhase: %w", err)
+			}
+			if computed {
+				stats.StateRoot = hphRoot
+				if cfg.Verbose {
+					fmt.Printf("client/erigon: wrote commitment branches + patched block 0 header; HPH root=%s\n", hphRoot.Hex())
+				}
+			}
 		}
 	}
 

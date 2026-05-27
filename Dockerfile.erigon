@@ -1,24 +1,27 @@
 # syntax=docker/dockerfile:1
-# Dockerfile.erigon — builds state-actor with the cgo_erigon tag so
-# --client=erigon works, AND embeds the pinned `erigon` CLI binary so
-# the v1 orchestrator can invoke `erigon init <genesis.json> --datadir`
-# to bootstrap chaindata. The pure-Go snapshot writer (Phase A/B in the
-# plan) lands as a follow-up that retires the erigon-init invocation.
+# Dockerfile.erigon — builds state-actor with the cgo_erigon +
+# cgo_erigon_commitment tags AND embeds the pinned `erigon` CLI binary.
 #
-# Storage strategy:
-#   - v1 (this image): orchestrator writes genesis.json with the full
-#     synthetic alloc (PreAlloc + AutoFill EOAs/contracts/storage/code),
-#     then execs the embedded `erigon init` binary. Erigon writes ALL
-#     state to MDBX (`TblAccountVals` / `TblStorageVals` / `TblCodeVals`)
-#     in its canonical encoding. State lives in HOT tier on first boot;
-#     Erigon's normal collation moves it to cold tier as blocks elapse.
-#     This is the "Phase A.5 scaffolding" path documented in the plan
-#     ([§ Earlier Bench-Iteration Unlock]).
-#   - v2 (next): replace `erigon init` with `internal/erigon/snap.Writer`
-#     pure-Go snapshot writer (Architect B's "own the format" choice).
-#     The state-actor encoder primitives (internal/erigon/eliasfano,
-#     internal/erigon/account) are already in place and exercised by
-#     unit tests; v2 wires them into the orchestrator.
+# Build tags:
+#   - cgo_erigon: pulls in erigontech/mdbx-go for direct MDBX writes
+#     (Phase B: storage drain into TblStorageVals + history tables).
+#   - cgo_erigon_commitment: enables the vendored HexPatriciaHashed
+#     commitment trie via github.com/erigontech/erigon. Phases C+D —
+#     state-actor computes HPH over the post-Phase-B alloc, writes
+#     branch nodes to TblCommitmentVals, patches block 0's
+#     header.stateRoot. Skips the daemon's first-FCU commitment rebuild.
+#   - gofuzz: disables Erigon's bundled secp256k1 to avoid CGO
+#     duplicate-symbol link errors against geth's secp256k1.
+#
+# Phase pipeline at runtime:
+#   1. state-actor writes genesis.json (header+code; autofill-contract
+#      storage held back).
+#   2. exec `erigon init` — populates AccountVals, CodeVals, Headers,
+#      ConfigTable, SyncStage, DBSchemaVersion.
+#   3. WriteAlloc — Phase B direct-MDBX storage drain (PreAlloc iter +
+#      autofill side-data) into TblStorageVals + 3 history tables.
+#   4. runCommitmentPhase — Phase C+D: ComputeGenesisRoot → write
+#      branches to TblCommitmentVals → patch block 0 header.
 #
 # Run:
 #   docker build -f Dockerfile.erigon -t state-actor-erigon:latest .
@@ -62,7 +65,7 @@ RUN go mod download
 
 COPY . .
 
-RUN mkdir -p /out && go build -tags cgo_erigon -ldflags "-s -w" -o /out/state-actor ./
+RUN mkdir -p /out && go build -tags "cgo_erigon cgo_erigon_commitment gofuzz" -ldflags "-s -w" -o /out/state-actor ./
 
 # ---------- Stage 2: extract erigon binary (pinned digest) ----------
 # We pull the erigon CLI from the upstream image (digest-pinned per

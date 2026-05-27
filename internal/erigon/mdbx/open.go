@@ -75,9 +75,10 @@ func OpenForWrite(dbPath string) (*Env, error) {
 	// All "Vals", "Idx", "HistoryKeys", "HistoryVals" for non-large-vals
 	// domains are DupSort. TblCodeVals is the exception (LargeValues=true,
 	// not DupSort).
-	// MVP scope: only open the storage-write tables. Account/code tables
-	// and headers are owned by `erigon init`; extending into them lands
-	// in Phase C+D of the plan.
+	// Storage tables (Phase B writes). Plus commitment + header tables
+	// for Phase C (write commitment branches) and Phase D (patch block 0
+	// stateRoot). Headers / HeaderCanonical use flags=0 (plain tables);
+	// commitment Vals uses DupSort like the storage tables.
 	type dbiSpec struct {
 		name  string
 		flags uint
@@ -87,6 +88,9 @@ func OpenForWrite(dbPath string) (*Env, error) {
 		{TblStorageIdx, mdbx.DupSort},
 		{TblStorageHistoryKeys, mdbx.DupSort},
 		{TblStorageHistoryVals, mdbx.DupSort},
+		{TblCommitmentVals, mdbx.DupSort},
+		{Headers, 0},
+		{HeaderCanonical, 0},
 	}
 	for _, s := range specs {
 		var dbi mdbx.DBI
