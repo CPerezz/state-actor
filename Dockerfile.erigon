@@ -72,6 +72,15 @@ COPY . .
 # the replace load-bearing.
 RUN sed -i 's|/Users/random_anon/dev/clients/erigon|/erigon-src|' go.mod
 
+# `go mod tidy` against /erigon-src so the build picks up v3.4.2's
+# transitive-dep graph. Local dev (Users/.../clients/erigon) may be at
+# erigon master, which carries a different go.mod than v3.4.2; without
+# this tidy, `go build` complains "go: updates to go.mod needed".
+# Build tags must be passed so tag-gated imports under
+# internal/erigon/commitment are visible to tidy.
+ENV GOFLAGS=-tags=cgo_erigon,cgo_erigon_commitment,gofuzz
+RUN go mod tidy
+
 RUN mkdir -p /out && go build -tags "cgo_erigon cgo_erigon_commitment gofuzz" -ldflags "-s -w" -o /out/state-actor ./
 
 # ---------- Stage 2: extract erigon binary (pinned digest) ----------
