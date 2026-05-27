@@ -65,6 +65,13 @@ RUN go mod download
 
 COPY . .
 
+# COPY . . overwrote the sed'd go.mod with the original local-path
+# version. Re-apply so the build uses /erigon-src (the v3.4.2 clone).
+# Was previously a no-op (cgo_erigon alone didn't need the import); the
+# commitment package's import of github.com/erigontech/erigon now makes
+# the replace load-bearing.
+RUN sed -i 's|/Users/random_anon/dev/clients/erigon|/erigon-src|' go.mod
+
 RUN mkdir -p /out && go build -tags "cgo_erigon cgo_erigon_commitment gofuzz" -ldflags "-s -w" -o /out/state-actor ./
 
 # ---------- Stage 2: extract erigon binary (pinned digest) ----------
