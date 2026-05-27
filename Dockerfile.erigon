@@ -72,16 +72,23 @@ COPY . .
 # the replace load-bearing.
 RUN sed -i 's|/Users/random_anon/dev/clients/erigon|/erigon-src|' go.mod
 
-# `go mod tidy` against /erigon-src so the build picks up v3.4.2's
-# transitive-dep graph. Local dev (Users/.../clients/erigon) may be at
-# erigon master, which carries a different go.mod than v3.4.2; without
-# this tidy, `go build` complains "go: updates to go.mod needed".
-# Build tags must be passed so tag-gated imports under
-# internal/erigon/commitment are visible to tidy.
+# `go mod tidy -e` against /erigon-src so the build picks up v3.4.2's
+# transitive-dep graph. Local dev (Users/.../clients/erigon) is
+# typically at erigon master with different deps. The `-e` flag is
+# needed because v3.4.2's execution/rlp test-deps reach an ambiguous
+# google.golang.org/genproto/googleapis/rpc/status import (split
+# between the legacy `genproto` module and the newer
+# `genproto/googleapis/rpc` module). That ambiguity only affects test
+# code we don't compile (we never build with cgo_erigon_commitment +
+# the rlp.test package); `-e` tells tidy to record what it can and
+# continue rather than fail outright.
 ENV GOFLAGS=-tags=cgo_erigon,cgo_erigon_commitment,gofuzz
-RUN go mod tidy
+RUN go mod tidy -e
 
-RUN mkdir -p /out && go build -tags "cgo_erigon cgo_erigon_commitment gofuzz" -ldflags "-s -w" -o /out/state-actor ./
+# `-mod=mod` allows the build to fetch any remaining transitive deps
+# tidy could not resolve; in strict readonly mode an unresolved
+# transitive would re-trigger "updates to go.mod needed".
+RUN mkdir -p /out && go build -mod=mod -tags "cgo_erigon cgo_erigon_commitment gofuzz" -ldflags "-s -w" -o /out/state-actor ./
 
 # ---------- Stage 2: extract erigon binary (pinned digest) ----------
 # We pull the erigon CLI from the upstream image (digest-pinned per
