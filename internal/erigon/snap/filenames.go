@@ -38,7 +38,7 @@ func BuildBTreeFilename(dir, version string, d Domain, r StepRange) string {
 // BuildHashMapFilename returns the absolute path of the .kvi
 // (RecSplit) accessor. Commitment-domain only.
 //
-//	dir/v1.0-commitments.0-256.kvi
+//	dir/v1.0-commitment.0-256.kvi
 func BuildHashMapFilename(dir, version string, d Domain, r StepRange) string {
 	return filepath.Join(dir, fmt.Sprintf(e3Template, version, d.Tag(), r.From, r.To, ExtKVI))
 }
