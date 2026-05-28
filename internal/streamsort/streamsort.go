@@ -99,6 +99,44 @@ func (s *Store) Put(key, value []byte) error {
 	return nil
 }
 
+// Get returns the value associated with key, or (nil, nil) if the key
+// is absent. Like Iterate, Get commits any pending write batch first
+// (so it observes Put-after-last-Iterate/Get values).
+//
+// The returned slice is COPIED out of Pebble's buffer — safe to retain
+// past subsequent calls. Returns an error if called after Close.
+//
+// Designed for the snap.Writer commitment-input path: the disk-backed
+// commitment ctx.Account / ctx.Storage callbacks do point-lookups on a
+// streamsort whose key set was built during buildAllocMap's draw loop.
+// Reads are random-access (HPH walk order != insertion order); writes
+// are append-only. Pebble handles the random reads via its in-memory
+// memtable cache + on-disk SST block cache.
+func (s *Store) Get(key []byte) ([]byte, error) {
+	if s.closed {
+		return nil, fmt.Errorf("streamsort: Get after Close")
+	}
+	// Flush pending batch so Get observes everything Put so far.
+	if err := s.batch.Commit(pebble.NoSync); err != nil {
+		return nil, fmt.Errorf("streamsort: pre-Get batch.Commit: %w", err)
+	}
+	s.batch.Reset()
+
+	val, closer, err := s.db.Get(key)
+	if err != nil {
+		if err == pebble.ErrNotFound {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("streamsort: db.Get: %w", err)
+	}
+	defer func() { _ = closer.Close() }()
+	// Pebble's Get value alias is invalidated by closer.Close — copy
+	// before returning.
+	out := make([]byte, len(val))
+	copy(out, val)
+	return out, nil
+}
+
 // Iterate flushes any pending batch and invokes yield for every entry
 // in ascending key order. Safe to call multiple times — each call
 // re-opens a fresh Pebble iter over the same data. Key/value slices

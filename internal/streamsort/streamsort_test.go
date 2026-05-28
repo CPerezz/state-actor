@@ -199,3 +199,72 @@ func TestStoreIterateRepeatable(t *testing.T) {
 		}
 	}
 }
+
+// TestStoreGetRoundTrip exercises the random-access Get path that the
+// disk-backed commitment ctx.Account / ctx.Storage callbacks use.
+//
+// Asserts:
+//   - Get returns the matching value for every Put key, byte-equal
+//   - Get on an absent key returns (nil, nil) — NOT an error
+//   - Get works both BEFORE any Iterate (i.e. flushes the pending
+//     batch internally) and AFTER (no double-flush regression)
+//   - Get returned slices are owned by the caller — modifying them
+//     doesn't corrupt Pebble's internal state
+func TestStoreGetRoundTrip(t *testing.T) {
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+
+	const N = 100
+	puts := make(map[string][]byte, N)
+	for i := 0; i < N; i++ {
+		k := []byte(fmt.Sprintf("key-%04d", i))
+		v := []byte(fmt.Sprintf("value-%04d-padding-for-larger-payload", i))
+		puts[string(k)] = v
+		if err := s.Put(k, v); err != nil {
+			t.Fatalf("Put[%d]: %v", i, err)
+		}
+	}
+
+	// Get BEFORE any Iterate — exercises the internal batch flush.
+	for k, want := range puts {
+		got, err := s.Get([]byte(k))
+		if err != nil {
+			t.Fatalf("Get(%q) before Iterate: %v", k, err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Errorf("Get(%q) = %q, want %q", k, got, want)
+		}
+	}
+
+	// Get on an absent key returns (nil, nil), NOT an error.
+	got, err := s.Get([]byte("absent-key"))
+	if err != nil {
+		t.Errorf("Get(absent): err = %v, want nil", err)
+	}
+	if got != nil {
+		t.Errorf("Get(absent): got = %q, want nil", got)
+	}
+
+	// Mutating a returned slice must NOT corrupt subsequent reads.
+	const k = "key-0042"
+	got, _ = s.Get([]byte(k))
+	for i := range got {
+		got[i] = 0xff
+	}
+	again, _ := s.Get([]byte(k))
+	if !bytes.Equal(again, puts[k]) {
+		t.Errorf("Get(%q) after caller-side mutation: got %q, want %q", k, again, puts[k])
+	}
+
+	// Get after Iterate also works (no double-flush regression).
+	if err := s.Iterate(func(_, _ []byte) error { return nil }); err != nil {
+		t.Fatalf("Iterate: %v", err)
+	}
+	got, _ = s.Get([]byte("key-0001"))
+	if !bytes.Equal(got, puts["key-0001"]) {
+		t.Errorf("Get after Iterate: got %q, want %q", got, puts["key-0001"])
+	}
+}

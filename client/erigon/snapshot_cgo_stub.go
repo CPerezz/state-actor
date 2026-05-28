@@ -7,6 +7,8 @@ import (
 	"errors"
 
 	"github.com/ethereum/go-ethereum/common"
+
+	"github.com/nerolation/state-actor/generator"
 )
 
 // writeSnapshots stub for the !cgo_erigon_commitment build. The
@@ -18,11 +20,9 @@ import (
 // runtime rather than silently emitting an inconsistent datadir.
 func writeSnapshots(
 	_ context.Context,
-	_ string,
-	_ int64,
-	_ map[common.Address]*allocAccount,
-	_ []autofillContractStorage,
-	_ bool,
+	_ generator.Config,
+	_ *FoundationalAlloc,
+	_ *generator.Stats,
 ) (common.Hash, error) {
 	return common.Hash{}, errors.New(
 		"client/erigon: writeSnapshots requires the cgo_erigon_commitment build tag " +

@@ -60,3 +60,41 @@ func WriteCommitment(
 	}
 	return w.WriteDomain(ctx, DomainCommitment, r, branchCount+1, FromStreamsort(branches))
 }
+
+// WriteCommitmentPlaceholder emits a 1-entry commitment.<from>-<to>.kv
+// containing ONLY the KeyCommitmentState record (no branch nodes).
+// Used by the multi-range orchestrator for the older ranges in the
+// tail-pyramid layout — the daemon's first-FCU SeekCommitment reads
+// only the NEWEST visible commitment file (db/state/domain.go:1290-1369
+// newest-wins GetLatest), so the placeholder's KeyCommitmentState is
+// inert; its sole purpose is to satisfy the integrity-checker
+// AddDependencyBtwnDomains(AccountsDomain, CommitmentDomain) rule
+// (state_schema.go:69) that requires a matching commitment file at
+// every accounts range boundary.
+//
+// `keyState` is typically EncodeKeyCommitmentStateValue(0, 0, nil) —
+// an empty-trie-state 18-byte header. Caller may pass a populated
+// keyState if they want all ranges to carry the same anchor (no
+// functional difference; daemon reads only the newest).
+//
+// Internally creates a fresh ephemeral streamsort.Store, puts the one
+// entry, calls WriteDomain. The store is closed before returning.
+func WriteCommitmentPlaceholder(
+	ctx context.Context,
+	w *Writer,
+	r StepRange,
+	keyState []byte,
+) error {
+	if len(keyState) == 0 {
+		return fmt.Errorf("snap.WriteCommitmentPlaceholder: keyState is empty")
+	}
+	tmpStore, err := streamsort.New("")
+	if err != nil {
+		return fmt.Errorf("snap.WriteCommitmentPlaceholder: open ephemeral streamsort: %w", err)
+	}
+	defer tmpStore.Close()
+	if err := tmpStore.Put(KeyCommitmentState, keyState); err != nil {
+		return fmt.Errorf("snap.WriteCommitmentPlaceholder: put KeyCommitmentState: %w", err)
+	}
+	return w.WriteDomain(ctx, DomainCommitment, r, 1, FromStreamsort(tmpStore))
+}

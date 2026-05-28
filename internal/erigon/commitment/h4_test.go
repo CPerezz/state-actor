@@ -76,7 +76,7 @@ func TestH4_HexPatriciaHashed_MatchesMPT(t *testing.T) {
 			Storage: s.Storage,
 		}
 	}
-	res, err := ComputeGenesisRoot(erigonAccts)
+	res, err := ComputeGenesisRootFromAccounts(erigonAccts)
 	if err != nil {
 		t.Fatalf("ComputeGenesisRoot: %v", err)
 	}

@@ -15,9 +15,9 @@ import (
 // accounts. The expected hash is keccak256(rlp("")) =
 // 0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421.
 func TestEmptyAllocReturnsEmptyTrieRoot(t *testing.T) {
-	res, err := ComputeGenesisRoot(nil)
+	res, err := ComputeGenesisRootFromAccounts(nil)
 	if err != nil {
-		t.Fatalf("ComputeGenesisRoot([]): %v", err)
+		t.Fatalf("ComputeGenesisRootFromAccounts([]): %v", err)
 	}
 	emptyTrieRoot := common.HexToHash("0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421")
 	if res.Root != emptyTrieRoot {
@@ -39,13 +39,13 @@ func TestSingleEOAProducesDeterministicRoot(t *testing.T) {
 		Nonce:   3,
 		Balance: bal,
 	}}
-	res, err := ComputeGenesisRoot(accounts)
+	res, err := ComputeGenesisRootFromAccounts(accounts)
 	if err != nil {
 		t.Fatalf("ComputeGenesisRoot: %v", err)
 	}
 
 	// Two invocations with identical input must agree.
-	res2, err := ComputeGenesisRoot(accounts)
+	res2, err := ComputeGenesisRootFromAccounts(accounts)
 	if err != nil {
 		t.Fatalf("ComputeGenesisRoot (2nd): %v", err)
 	}
@@ -81,7 +81,7 @@ func TestContractWithStorageProducesRoot(t *testing.T) {
 		Code:    code,
 		Storage: storage,
 	}}
-	res, err := ComputeGenesisRoot(accounts)
+	res, err := ComputeGenesisRootFromAccounts(accounts)
 	if err != nil {
 		t.Fatalf("ComputeGenesisRoot: %v", err)
 	}

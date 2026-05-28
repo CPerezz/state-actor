@@ -15,6 +15,8 @@ import (
 	erigoncommon "github.com/erigontech/erigon/common"
 	erigonkv "github.com/erigontech/erigon/db/kv"
 	erigoncommitment "github.com/erigontech/erigon/execution/commitment"
+
+	"github.com/nerolation/state-actor/internal/streamsort"
 )
 
 // erigonHash converts a geth-style 32-byte hash to Erigon's equivalent
@@ -25,121 +27,117 @@ func erigonHash(h gethcommon.Hash) erigoncommon.Hash {
 	return out
 }
 
-// Account is the state-actor-facing input for one alloc entry. The
-// commitment writer hashes (Nonce, Balance, StorageRoot, CodeHash) per
-// the standard Ethereum account encoding; CodeHash is keccak256(Code)
-// (or EmptyCodeHash if Code is empty), and storage is computed
-// per-account via a sub-trie over (slot, value) pairs.
+// Account is the state-actor-facing input shape for one alloc entry.
+// Used by EncodeAccountUpdate to produce the bytes the orchestrator
+// writes into the commitmentInputStore during the streaming autofill
+// loop. NOT consumed directly by ComputeGenesisRoot anymore —
+// ComputeGenesisRoot reads encoded Update bytes from the
+// commitmentInputStore via streamsort.Get.
 type Account struct {
 	Address gethcommon.Address
 	Nonce   uint64
-	Balance *uint256.Int // may be nil → 0
-	Code    []byte       // may be empty
+	Balance *uint256.Int
+	Code    []byte
 	Storage map[gethcommon.Hash]gethcommon.Hash
 }
 
 // Result carries the outputs of a successful commitment computation.
 type Result struct {
-	// Root is the commitment trie's root hash — same value Erigon's
-	// `erigon init` computes via `ComputeGenesisCommitment`.
-	Root gethcommon.Hash
-
-	// BranchNodes maps trie-prefix → branch-data bytes. Suitable for
-	// emitting to a snap.Writer commitment-domain `.kv` file.
+	Root        gethcommon.Hash
 	BranchNodes map[string][]byte
+	HPHState    []byte
+}
 
-	// HPHState is the raw output of HexPatriciaHashed.EncodeCurrentState
-	// captured after Process(). Caller passes it to
-	// EncodeKeyCommitmentStateValue (along with the txNum/blockNum it
-	// wants pinned in the record header) to produce the value bytes for
-	// the KeyCommitmentState record in commitment.0-N.kv.
-	//
-	// Typical length: ~683-815 bytes for a populated post-Process HPH.
-	HPHState []byte
+// EncodeAccountUpdate returns the Update.Encode bytes for an account
+// (nonce + balance + codeHash). Callers Put this into the
+// commitmentInputStore keyed by plain 20-byte address. ctx.Account
+// later Decodes it back into an erigoncommitment.Update.
+//
+// Splits cleanly from the snapshot SerialiseV3 encoding (Update.Encode
+// is HPH's internal wire format; SerialiseV3 is Erigon's state-domain
+// .kv value format — different shapes).
+func EncodeAccountUpdate(nonce uint64, balance *uint256.Int, code []byte) []byte {
+	upd := erigoncommitment.Update{
+		Flags: erigoncommitment.NonceUpdate | erigoncommitment.BalanceUpdate,
+		Nonce: nonce,
+	}
+	if balance != nil {
+		upd.Balance = *balance
+	}
+	if len(code) > 0 {
+		h := crypto.Keccak256Hash(code)
+		upd.CodeHash = erigonHash(h)
+		upd.Flags |= erigoncommitment.CodeUpdate
+	} else {
+		upd.CodeHash = erigonHash(emptyCodeHash)
+	}
+	var numBuf [binary.MaxVarintLen64]byte
+	return upd.Encode(nil, numBuf[:])
+}
+
+// EncodeStorageUpdate returns the Update.Encode bytes for one storage
+// slot value. The value is LEFT-aligned into Update.Storage[0:len]
+// (matching Erigon's TouchStorage invariant at commitment.go:1746-1753).
+//
+// Callers Put this into commitmentInputStore keyed by addr(20)||slot(32).
+// An all-zero value should NOT be encoded — caller filters out.
+func EncodeStorageUpdate(value []byte) []byte {
+	trimmed := trimLeadingZeros(value)
+	upd := erigoncommitment.Update{
+		Flags:      erigoncommitment.StorageUpdate,
+		StorageLen: int8(len(trimmed)),
+	}
+	copy(upd.Storage[:], trimmed)
+	var numBuf [binary.MaxVarintLen64]byte
+	return upd.Encode(nil, numBuf[:])
 }
 
 // ComputeGenesisRoot runs Erigon's HexPatriciaHashed against the
-// supplied alloc and returns (root hash, branch nodes).
+// commitmentInputStore's encoded Update payloads.
 //
-// The alloc is treated as a cold-start commitment: no prior branches,
-// no prior history. Every account in `accounts` is touched once, with
-// per-account storage slots touched as `(addr[20] || slot[32])`
-// composite keys per Erigon's E3 layout
-// (`execution/state/rw_v3.go:965`).
+// The caller is responsible for having populated commitmentInputStore
+// during the buildAllocMap/writeSnapshots streaming loop: every alloc
+// account writes one entry keyed by 20-byte addr; every non-zero
+// storage slot writes one entry keyed by addr||slot. Encoding is done
+// via EncodeAccountUpdate / EncodeStorageUpdate above.
 //
-// Empty input returns the canonical empty-trie root.
-func ComputeGenesisRoot(accounts []Account) (Result, error) {
-	ctx := newGenesisCtx()
-	plainKeys := make([][]byte, 0, len(accounts))
-	updates := make([]erigoncommitment.Update, 0, len(accounts))
-
-	for _, a := range accounts {
-		// 1. Build the account-level Update.
-		acctUpd := erigoncommitment.Update{
-			Flags: erigoncommitment.NonceUpdate | erigoncommitment.BalanceUpdate,
-			Nonce: a.Nonce,
-		}
-		if a.Balance != nil {
-			acctUpd.Balance = *a.Balance
-		}
-		if len(a.Code) > 0 {
-			h := crypto.Keccak256Hash(a.Code)
-			acctUpd.CodeHash = erigonHash(h)
-			acctUpd.Flags |= erigoncommitment.CodeUpdate
-		} else {
-			acctUpd.CodeHash = erigonHash(emptyCodeHash)
-		}
-		addrKey := append([]byte(nil), a.Address[:]...)
-		plainKeys = append(plainKeys, addrKey)
-		updates = append(updates, acctUpd)
-		ctx.state[string(addrKey)] = acctUpd.Encode(nil, ctx.numBuf[:])
-
-		// 2. Storage slots (one Touch per slot). Storage bytes must be
-		// LEFT-aligned at Storage[0:StorageLen] — matching Erigon's
-		// TouchStorage invariant at commitment.go:1746-1753 (the trie
-		// reader at hex_patricia_hashed.go:946,1019,1033 unpacks the
-		// value as Storage[0:StorageLen]).
-		//
-		// All-zero values are skipped: they're equivalent to "no entry"
-		// in Erigon's storage domain, same as in geth's MPT (no leaf
-		// for a never-set slot).
-		for slot, value := range a.Storage {
-			trimmed := trimLeadingZeros(value[:])
-			if len(trimmed) == 0 {
-				continue
-			}
-			storKey := make([]byte, 0, 52)
-			storKey = append(storKey, a.Address[:]...)
-			storKey = append(storKey, slot[:]...)
-
-			storUpd := erigoncommitment.Update{
-				Flags:      erigoncommitment.StorageUpdate,
-				StorageLen: int8(len(trimmed)),
-			}
-			copy(storUpd.Storage[:], trimmed)
-			plainKeys = append(plainKeys, storKey)
-			updates = append(updates, storUpd)
-			ctx.state[string(storKey)] = storUpd.Encode(nil, ctx.numBuf[:])
-		}
+// Memory profile: the in-memory `state map` of the prior implementation
+// is GONE — Account/Storage lookups during the HPH walk hit Pebble via
+// streamsort.Get. At 25 GB bench scale that's ~344 M Get calls; each
+// is ~10 µs in the warm-cache case, ~100 µs cold — order of an hour
+// of CPU time. The trade-off pays back the ~50 GB heap the old in-memory
+// map would have needed at full bench scale.
+//
+// `ctx.branches` stays in memory: bounded by trie depth × entry count
+// (~few hundred MB max even at 25 GB scale, since branches are O(N) not
+// O(StorageSlots)).
+func ComputeGenesisRoot(commitmentInputStore *streamsort.Store) (Result, error) {
+	ctx := &genesisCtx{
+		commitmentInputStore: commitmentInputStore,
+		branches:             make(map[string][]byte),
 	}
 
-	// 3. Build the Updates tree using TouchPlainKeyDirect, which lets us
-	// pass a pre-built *Update without going through TouchAccount /
-	// TouchStorage / TouchCode (those would re-derive fields we've
-	// already computed). The closure-based TouchPlainKey path used in
-	// Erigon's test code reaches the unexported KeyUpdate fields,
-	// which aren't accessible from outside the commitment package.
 	upds := erigoncommitment.NewUpdates(
 		erigoncommitment.ModeDirect,
 		ctx.tmpDir,
 		erigoncommitment.KeyToHexNibbleHash,
 	)
-	for i, key := range plainKeys {
-		upds.TouchPlainKeyDirect(string(key), &updates[i])
+
+	// Walker: iterate every entry in commitmentInputStore (which holds
+	// addresses + addr||slot composite keys for the full alloc). Per
+	// upstream commitment.go:1666-1681, ModeDirect's TouchPlainKeyDirect
+	// discards the *Update arg — only the (hashedKey, plainKey) pair is
+	// recorded in the etl.Collector. So we pass a placeholder; HPH will
+	// re-fetch via ctx.Account/Storage during Process.
+	var placeholder erigoncommitment.Update
+	if err := commitmentInputStore.Iterate(func(plainKey, _ []byte) error {
+		upds.TouchPlainKeyDirect(string(plainKey), &placeholder)
+		return nil
+	}); err != nil {
+		return Result{}, fmt.Errorf("commitment.ComputeGenesisRoot: iterate commitmentInputStore: %w", err)
 	}
 
-	// 4. Compute root via HexPatriciaHashed.
-	hph := erigoncommitment.NewHexPatriciaHashed(20 /* accountKeyLen — Ethereum address */, ctx)
+	hph := erigoncommitment.NewHexPatriciaHashed(20 /* accountKeyLen */, ctx)
 	rootBytes, err := hph.Process(context.Background(), upds, "state-actor-genesis", nil, erigoncommitment.WarmupConfig{})
 	if err != nil {
 		return Result{}, fmt.Errorf("commitment.ComputeGenesisRoot: Process: %w", err)
@@ -150,11 +148,6 @@ func ComputeGenesisRoot(accounts []Account) (Result, error) {
 	var root gethcommon.Hash
 	copy(root[:], rootBytes)
 
-	// 5. Capture the HPH state for the KeyCommitmentState record we'll
-	// write into commitment.0-N.kv. EncodeCurrentState(nil) is safe to
-	// call post-Process and serializes the trie root cell + Depths +
-	// TouchMap + AfterMap + branchBefore packing — exactly what the
-	// daemon's first FCU needs to anchor commitment continuation.
 	hphState, err := hph.EncodeCurrentState(nil)
 	if err != nil {
 		return Result{}, fmt.Errorf("commitment.ComputeGenesisRoot: EncodeCurrentState: %w", err)
@@ -163,21 +156,52 @@ func ComputeGenesisRoot(accounts []Account) (Result, error) {
 	return Result{Root: root, BranchNodes: ctx.branches, HPHState: hphState}, nil
 }
 
-// genesisCtx implements erigoncommitment.PatriciaContext for a
-// cold-start commitment over an in-memory alloc.
-type genesisCtx struct {
-	state    map[string][]byte // plainKey → erigoncommitment.Update.Encode bytes
-	branches map[string][]byte // trie prefix → branch data
-	numBuf   [binary.MaxVarintLen64]byte
-	tmpDir   string
+// ComputeGenesisRootFromAccounts is a backward-compat wrapper for
+// small in-memory inputs (tests + the H4 invariance proof). Materialises
+// the slice into a temp streamsort + calls the streaming
+// ComputeGenesisRoot. Not for production at bench scale.
+func ComputeGenesisRootFromAccounts(accounts []Account) (Result, error) {
+	store, err := streamsort.New("")
+	if err != nil {
+		return Result{}, fmt.Errorf("ComputeGenesisRootFromAccounts: streamsort.New: %w", err)
+	}
+	defer store.Close()
+
+	for _, a := range accounts {
+		// Account entry keyed by 20-byte address.
+		var balance *uint256.Int
+		if a.Balance != nil {
+			balance = a.Balance
+		}
+		acctBytes := EncodeAccountUpdate(a.Nonce, balance, a.Code)
+		if err := store.Put(a.Address[:], acctBytes); err != nil {
+			return Result{}, fmt.Errorf("ComputeGenesisRootFromAccounts: put account %s: %w", a.Address.Hex(), err)
+		}
+		// Storage entries keyed by addr||slot. Skip all-zero values.
+		for slot, val := range a.Storage {
+			trimmed := trimLeadingZeros(val[:])
+			if len(trimmed) == 0 {
+				continue
+			}
+			composite := make([]byte, 0, 52)
+			composite = append(composite, a.Address[:]...)
+			composite = append(composite, slot[:]...)
+			storBytes := EncodeStorageUpdate(val[:])
+			if err := store.Put(composite, storBytes); err != nil {
+				return Result{}, fmt.Errorf("ComputeGenesisRootFromAccounts: put storage %s/%s: %w", a.Address.Hex(), slot.Hex(), err)
+			}
+		}
+	}
+	return ComputeGenesisRoot(store)
 }
 
-func newGenesisCtx() *genesisCtx {
-	return &genesisCtx{
-		state:    make(map[string][]byte),
-		branches: make(map[string][]byte),
-		tmpDir:   "",
-	}
+// genesisCtx implements erigoncommitment.PatriciaContext over a
+// streamsort-backed commitmentInputStore (random-access via Pebble).
+// `branches` stays in memory.
+type genesisCtx struct {
+	commitmentInputStore *streamsort.Store
+	branches             map[string][]byte
+	tmpDir               string
 }
 
 func (c *genesisCtx) Branch(prefix []byte) ([]byte, erigonkv.Step, error) {
@@ -193,8 +217,11 @@ func (c *genesisCtx) PutBranch(prefix []byte, data []byte, prevData []byte) erro
 }
 
 func (c *genesisCtx) Account(plainKey []byte) (*erigoncommitment.Update, error) {
-	enc, ok := c.state[string(plainKey)]
-	if !ok {
+	enc, err := c.commitmentInputStore.Get(plainKey)
+	if err != nil {
+		return nil, fmt.Errorf("commitment.genesisCtx.Account: Get(%x): %w", plainKey, err)
+	}
+	if enc == nil {
 		u := new(erigoncommitment.Update)
 		u.Flags = erigoncommitment.DeleteUpdate
 		return u, nil
@@ -214,8 +241,11 @@ func (c *genesisCtx) Account(plainKey []byte) (*erigoncommitment.Update, error) 
 }
 
 func (c *genesisCtx) Storage(plainKey []byte) (*erigoncommitment.Update, error) {
-	enc, ok := c.state[string(plainKey)]
-	if !ok {
+	enc, err := c.commitmentInputStore.Get(plainKey)
+	if err != nil {
+		return nil, fmt.Errorf("commitment.genesisCtx.Storage: Get(%x): %w", plainKey, err)
+	}
+	if enc == nil {
 		u := new(erigoncommitment.Update)
 		u.Flags = erigoncommitment.DeleteUpdate
 		return u, nil

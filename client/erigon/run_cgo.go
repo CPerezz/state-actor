@@ -16,20 +16,16 @@ package erigon
 import (
 	"context"
 	"fmt"
-	"math/big"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
-	mrand "math/rand"
 
 	"github.com/nerolation/state-actor/generator"
-	"github.com/nerolation/state-actor/internal/entitygen"
 )
 
 // erigonBinary is the path to the erigon CLI inside the Docker image
@@ -58,14 +54,13 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 		return nil, fmt.Errorf("client/erigon: mkdir dbPath %q: %w", cfg.DBPath, err)
 	}
 
-	// 1. Build the in-memory alloc from PreAlloc + AutoFill +
-	// GenesisAccounts. autofillStor carries per-autofill-contract
-	// storage out-of-band; the streaming snapshot orchestrator
-	// (writeSnapshots, snapshot_cgo.go) folds the alloc + autofillStor
-	// into the per-domain streamsort.Stores. NONE of this is written
-	// to genesis.json — every state-actor-generated entry ends up in
-	// the snapshot tier only.
-	alloc, autofillStor, stats, err := buildAllocMap(cfg)
+	// 1. Materialise the spec foundational alloc (PreAlloc +
+	// GenesisAccounts). The AutoFill draw loop runs inside
+	// writeSnapshots (snapshot_cgo.go) where it streams directly into
+	// the snapshot streamsorts — never aggregating 30 M+ EOAs in
+	// memory. NONE of this is written to genesis.json — every
+	// state-actor-generated entry ends up in the snapshot tier only.
+	foundational, stats, err := buildAllocMap(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("client/erigon: build alloc: %w", err)
 	}
@@ -164,7 +159,7 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 	// (system contracts only — bloat is unreachable, but useful for
 	// isolating snapshot bugs from rest-of-pipeline bugs during dev).
 	if opts.WriteSnapshots {
-		root, err := writeSnapshots(ctx, cfg.DBPath, cfg.Seed, alloc, autofillStor, cfg.Verbose)
+		root, err := writeSnapshots(ctx, cfg, foundational, stats)
 		if err != nil {
 			return nil, fmt.Errorf("client/erigon: writeSnapshots: %w", err)
 		}
@@ -189,65 +184,47 @@ func chmodRecursive(root string, mode os.FileMode) error {
 	})
 }
 
-// autofillContractStorage carries per-autofill-contract storage slots
-// out-of-band so they can be fed into the streaming snapshot
-// orchestrator without inflating the genesis.json that `erigon init`
-// reads. The orchestrator (plan PART 5) will consume these alongside
-// cfg.PreAlloc[i].Storage iters into a single storage streamsort.Store.
+// FoundationalAlloc holds the spec-foundational entries
+// (cfg.PreAlloc + cfg.GenesisAccounts) that buildAllocMap materializes
+// in memory. Bounded by `|cfg.PreAlloc| + |cfg.GenesisAccounts|` —
+// a few thousand entries at any `--target-size`. Retained for two
+// purposes:
 //
-// Why this exists: erigon init writes the WHOLE genesis blob as one
-// mdbx_put into kv.ConfigTable["genesis"]; the per-value limit at
-// 16 KB pages is ~2 GB. Without this split, 88k autofill contracts ×
-// ~615 storage slots × ~150 JSON bytes/slot ≈ 8 GB of storage entries
-// were going into the JSON, pushing the blob past the MDBX limit and
-// triggering MDBX_BAD_VALSIZE during erigon init's genesis write.
-type autofillContractStorage struct {
-	addr  common.Address
-	slots []entitygen.StorageSlot
+//  1. genesisAddrs dedup set for the autofill RNG redraw loop in
+//     writeSnapshots (must match geth's byte-for-byte). geth dedups
+//     autofill draws against the foundational set only, so this set
+//     stays small.
+//  2. Range-0 (deepest) snapshot routing: the streaming orchestrator
+//     writes every Spec entry into rangeIdx=0 of the snapshot
+//     streamsorts before starting the autofill loop.
+type FoundationalAlloc struct {
+	Spec map[common.Address]*allocAccount
 }
 
-// buildAllocMap materializes cfg.PreAlloc + cfg.GenesisAccounts +
-// cfg.AutoFill into a single in-memory alloc map. ALL entries — spec
-// foundational and autofill alike — flow ONLY into the snapshot
-// streamsorts + HPH commitment walk. NONE of them are written to
-// genesis.json (writeGenesisJSON receives nil, producing an empty
-// alloc; see runImpl). The only thing erigon init writes to MDBX is
-// the per-fork system contracts that Erigon's WriteGenesisBlock
-// auto-adds based on ChainConfig — and the chain-config tables
-// themselves. The block-0 header.stateRoot is patched by
-// patchGenesisHeaderStateRoot to the HPH-over-the-whole-alloc value.
+// buildAllocMap materializes cfg.PreAlloc + cfg.GenesisAccounts into
+// the spec map. AutoFill processing (the 30 M+ EOA / 512 K contract
+// draw loop) is NOT done here — it streams directly into the
+// snapshot streamsorts from writeSnapshots (snapshot_cgo.go) to keep
+// memory bounded. See the streaming-writer plan at
+// /Users/random_anon/.claude/plans/so-what-we-have-enumerated-lantern.md.
 //
-// Why nothing goes to genesis.json: erigon init serialises the whole
-// Genesis struct to a single mdbx_put into kv.ConfigTable["genesis"].
-// MDBX's per-value limit at 16 KB pages is ~2 GB. At
-// --target-size=25GB the autofill plan draws ~30 M EOAs + 512 K
-// contracts (~8 GB JSON), busting the limit. More importantly, the
-// project goal is to put ALL state into the snapshot tier (the cold
-// path that production Erigon serves from) — not the hot MDBX tier
-// that erigon init populates. So we keep MDBX empty of state-actor
-// data and let the snapshot writer carry the whole load.
+// Returns:
+//   - foundational — spec map (small; retained for genesisAddrs +
+//                    range-0 snapshot writes)
+//   - stats        — counts + byte tallies for the spec portion only;
+//                    writeSnapshots adds autofill numbers
 //
-// autofillStor carries per-autofill-contract storage out-of-band so
-// the streaming orchestrator can drain it into the storage streamsort
-// without inflating the alloc map's storage maps.
-//
-// Returns three results:
-//   - alloc        — full alloc (foundational + autofill); consumed by
-//                    writeSnapshots and runCommitmentPhase only
-//   - autofillStor — per-autofill-contract storage slots
-//   - stats        — counts + byte tallies
-//
-// The state root reported by erigon init reflects only the per-fork
-// system contracts (empty alloc otherwise); patchGenesisHeaderStateRoot
-// overwrites it with the HPH-over-EVERYTHING root once writeSnapshots
-// + commitment complete.
-func buildAllocMap(cfg generator.Config) (map[common.Address]*allocAccount, []autofillContractStorage, *generator.Stats, error) {
-	alloc := make(map[common.Address]*allocAccount)
-	var autofillStor []autofillContractStorage
+// State-actor writes ZERO state-actor data to genesis.json
+// (writeGenesisJSON receives nil — see runImpl). The only thing
+// erigon init writes to MDBX is the per-fork system contracts that
+// Erigon's WriteGenesisBlock auto-adds, plus chain-config tables.
+// patchGenesisHeaderStateRoot overwrites block 0's stateRoot with
+// the HPH-over-(foundational+autofill) value once writeSnapshots
+// completes.
+func buildAllocMap(cfg generator.Config) (*FoundationalAlloc, *generator.Stats, error) {
+	foundational := &FoundationalAlloc{Spec: make(map[common.Address]*allocAccount)}
 	stats := &generator.Stats{}
 
-	// 1. cfg.GenesisAccounts / GenesisCode / GenesisStorage —
-	// already-materialized accounts (post-cfg.Validate()).
 	for addr, sa := range cfg.GenesisAccounts {
 		entry := &allocAccount{
 			Nonce: sa.Nonce,
@@ -264,7 +241,7 @@ func buildAllocMap(cfg generator.Config) (map[common.Address]*allocAccount, []au
 			stats.StorageSlotsCreated += len(stor)
 			stats.StorageBytes += uint64(len(stor)) * 64
 		}
-		alloc[addr] = entry
+		foundational.Spec[addr] = entry
 		if len(entry.Code) > 0 {
 			stats.ContractsCreated++
 		} else {
@@ -272,78 +249,7 @@ func buildAllocMap(cfg generator.Config) (map[common.Address]*allocAccount, []au
 		}
 	}
 
-	// 2. AutoFill EOAs + contracts. Drained via entitygen so the RNG
-	// sequence matches state-actor's cross-client determinism contract.
-	//
-	// The dedup-redraw loop must match client/geth/state_writer.go:116-148
-	// byte-for-byte: geth burns RNG draws on collision until it finds a
-	// non-colliding address, with no nil-checks. Any nil-check break here
-	// would skip the assignment but still advance the RNG, desynchronizing
-	// from geth's draw sequence and producing a different alloc + a
-	// different cross-client genesis state-root.
-	//
-	// AutoFill.Draw{EOA,Contract} return non-nil for all valid plans (a
-	// nil return would crash geth at the same point — we mirror that
-	// contract rather than guard against it).
-	genesisAddrs := make(map[common.Address]struct{}, len(alloc))
-	for addr := range alloc {
-		genesisAddrs[addr] = struct{}{}
-	}
-	if cfg.AutoFill != nil {
-		rng := mrand.New(mrand.NewSource(cfg.Seed))
-		for i := 0; i < cfg.AutoFill.NumEOAs; i++ {
-			acc := cfg.AutoFill.DrawEOA(rng)
-			for _, dup := genesisAddrs[acc.Address]; dup; {
-				acc = cfg.AutoFill.DrawEOA(rng)
-				_, dup = genesisAddrs[acc.Address]
-			}
-			entry := &allocAccount{Nonce: acc.StateAccount.Nonce}
-			if acc.StateAccount.Balance != nil {
-				entry.Balance = acc.StateAccount.Balance.ToBig()
-			}
-			alloc[acc.Address] = entry
-			stats.AccountsCreated++
-		}
-		for i := 0; i < cfg.AutoFill.NumContracts; i++ {
-			c := cfg.AutoFill.DrawContract(rng)
-			for _, dup := genesisAddrs[c.Address]; dup; {
-				c = cfg.AutoFill.DrawContract(rng)
-				_, dup = genesisAddrs[c.Address]
-			}
-			entry := &allocAccount{Nonce: c.StateAccount.Nonce}
-			if c.StateAccount.Balance != nil {
-				entry.Balance = c.StateAccount.Balance.ToBig()
-			}
-			if len(c.Code) > 0 {
-				entry.Code = c.Code
-				stats.CodeBytes += uint64(len(c.Code))
-			}
-			if len(c.Storage) > 0 {
-				// Per-contract storage carried out-of-band so the
-				// streaming orchestrator can drain it directly into the
-				// storage streamsort without inflating the alloc entry's
-				// Storage map. The slice is reused as-is (no copy).
-				autofillStor = append(autofillStor, autofillContractStorage{
-					addr:  c.Address,
-					slots: c.Storage,
-				})
-				stats.StorageSlotsCreated += len(c.Storage)
-				stats.StorageBytes += uint64(len(c.Storage)) * 64
-			}
-			alloc[c.Address] = entry
-			stats.ContractsCreated++
-		}
-	}
-
 	stats.TotalBytes = stats.StorageBytes + stats.CodeBytes
-	return alloc, autofillStor, stats, nil
+	return foundational, stats, nil
 }
 
-// init-time sanity check: silence imports of types we may temporarily not
-// reference if the implementation evolves. Removed once the orchestrator
-// matures past this v1 scaffolding.
-var (
-	_ = sort.Slice
-	_ = big.NewInt
-	_ = entitygen.Account{}
-)
