@@ -1,18 +1,11 @@
 //go:build cgo_erigon
 
-// runImpl writes a bootable Erigon v3 chaindata directory in two phases:
-//
-//  1. Build a types.Genesis-compatible genesis.json (cfg.PreAlloc +
-//     cfg.AutoFill EOAs + contracts + code; storage is held back) and
-//     exec the pinned `erigon init` CLI, which writes accounts, code,
-//     headers, chain config, sync stages, and DBSchemaVersion into
-//     MDBX using Erigon's canonical encoding.
-//  2. Open MDBX directly via internal/erigon/mdbx and stream the
-//     PreAlloc + autofill-contract storage slots into TblStorageVals +
-//     the three storage history tables. Storage is split out of
-//     genesis.json because erigon init serializes the whole Genesis
-//     as a single mdbx_put, and MDBX's per-value limit (~2 GB at
-//     16 KB pages) is exceeded by autofill storage at bench scale.
+// runImpl writes a bootable Erigon v3 chaindata directory. Today, it
+// only drives `erigon init` against a synthetic genesis.json: the bloat
+// data path (account / storage / code into snapshot files) is being
+// rebuilt under the snapshot-tier refactor described in
+// `/Users/random_anon/.claude/plans/so-what-we-have-enumerated-lantern.md`.
+// The streaming snapshot orchestrator will land in PART 5 of that plan.
 //
 // state-actor's main module does NOT import github.com/erigontech/erigon;
 // erigon is invoked as a CLI from the Docker image built by
@@ -37,7 +30,6 @@ import (
 
 	"github.com/nerolation/state-actor/generator"
 	"github.com/nerolation/state-actor/internal/entitygen"
-	erigonmdbx "github.com/nerolation/state-actor/internal/erigon/mdbx"
 )
 
 // erigonBinary is the path to the erigon CLI inside the Docker image
@@ -67,8 +59,9 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 	}
 
 	// 1. Build the alloc map from PreAlloc + AutoFill + GenesisAccounts.
-	// autofillStor carries per-autofill-contract storage out-of-band
-	// (deferred to Phase B direct-MDBX so it doesn't bloat genesis.json).
+	// autofillStor carries per-autofill-contract storage out-of-band; the
+	// streaming snapshot orchestrator (writeSnapshots, snapshot_cgo.go)
+	// folds it back into the per-domain streamsort.Stores.
 	alloc, autofillStor, stats, err := buildAllocMap(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("client/erigon: build alloc: %w", err)
@@ -113,9 +106,6 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 			stats.StateRoot = root
 		}
 	}
-	// If the regex didn't match, surface that as a warning via verbose
-	// logging but don't fail — the caller can still verify the datadir
-	// via `eth_getBalance` post-boot.
 
 	// 5. Write a chainspec.json sidecar (informational — Erigon reads
 	// the chain config from MDBX's ConfigTable after init). Some
@@ -131,8 +121,9 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 	// 5b. Write SyncStage progress markers so erigon's daemon-boot
 	// AllSegmentsDownloadComplete gate clears (>0 OtterSync). Without
 	// this, engine_forkchoiceUpdated returns SYNCING forever and no
-	// blocks are produced. See sync_stages_cgo.go for the mechanism +
-	// source citations from Erigon's stagedsync.
+	// blocks are produced. See sync_stages_cgo.go for the mechanism.
+	// TODO(plan PART 7): once snapshot-tier presence alone satisfies
+	// the gate, this call may become unnecessary.
 	if err := writeSyncStageMarkers(cfg.DBPath); err != nil {
 		return nil, fmt.Errorf("client/erigon: writeSyncStageMarkers: %w", err)
 	}
@@ -143,104 +134,33 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 	// non-root user (uid 1001 "erigon") and would fail with "permission
 	// denied" trying to read /data/nodekey / chaindata/. A blanket chmod
 	// is safe in this test-only flow because the datadir lives in a bind
-	// mount the user controls. See plan § Earlier Bench-Iteration Unlock
-	// (bench-host iteration finding).
+	// mount the user controls.
 	if err := chmodRecursive(cfg.DBPath, 0o777); err != nil {
 		// Non-fatal: surface a warning via the error path but don't
 		// fail the run.
 		_ = err
 	}
 
-	// 7. Direct MDBX write of state-actor's storage (Plan Phase B).
+	// 7. Streaming snapshot orchestrator.
 	//
-	// Two storage sources, both routed through internal/erigon/mdbx.WriteAlloc:
+	// Writes accounts/storage/code/commitment .kv snapshot files + the
+	// FS preconditions (salt-state.txt, erigondb.toml), computes the
+	// HPH commitment root over the post-bloat state, and patches
+	// block 0's header.stateRoot so the daemon's first FCU validates.
 	//
-	//   (a) cfg.PreAlloc[i].Storage — iter.Seq2[Hash, Hash] from the spec
-	//       translator. Storage stays on the iter (per generator/config.go:134
-	//       "Storage is NOT drained"). Other clients drain via runPhase0;
-	//       erigon does it here.
-	//   (b) autofillStor — the side-data slice from buildAllocMap. Holds
-	//       per-autofill-contract []entitygen.StorageSlot deferred FROM the
-	//       JSON alloc map. Required because erigon init writes the WHOLE
-	//       genesis blob as ONE mdbx_put (kv.ConfigTable["genesis"]) — at
-	//       16 KB pages MDBX's per-value limit is ~2 GB, so the bench's
-	//       88k autofill contracts × ~615 slots × ~150 JSON bytes blow
-	//       past it with MDBX_BAD_VALSIZE. Routing the storage through
-	//       MDBX directly keeps genesis.json compact (header+code only).
-	//
-	// Erigon's daemon on first FCU sees the now-complete storage and
-	// rebuilds commitment over it — yielding the correct MPT-equivalent
-	// state root (H4-proven equivalence: HexPatriciaHashed root ==
-	// geth's MPT root for identical alloc).
-	if len(cfg.PreAlloc) > 0 || len(autofillStor) > 0 {
-		storageMap := make(map[[20]byte]map[[32]byte][32]byte)
-		// (a) PreAlloc — iter.Seq2 streaming source
-		for i := range cfg.PreAlloc {
-			pe := &cfg.PreAlloc[i]
-			if pe.Storage == nil {
-				continue
-			}
-			var addr [20]byte
-			copy(addr[:], pe.Address[:])
-			if _, ok := storageMap[addr]; !ok {
-				storageMap[addr] = make(map[[32]byte][32]byte)
-			}
-			for k, v := range pe.Storage {
-				var sk, sv [32]byte
-				copy(sk[:], k[:])
-				copy(sv[:], v[:])
-				storageMap[addr][sk] = sv
-			}
+	// Skipped when opts.WriteSnapshots == false (default during landing).
+	// In that mode stats.StateRoot stays whatever erigon init reported
+	// (system contracts only — bloat is unreachable, but useful for
+	// isolating snapshot bugs from rest-of-pipeline bugs during dev).
+	if opts.WriteSnapshots {
+		root, err := writeSnapshots(ctx, cfg.DBPath, cfg.Seed, alloc, autofillStor, cfg.Verbose)
+		if err != nil {
+			return nil, fmt.Errorf("client/erigon: writeSnapshots: %w", err)
 		}
-		// (b) AutoFill contracts — side-data slice of []StorageSlot
-		for _, ent := range autofillStor {
-			var addr [20]byte
-			copy(addr[:], ent.addr[:])
-			if _, ok := storageMap[addr]; !ok {
-				storageMap[addr] = make(map[[32]byte][32]byte, len(ent.slots))
-			}
-			for _, s := range ent.slots {
-				var sk, sv [32]byte
-				copy(sk[:], s.Key[:])
-				copy(sv[:], s.Value[:])
-				storageMap[addr][sk] = sv
-			}
+		if err := patchGenesisHeaderStateRoot(cfg.DBPath, root); err != nil {
+			return nil, fmt.Errorf("client/erigon: patchGenesisHeaderStateRoot: %w", err)
 		}
-		if len(storageMap) > 0 {
-			env, err := erigonmdbx.OpenForWrite(cfg.DBPath)
-			if err != nil {
-				return nil, fmt.Errorf("client/erigon: open MDBX for storage write: %w", err)
-			}
-			written, err := erigonmdbx.WriteAlloc(env, storageMap)
-			if err != nil {
-				env.Close()
-				return nil, fmt.Errorf("client/erigon: WriteAlloc: %w", err)
-			}
-			if cfg.Verbose {
-				fmt.Printf("client/erigon: wrote %d storage slots to MDBX directly (PreAlloc + autofill-contract); genesis.json kept header+code only for autofill contracts\n", written)
-			}
-			// NOTE: stats.StorageSlotsCreated + StorageBytes already
-			// incremented in buildAllocMap; do NOT double-count here.
-			_ = written
-
-			// Phase C+D: compute HPH commitment over the full alloc +
-			// post-Phase-B storage, write branch nodes to
-			// TblCommitmentVals, and patch block 0's header.stateRoot.
-			// Without the cgo_erigon_commitment build tag this is a no-op
-			// stub (in commitment_cgo_stub.go) — the daemon recomputes on
-			// first FCU and the init-time stats.StateRoot stays.
-			hphRoot, computed, err := runCommitmentPhase(env, alloc, storageMap)
-			env.Close()
-			if err != nil {
-				return nil, fmt.Errorf("client/erigon: runCommitmentPhase: %w", err)
-			}
-			if computed {
-				stats.StateRoot = hphRoot
-				if cfg.Verbose {
-					fmt.Printf("client/erigon: wrote commitment branches + patched block 0 header; HPH root=%s\n", hphRoot.Hex())
-				}
-			}
-		}
+		stats.StateRoot = root
 	}
 
 	stats.GenerationTime = time.Since(startedAt)
@@ -259,10 +179,10 @@ func chmodRecursive(root string, mode os.FileMode) error {
 }
 
 // autofillContractStorage carries per-autofill-contract storage slots
-// out-of-band so they can be written directly to MDBX (Phase B) instead
-// of inflating the genesis.json. The receiver in runImpl drains these
-// alongside cfg.PreAlloc[i].Storage iters into a single storageMap that
-// internal/erigon/mdbx.WriteAlloc consumes.
+// out-of-band so they can be fed into the streaming snapshot
+// orchestrator without inflating the genesis.json that `erigon init`
+// reads. The orchestrator (plan PART 5) will consume these alongside
+// cfg.PreAlloc[i].Storage iters into a single storage streamsort.Store.
 //
 // Why this exists: erigon init writes the WHOLE genesis blob as one
 // mdbx_put into kv.ConfigTable["genesis"]; the per-value limit at
@@ -282,8 +202,10 @@ type autofillContractStorage struct {
 //
 // Returns three results:
 //   - alloc map (consumed by writeGenesisJSON — header + code only for
-//     autofill contracts; storage is deferred to direct-MDBX)
-//   - autofillStor side-data (consumed by runImpl's Phase B writer)
+//     autofill contracts; storage is deferred to the streaming snapshot
+//     orchestrator)
+//   - autofillStor side-data (consumed by the streaming orchestrator in
+//     plan PART 5)
 //   - stats (populated as we go; counts + byte tallies)
 //
 // The state root is filled in by runImpl after parsing erigon init's
@@ -366,10 +288,10 @@ func buildAllocMap(cfg generator.Config) (map[common.Address]*allocAccount, []au
 				stats.CodeBytes += uint64(len(c.Code))
 			}
 			if len(c.Storage) > 0 {
-				// Defer storage to Phase B direct-MDBX (see
-				// autofillContractStorage doc). Keep entry.Storage nil so
-				// writeGenesisJSON emits only header+code for this contract.
-				// The slice is reused as-is (no copy).
+				// Defer storage to the streaming orchestrator (plan PART 5).
+				// Keep entry.Storage nil so writeGenesisJSON emits only
+				// header+code for this contract. The slice is reused as-is
+				// (no copy).
 				autofillStor = append(autofillStor, autofillContractStorage{
 					addr:  c.Address,
 					slots: c.Storage,

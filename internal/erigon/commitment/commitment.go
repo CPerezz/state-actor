@@ -47,6 +47,15 @@ type Result struct {
 	// BranchNodes maps trie-prefix → branch-data bytes. Suitable for
 	// emitting to a snap.Writer commitment-domain `.kv` file.
 	BranchNodes map[string][]byte
+
+	// HPHState is the raw output of HexPatriciaHashed.EncodeCurrentState
+	// captured after Process(). Caller passes it to
+	// EncodeKeyCommitmentStateValue (along with the txNum/blockNum it
+	// wants pinned in the record header) to produce the value bytes for
+	// the KeyCommitmentState record in commitment.0-N.kv.
+	//
+	// Typical length: ~683-815 bytes for a populated post-Process HPH.
+	HPHState []byte
 }
 
 // ComputeGenesisRoot runs Erigon's HexPatriciaHashed against the
@@ -141,7 +150,17 @@ func ComputeGenesisRoot(accounts []Account) (Result, error) {
 	var root gethcommon.Hash
 	copy(root[:], rootBytes)
 
-	return Result{Root: root, BranchNodes: ctx.branches}, nil
+	// 5. Capture the HPH state for the KeyCommitmentState record we'll
+	// write into commitment.0-N.kv. EncodeCurrentState(nil) is safe to
+	// call post-Process and serializes the trie root cell + Depths +
+	// TouchMap + AfterMap + branchBefore packing — exactly what the
+	// daemon's first FCU needs to anchor commitment continuation.
+	hphState, err := hph.EncodeCurrentState(nil)
+	if err != nil {
+		return Result{}, fmt.Errorf("commitment.ComputeGenesisRoot: EncodeCurrentState: %w", err)
+	}
+
+	return Result{Root: root, BranchNodes: ctx.branches, HPHState: hphState}, nil
 }
 
 // genesisCtx implements erigoncommitment.PatriciaContext for a

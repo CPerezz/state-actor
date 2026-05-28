@@ -307,7 +307,7 @@ func main() {
 
 	case "erigon":
 		var err error
-		stats, err = erigon.Run(context.Background(), config, erigon.Options{})
+		stats, err = erigon.Run(context.Background(), config, erigon.Options{WriteSnapshots: true})
 		if err != nil {
 			log.Fatalf("Failed to populate Erigon DB: %v", err)
 		}
