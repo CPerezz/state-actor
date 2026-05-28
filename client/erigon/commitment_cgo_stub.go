@@ -15,6 +15,7 @@ import (
 // regression coverage; production runs require cgo_erigon_commitment).
 func runCommitmentPhase(
 	_ map[common.Address]*allocAccount,
+	_ map[common.Address]*allocAccount,
 	_ map[[20]byte]map[[32]byte][32]byte,
 ) (common.Hash, map[string][]byte, []byte, bool, error) {
 	return common.Hash{}, nil, nil, false, nil

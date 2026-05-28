@@ -40,21 +40,26 @@ import (
 //
 // Memory profile: streamsort stores cap peak resident memory at
 // ~1.3 GiB (4 × 256 MiB memtables + 4 × 8 MiB block caches). The
-// in-memory `alloc` + `autofillStor` inputs add their own footprint
-// (~2-7 GiB at 25 GB bloat scale). True end-to-end streaming where
-// alloc itself spills is a v2 optimization.
+// in-memory `foundationalAlloc` + `autofillAlloc` + `autofillStor`
+// inputs add their own footprint. foundationalAlloc is small (~K's).
+// autofillAlloc holds up to ~30M EOAs at --target-size=25GB scale
+// (~3 GiB heap for 30M Account entries). autofillStor's storage at
+// 25GB scale is ~20 GiB total (512K contracts × ~615 slots × ~60 bytes).
+// True end-to-end streaming where alloc itself spills is a v2
+// optimization deferred to a follow-up.
 func writeSnapshots(
 	ctx context.Context,
 	dbPath string,
 	seed int64,
-	alloc map[common.Address]*allocAccount,
+	foundationalAlloc map[common.Address]*allocAccount,
+	autofillAlloc map[common.Address]*allocAccount,
 	autofillStor []autofillContractStorage,
 	verbose bool,
 ) (common.Hash, error) {
-	// Step 1: rebuild storageMap from autofillStor for both feeding the
-	// streamsort AND passing into runCommitmentPhase. PreAlloc storage
-	// is already in alloc[].Storage and is handled by the iteration
-	// over alloc below.
+	// Step 1: build the unified storageMap from autofillStor +
+	// foundationalAlloc[].Storage. autofillAlloc entries have nil Storage
+	// by construction (buildAllocMap moves it to autofillStor), so we
+	// only fold foundationalAlloc here.
 	storageMap := make(map[[20]byte]map[[32]byte][32]byte, len(autofillStor))
 	for _, ent := range autofillStor {
 		var addr [20]byte
@@ -69,9 +74,7 @@ func writeSnapshots(
 			storageMap[addr][sk] = sv
 		}
 	}
-	// Also fold alloc[].Storage (PreAlloc / GenesisStorage) into storageMap
-	// so the HPH walker and the storage streamsort see the same dataset.
-	for addr, entry := range alloc {
+	for addr, entry := range foundationalAlloc {
 		if len(entry.Storage) == 0 {
 			continue
 		}
@@ -113,11 +116,14 @@ func writeSnapshots(
 	}
 	defer branchesStore.Close()
 
-	// Step 3: feed accounts / storage / code from alloc + storageMap.
+	// Step 3: feed accounts / code from BOTH alloc maps + storage from
+	// storageMap. Both foundationalAlloc + autofillAlloc go into the
+	// snapshot streamsorts — Erigon's domain reader needs to see every
+	// account regardless of which map it came from. The split exists
+	// only to keep autofillAlloc out of genesis.json (so erigon init's
+	// mdbx_put stays under the per-value limit).
 	var nAccounts, nStorage, nCode uint64
-	for addr, entry := range alloc {
-		// Account record. Erigon's Accounts domain key = raw 20-byte
-		// address; value = accounts.SerialiseV3(...).
+	feedAcct := func(addr common.Address, entry *allocAccount) error {
 		acct := account.Account{
 			Nonce:    entry.Nonce,
 			CodeHash: account.EmptyCodeHash,
@@ -125,7 +131,7 @@ func writeSnapshots(
 		if entry.Balance != nil {
 			b, overflow := uint256.FromBig(entry.Balance)
 			if overflow {
-				return common.Hash{}, fmt.Errorf("writeSnapshots: balance overflow for %s", addr.Hex())
+				return fmt.Errorf("writeSnapshots: balance overflow for %s", addr.Hex())
 			}
 			acct.Balance = *b
 		}
@@ -135,17 +141,25 @@ func writeSnapshots(
 		}
 		val := account.SerialiseV3(acct)
 		if err := accountsStore.Put(addr[:], val); err != nil {
-			return common.Hash{}, fmt.Errorf("writeSnapshots: put accounts[%s]: %w", addr.Hex(), err)
+			return fmt.Errorf("writeSnapshots: put accounts[%s]: %w", addr.Hex(), err)
 		}
 		nAccounts++
-
-		// Code record (only if contract). Erigon's Code domain key = raw
-		// 20-byte address (NOT codeHash); value = raw bytecode.
 		if len(entry.Code) > 0 {
 			if err := codeStore.Put(addr[:], entry.Code); err != nil {
-				return common.Hash{}, fmt.Errorf("writeSnapshots: put code[%s]: %w", addr.Hex(), err)
+				return fmt.Errorf("writeSnapshots: put code[%s]: %w", addr.Hex(), err)
 			}
 			nCode++
+		}
+		return nil
+	}
+	for addr, entry := range foundationalAlloc {
+		if err := feedAcct(addr, entry); err != nil {
+			return common.Hash{}, err
+		}
+	}
+	for addr, entry := range autofillAlloc {
+		if err := feedAcct(addr, entry); err != nil {
+			return common.Hash{}, err
 		}
 	}
 	// Storage records — iterate the merged storageMap.
@@ -169,7 +183,7 @@ func writeSnapshots(
 	// Step 4: HPH commitment. In-memory pass produces root + branches
 	// map + HPHState. The branches map is then drained into branchesStore
 	// for the snapshot WriteCommitment pass.
-	root, branches, hphState, computed, err := runCommitmentPhase(alloc, storageMap)
+	root, branches, hphState, computed, err := runCommitmentPhase(foundationalAlloc, autofillAlloc, storageMap)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("writeSnapshots: runCommitmentPhase: %w", err)
 	}

@@ -21,6 +21,7 @@ func writeSnapshots(
 	_ string,
 	_ int64,
 	_ map[common.Address]*allocAccount,
+	_ map[common.Address]*allocAccount,
 	_ []autofillContractStorage,
 	_ bool,
 ) (common.Hash, error) {
