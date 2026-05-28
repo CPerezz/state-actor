@@ -47,11 +47,10 @@ const (
 // drives the snapshot write + header patch as the final step so a failed
 // write doesn't leave the header pointing at a non-existent root.
 func runCommitmentPhase(
-	foundationalAlloc map[common.Address]*allocAccount,
-	autofillAlloc map[common.Address]*allocAccount,
+	alloc map[common.Address]*allocAccount,
 	storageMap map[[20]byte]map[[32]byte][32]byte,
 ) (common.Hash, map[string][]byte, []byte, bool, error) {
-	accounts := buildCommitmentAccounts(foundationalAlloc, autofillAlloc, storageMap)
+	accounts := buildCommitmentAccounts(alloc, storageMap)
 	result, err := commitment.ComputeGenesisRoot(accounts)
 	if err != nil {
 		return common.Hash{}, nil, nil, false, fmt.Errorf("ComputeGenesisRoot: %w", err)
@@ -59,23 +58,20 @@ func runCommitmentPhase(
 	return result.Root, result.BranchNodes, result.HPHState, true, nil
 }
 
-// buildCommitmentAccounts flattens both alloc maps + storageMap into
-// the shape the commitment package expects. Address ordering does not
-// matter — ComputeGenesisRoot sorts internally by plain-key.
+// buildCommitmentAccounts flattens (alloc, storageMap) into the shape
+// the commitment package expects. Address ordering does not matter —
+// ComputeGenesisRoot sorts internally by plain-key.
 //
-// Both foundationalAlloc and autofillAlloc are included so the HPH
-// walk covers the FULL state. The genesis state-root produced by HPH
-// must match what Erigon's daemon recomputes over its visible state
-// (which is foundational-from-MDBX + autofill-from-snapshots) — if HPH
-// only saw foundational, the patched header would diverge and stage
-// Execution would reject block 0 with "Wrong trie root of block 0".
+// The HPH walk covers the FULL alloc (every entry state-actor produced)
+// so the patched header.stateRoot agrees with what the daemon will
+// recompute over its visible state — which is what's in the snapshot
+// files (no state-actor data went through MDBX via genesis.json).
 func buildCommitmentAccounts(
-	foundationalAlloc map[common.Address]*allocAccount,
-	autofillAlloc map[common.Address]*allocAccount,
+	alloc map[common.Address]*allocAccount,
 	storageMap map[[20]byte]map[[32]byte][32]byte,
 ) []commitment.Account {
-	accounts := make([]commitment.Account, 0, len(foundationalAlloc)+len(autofillAlloc))
-	appendOne := func(addr common.Address, entry *allocAccount) {
+	accounts := make([]commitment.Account, 0, len(alloc))
+	for addr, entry := range alloc {
 		acct := commitment.Account{
 			Address: addr,
 			Nonce:   entry.Nonce,
@@ -83,7 +79,7 @@ func buildCommitmentAccounts(
 		if entry.Balance != nil {
 			b, overflow := uint256.FromBig(entry.Balance)
 			if overflow {
-				return
+				continue
 			}
 			acct.Balance = b
 		}
@@ -102,12 +98,6 @@ func buildCommitmentAccounts(
 			}
 		}
 		accounts = append(accounts, acct)
-	}
-	for addr, entry := range foundationalAlloc {
-		appendOne(addr, entry)
-	}
-	for addr, entry := range autofillAlloc {
-		appendOne(addr, entry)
 	}
 	return accounts
 }
