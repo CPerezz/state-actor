@@ -51,8 +51,12 @@
 // `Compressor.AddWord` cannot return the final `.kv` byte offset because
 // Huffman + dictionary encoding happens in `Compress()` AFTER all words
 // are added. Downstream accessor builders (BTree, RecSplit, Bloom) need
-// per-key offsets to populate their key→offset mappings. The pattern,
-// per Erigon's `db/state/simple_accessor_builder.go:194-216`, is two-pass:
+// per-key offsets to populate their key→offset mappings. The pattern is
+// two-pass. BTree (.bt) and HashMap (.kvi) over (key,value)-pair .kv
+// files require `KeyOffset` (per upstream
+// `db/datastruct/btindex/btree_index.go:432`); only InvertedIndex
+// accessors over single-word `.ef`/`.v` files use `ValueOffset` (per
+// upstream `db/state/simple_accessor_builder.go:194-216`):
 //
 //	// Pass 1: write the .kv file
 //	c, _ := seg.NewCompressor(outPath, tmpDir, cfg)
@@ -64,8 +68,8 @@
 //	d, _ := seg.NewDecompressor(outPath)
 //	for entry, err := range d.Iterate(ctx) {
 //	    if err != nil { ... }
-//	    // entry.KeyOffset / entry.ValueOffset are the post-compression byte offsets
-//	    btree.AddKey(entry.Key, entry.ValueOffset)
+//	    // KeyOffset is the offset of the key's length-prefix bits.
+//	    btree.AddKey(entry.Key, entry.KeyOffset)
 //	}
 //	d.Close()
 //

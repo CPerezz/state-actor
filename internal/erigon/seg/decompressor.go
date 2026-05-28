@@ -16,10 +16,31 @@ import (
 // semantics — `MakeGetter` slices `d.data[d.wordsStart:]` so all
 // downstream offsets are relative to `wordsStart`.
 //
-// Downstream accessor builders (BTree, RecSplit, Bloom) consume
-// ValueOffset directly as the per-key offset value to embed in their
-// indexes — those indexes are then read via `Getter.Reset(off);
-// Getter.Next(buf)` which also expects bit-stream-relative offsets.
+// Which offset to feed each accessor builder depends on the accessor's
+// underlying file format:
+//
+//   - BTree (.bt) and HashMap (.kvi) accessors index INTO (key,value)-pair
+//     .kv files. The reader path (BtIndex.dataLookup at
+//     db/datastruct/btindex/btree_index.go:531, RecSplit.Lookup) does
+//     `g.Reset(off); g.Next(nil) /*=key*/; g.Next(nil) /*=value*/`, so
+//     `off` MUST be the offset of the KEY's length-prefix — i.e.
+//     KeyOffset. Upstream's reference BT builder
+//     (btree_index.go:419-445) captures `pos` BEFORE `kv.Next(key[:0])`
+//     and stores it via `iw.AddKey(key, pos, keep)`, confirming the
+//     pre-key offset is what gets indexed.
+//
+//   - InvertedIndex (.efi / .vi) accessors index INTO single-word .ef /
+//     .v files (one logical entry = one seg word, no key/value
+//     alternation). Per db/state/simple_accessor_builder.go:194-216
+//     they consume ValueOffset semantics — the offset of the single
+//     word at each logical position.
+//
+// Feeding ValueOffset to a BTree accessor positions the Huffman cursor
+// MID-entry (between a key and its value); decoding then mis-parses
+// garbage as a position code and walks dataP past EOF — manifesting as
+// `panic: runtime error: index out of range [N] with length N` from
+// the daemon's first state lookup. See exec3_serial.go:349 in upstream
+// for the panic site we previously hit because of this mix-up.
 type OffsetEntry struct {
 	// Key is the decoded key bytes (the even-index word). Backing
 	// storage is owned by the iterator and may be overwritten on the
@@ -29,12 +50,19 @@ type OffsetEntry struct {
 	// retention rules as Key.
 	Value []byte
 	// KeyOffset is the byte offset of the key's length-prefix bits,
-	// relative to the start of the bit-stream.
+	// relative to the start of the bit-stream. THIS is the value to
+	// feed BTree (`btindex.Writer.AddKey`) and HashMap
+	// (`recsplit.Writer.AddKey`) accessor builders over key/value-pair
+	// .kv files. Source of truth: upstream
+	// db/datastruct/btindex/btree_index.go:432.
 	KeyOffset uint64
 	// ValueOffset is the byte offset of the value's length-prefix bits,
-	// relative to the start of the bit-stream. Per
-	// `db/state/simple_accessor_builder.go:194-216`, this is the value
-	// the accessor index (.bt / .kvi) stores against the key.
+	// relative to the start of the bit-stream. Use this ONLY for
+	// InvertedIndex-style accessors over single-word .ef / .v files
+	// (per db/state/simple_accessor_builder.go:194-216). Do NOT feed it
+	// to BTree or HashMap accessors over (key,value)-pair .kv files —
+	// it produces a runtime panic in Erigon's daemon (see KeyOffset
+	// doc above).
 	ValueOffset uint64
 }
 

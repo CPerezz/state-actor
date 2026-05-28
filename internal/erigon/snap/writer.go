@@ -260,7 +260,18 @@ func (w *Writer) WriteDomain(ctx context.Context, d Domain, r StepRange, keyCoun
 			return fmt.Errorf("snap.WriteDomain: decompressor iterate: %w", err)
 		}
 		if bt != nil {
-			if err := bt.AddKey(entry.Key, entry.ValueOffset); err != nil {
+			// MUST be KeyOffset, not ValueOffset: upstream's BtIndex.dataLookup
+			// (db/datastruct/btindex/btree_index.go:531) does
+			// `g.Reset(offset); g.Next(nil) /*=key*/; g.Next(nil) /*=value*/`
+			// — so `offset` must point at the key's length-prefix, NOT at
+			// the value. Upstream's reference builder confirms (same file
+			// line 432): `pos` is captured BEFORE `kv.Next(key[:0])`.
+			// Using ValueOffset here positions the Huffman cursor mid-entry
+			// and walks dataP past EOF on the first system-contract lookup
+			// of block 0 (manifested as
+			// `panic: index out of range [N] with length N` in
+			// exec3_serial.go:349).
+			if err := bt.AddKey(entry.Key, entry.KeyOffset); err != nil {
 				return fmt.Errorf("snap.WriteDomain: btindex.AddKey: %w", err)
 			}
 		}
