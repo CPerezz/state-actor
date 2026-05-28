@@ -147,7 +147,7 @@ func TestFilenameTemplate(t *testing.T) {
 	if got := BuildDataFilename("/tmp", "v1.0", DomainAccounts, r); got != want {
 		t.Errorf("BuildDataFilename = %q, want %q", got, want)
 	}
-	want = filepath.Join("/tmp", "v1.0-commitments.0-256.kvi")
+	want = filepath.Join("/tmp", "v1.0-commitment.0-256.kvi")
 	if got := BuildHashMapFilename("/tmp", "v1.0", DomainCommitment, r); got != want {
 		t.Errorf("BuildHashMapFilename = %q, want %q", got, want)
 	}

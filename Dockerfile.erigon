@@ -51,19 +51,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV CGO_ENABLED=1
 WORKDIR /app
 
-# Clone Erigon at the pinned tag (v3.4.2) into the build context.
-# state-actor's go.mod has a `replace github.com/erigontech/erigon =>
-# /erigon-src` directive (rewritten below for Docker) — this gives us
-# the exact source tree state-actor's commitment vendor depends on
-# without poisoning the Go module proxy with pseudo-versions.
-# Clone Erigon at a specific master commit that matches the API our
-# vendored commitment package expects. v3.4.2's execution/commitment
-# package has API drift (TouchPlainKeyDirect renamed; PatriciaContext
-# gained a TxNum method); the commit below is the local-dev reference
-# checkout this codebase has always been tested against.
+# Clone Erigon at the pinned commit on bal-devnet-7 — the EIP-7928
+# (block-access-lists) devnet branch. Merge-base with main is
+# 7827ec7268ffc9f4c4b97cfab6740d2f8fb1fdb2 (the prior pin); bal-devnet-7
+# adds forward-fix coverage on top while staying byte-identical to the
+# prior pin for every encoder state-actor's snap writer mirrors
+# (SerialiseV3, raw address keys, addr||slot storage, uint256.Bytes()
+# storage values, raw bytecode). state-actor's go.mod has a `replace
+# github.com/erigontech/erigon => /erigon-src` directive (rewritten
+# below for Docker) — this gives us the exact source tree state-actor's
+# commitment vendor depends on without poisoning the Go module proxy
+# with pseudo-versions.
 RUN git clone https://github.com/erigontech/erigon.git /erigon-src \
     && cd /erigon-src \
-    && git checkout 7827ec7268ffc9f4c4b97cfab6740d2f8fb1fdb2
+    && git checkout 14273f79a6
 
 COPY go.mod go.sum ./
 # Rewrite the local-dev replace path to the Docker location.

@@ -1,8 +1,7 @@
 package snap
 
-// Domain identifies one of Erigon's E3 state domains. The on-disk file
-// tag for each is given by Tag(). Note `commitments` carries a trailing
-// `s` — that's how Erigon's snap_schema serializes it.
+// Domain identifies one of Erigon's E3 state domains. The on-disk
+// file tag for each is given by Tag().
 type Domain int
 
 const (
@@ -12,9 +11,13 @@ const (
 	DomainCommitment
 )
 
-// Tag returns the on-disk filename tag for d. Per
-// /Users/random_anon/dev/clients/erigon/db/state/statecfg/state_schema.go
-// (search `dataFileTag`).
+// Tag returns the on-disk filename tag for d. Verified against
+// /Users/random_anon/dev/clients/erigon/db/state/domain.go:1719,1750
+// (Domain.FilenameBase switch) and aggregator_test.go:474,484
+// (test fixtures emit "commitment"). DomainCommitment's tag is
+// "commitment" (singular) — earlier "commitments" plural was wrong
+// and produced files Erigon's reader silently ignored, leading to
+// "Wrong trie root of block 0" at stage Execution.
 func (d Domain) Tag() string {
 	switch d {
 	case DomainAccounts:
@@ -24,7 +27,7 @@ func (d Domain) Tag() string {
 	case DomainCode:
 		return "code"
 	case DomainCommitment:
-		return "commitments"
+		return "commitment"
 	default:
 		return "unknown"
 	}
