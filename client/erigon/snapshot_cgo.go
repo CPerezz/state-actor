@@ -5,7 +5,6 @@ package erigon
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -86,25 +85,25 @@ func writeSnapshots(
 	stats *generator.Stats,
 ) (common.Hash, error) {
 	// -- Step 1: open 4 streamsorts under cfg.DBPath (bind-mounted disk).
-	accountsStore, err := streamsort.New(filepath.Join(cfg.DBPath, "streamsort-accounts"))
+	accountsStore, err := streamsort.New(cfg.DBPath)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("writeSnapshots: open accounts streamsort: %w", err)
 	}
 	defer accountsStore.Close()
 
-	storageStore, err := streamsort.New(filepath.Join(cfg.DBPath, "streamsort-storage"))
+	storageStore, err := streamsort.New(cfg.DBPath)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("writeSnapshots: open storage streamsort: %w", err)
 	}
 	defer storageStore.Close()
 
-	codeStore, err := streamsort.New(filepath.Join(cfg.DBPath, "streamsort-code"))
+	codeStore, err := streamsort.New(cfg.DBPath)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("writeSnapshots: open code streamsort: %w", err)
 	}
 	defer codeStore.Close()
 
-	commitmentInputStore, err := streamsort.New(filepath.Join(cfg.DBPath, "streamsort-commitment"))
+	commitmentInputStore, err := streamsort.New(cfg.DBPath)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("writeSnapshots: open commitmentInput streamsort: %w", err)
 	}
@@ -220,7 +219,7 @@ func writeSnapshots(
 
 	// -- Step 5a: marshal the global branches map into a streamsort
 	// keyed by branch prefix (sorted for deterministic .kv output).
-	branchesStore, err := streamsort.New(filepath.Join(cfg.DBPath, "streamsort-branches"))
+	branchesStore, err := streamsort.New(cfg.DBPath)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("writeSnapshots: open branches streamsort: %w", err)
 	}
