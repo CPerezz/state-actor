@@ -57,9 +57,32 @@ const MemTableSize = 256 << 20
 
 const (
 	batchFlushBytes = 64 << 20
-	// blockCacheBytes is small because Iterate is a single sequential scan.
-	blockCacheBytes = 8 << 20
+	// defaultBlockCacheBytes is small because the default workload is a
+	// single sequential scan (Iterate). Callers with random-access read
+	// workloads (e.g. ConcurrentPatriciaHashed touching a multi-GiB
+	// commitmentInputStore via subtreeCtx.Get on every leaf) should pass
+	// a larger value via NewWithOptions — see comment on Options.BlockCacheBytes.
+	defaultBlockCacheBytes = 8 << 20
 )
+
+// Options is the optional configuration for NewWithOptions. Zero-value
+// fields fall back to package defaults.
+type Options struct {
+	// BlockCacheBytes overrides the Pebble block cache size. Pebble's
+	// block cache is the primary in-memory hot-data store for random
+	// reads; for read-heavy workloads against multi-GiB Stores the
+	// default 8 MiB cache yields very low hit rates and the LSM SST
+	// disk reads dominate wall time. Set this to a value sized to the
+	// expected working set (e.g. 1-4 GiB for a 12-25 GiB store under
+	// HPH commitment walks). Default: 8 MiB.
+	//
+	// Tuning guidance from upstream Pebble: the cache holds compressed
+	// data blocks (~64 KiB each by default). A 4 GiB cache holds ~65k
+	// blocks. For an HPH walk that touches every entry once in
+	// keccak-sorted order, expect ~30-50% hit rate at this size against
+	// a 12 GiB store — enough to drop most cold disk reads.
+	BlockCacheBytes int64
+}
 
 // Store is a sorted-by-key spill buffer backed by a temp Pebble LSM with
 // an explicit WRITING → FINALIZED → CLOSED state machine. See package
@@ -95,17 +118,27 @@ type Store struct {
 	closed atomic.Bool
 }
 
-// New creates a Store rooted under workDir (empty → os.TempDir()).
-// Caller is responsible for sufficient free disk to hold the spilled
-// dataset.
+// New creates a Store rooted under workDir (empty → os.TempDir()) with
+// default options. See NewWithOptions for per-Store tuning.
 func New(workDir string) (*Store, error) {
+	return NewWithOptions(workDir, Options{})
+}
+
+// NewWithOptions creates a Store rooted under workDir with the supplied
+// options. Zero-value fields fall back to package defaults. Caller is
+// responsible for sufficient free disk to hold the spilled dataset.
+func NewWithOptions(workDir string, opts Options) (*Store, error) {
 	dir, err := os.MkdirTemp(workDir, "streamsort-*")
 	if err != nil {
 		return nil, fmt.Errorf("streamsort: mkdir temp: %w", err)
 	}
 
-	cache := pebble.NewCache(blockCacheBytes)
-	opts := &pebble.Options{
+	cacheSize := int64(defaultBlockCacheBytes)
+	if opts.BlockCacheBytes > 0 {
+		cacheSize = opts.BlockCacheBytes
+	}
+	cache := pebble.NewCache(cacheSize)
+	pebbleOpts := &pebble.Options{
 		DisableWAL:                  true,
 		MemTableSize:                MemTableSize,
 		MemTableStopWritesThreshold: 2,
@@ -122,7 +155,7 @@ func New(workDir string) (*Store, error) {
 		},
 	}
 
-	db, err := pebble.Open(dir, opts)
+	db, err := pebble.Open(dir, pebbleOpts)
 	if err != nil {
 		cache.Unref()
 		_ = os.RemoveAll(dir)

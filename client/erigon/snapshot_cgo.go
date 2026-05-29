@@ -179,7 +179,18 @@ func writeSnapshots(
 	}
 	defer codeStore.Close()
 
-	commitmentInputStore, err := streamsort.New(cfg.DBPath)
+	// commitmentInputStore takes the heavy random-read workload: the
+	// 16 ConcurrentPatriciaHashed workers call subtreeCtx.Storage /
+	// Account on every leaf (~344M Get calls at SPEC_TARGET_GB=1 for
+	// a 12 GiB store, ~1.7B at 25 GiB). With the default 8 MiB block
+	// cache the LSM SSTs miss on most reads. Bump the cache here so
+	// the Pebble block cache holds a non-trivial fraction of the
+	// working set; benchmarking showed 50+ min Phase 2 wall at default.
+	// Tunable via the environment-derived future Options if needed;
+	// 4 GiB is the floor that the bench host (240 GiB RAM) can spare.
+	commitmentInputStore, err := streamsort.NewWithOptions(cfg.DBPath, streamsort.Options{
+		BlockCacheBytes: 4 << 30,
+	})
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("writeSnapshots: open commitmentInput streamsort: %w", err)
 	}
