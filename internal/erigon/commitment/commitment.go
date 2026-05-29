@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"sync"
 
 	gethcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -92,8 +93,9 @@ func EncodeStorageUpdate(value []byte) []byte {
 	return upd.Encode(nil, numBuf[:])
 }
 
-// ComputeGenesisRoot runs Erigon's HexPatriciaHashed against the
-// commitmentInputStore's encoded Update payloads.
+// ComputeGenesisRoot runs Erigon's ConcurrentPatriciaHashed (16-nibble
+// subtree-parallel HPH) against the commitmentInputStore's encoded Update
+// payloads.
 //
 // The caller is responsible for having populated commitmentInputStore
 // during the buildAllocMap/writeSnapshots streaming loop: every alloc
@@ -101,34 +103,88 @@ func EncodeStorageUpdate(value []byte) []byte {
 // storage slot writes one entry keyed by addr||slot. Encoding is done
 // via EncodeAccountUpdate / EncodeStorageUpdate above.
 //
-// Memory profile: the in-memory `state map` of the prior implementation
-// is GONE — Account/Storage lookups during the HPH walk hit Pebble via
-// streamsort.Get. At 25 GB bench scale that's ~344 M Get calls; each
-// is ~10 µs in the warm-cache case, ~100 µs cold — order of an hour
-// of CPU time. The trade-off pays back the ~50 GB heap the old in-memory
-// map would have needed at full bench scale.
+// Parallelism (Phase 2 worker pool):
+//   - upstream's NewUpdates with SetConcurrentCommitment(true) routes
+//     Touch...Direct into 16 per-nibble etl.Collector instances (sharded
+//     by hashedKey[0]).
+//   - NewConcurrentPatriciaHashed spawns 16 SubTrie HPH instances, one
+//     per first-nibble, all mounted under a single root HPH.
+//   - Process dispatches to ParallelHashSort which runs 16 worker
+//     goroutines via errgroup. Each worker drains its nibble's
+//     collector, calls followAndUpdate on its SubTrie, then foldNibble
+//     merges the subtree's final cell into root.grid[0][nib] under
+//     rootMu. After all 16 finish, root.fold() produces the final hash
+//     from the 16 child cells via the standard foldBranch path.
+//   - Subtree branch keys are disjoint by first nibble — workers write
+//     PutBranch into PER-WORKER context maps; closeFn merges into the
+//     shared mergedBranches under mergeMu (no overwrite ambiguity).
 //
-// `ctx.branches` stays in memory: bounded by trie depth × entry count
-// (~few hundred MB max even at 25 GB scale, since branches are O(N) not
-// O(StorageSlots)).
+// Memory profile: the in-memory `state map` of the original
+// implementation is GONE — Account/Storage lookups during the HPH walk
+// hit Pebble via streamsort.Get. Pebble's read path is thread-safe so
+// 16 workers reading concurrently is fine. `mergedBranches` stays in
+// memory: bounded by trie depth × entry count (~few hundred MB max
+// even at 25 GB scale, since branches are O(N) not O(StorageSlots)).
 func ComputeGenesisRoot(commitmentInputStore *streamsort.Store) (Result, error) {
-	ctx := &genesisCtx{
-		commitmentInputStore: commitmentInputStore,
-		branches:             make(map[string][]byte),
+	mergedBranches := make(map[string][]byte)
+	var mergeMu sync.Mutex
+
+	// factory yields a fresh subtreeCtx per worker — each owns a private
+	// branches map. closeFn merges that map into mergedBranches when the
+	// worker finishes. Upstream's ParallelHashSort calls factory both
+	// during unfoldRoot (16 initial per-mount ctxs, populated with the
+	// empty initial branches) and per-worker (16 fresh ctxs that absorb
+	// followAndUpdate PutBranch writes). Both lifecycle paths funnel
+	// through the same merge.
+	factory := func() (erigoncommitment.PatriciaContext, func()) {
+		sub := &subtreeCtx{
+			commitmentInputStore: commitmentInputStore,
+			branches:             make(map[string][]byte),
+		}
+		closeFn := func() {
+			if len(sub.branches) == 0 {
+				return
+			}
+			mergeMu.Lock()
+			for k, v := range sub.branches {
+				mergedBranches[k] = v
+			}
+			mergeMu.Unlock()
+		}
+		return sub, closeFn
 	}
+
+	// rootCtx is the context attached to the root HPH itself (consulted
+	// by unfoldRoot's needUnfolding/unfold walk and by the final
+	// root.fold() pass that builds the depth-0 branch). For a genesis
+	// trie the initial branches map is empty so unfoldRoot is a no-op;
+	// the root-level PutBranch from foldBranch lands here, then merges
+	// via rootClose.
+	rootCtx, rootClose := factory()
+	defer rootClose()
 
 	upds := erigoncommitment.NewUpdates(
 		erigoncommitment.ModeDirect,
-		ctx.tmpDir,
+		"",
 		erigoncommitment.KeyToHexNibbleHash,
 	)
+	// Force the parallel path on the very first Process call. Upstream's
+	// idiomatic pipeline runs the first Process sequentially to populate
+	// the root branch, then SetConcurrentCommitment(true) for subsequent
+	// calls. For state-actor's one-shot genesis we don't have a
+	// "subsequent" — we set the flag up-front. ParallelHashSort
+	// (hex_concurrent_patricia_hashed.go:207) only requires
+	// mode==ModeDirect && sortPerNibble==true — both satisfied. The
+	// CanDoConcurrentNext gate is a next-call optimization hint, not a
+	// correctness gate.
+	upds.SetConcurrentCommitment(true)
 
 	// Walker: iterate every entry in commitmentInputStore (which holds
 	// addresses + addr||slot composite keys for the full alloc). Per
 	// upstream commitment.go:1666-1681, ModeDirect's TouchPlainKeyDirect
 	// discards the *Update arg — only the (hashedKey, plainKey) pair is
-	// recorded in the etl.Collector. So we pass a placeholder; HPH will
-	// re-fetch via ctx.Account/Storage during Process.
+	// recorded in the per-nibble etl.Collector. So we pass a placeholder;
+	// HPH re-fetches via ctx.Account/Storage during Process.
 	var placeholder erigoncommitment.Update
 	if err := commitmentInputStore.Iterate(func(plainKey, _ []byte) error {
 		upds.TouchPlainKeyDirect(string(plainKey), &placeholder)
@@ -137,8 +193,16 @@ func ComputeGenesisRoot(commitmentInputStore *streamsort.Store) (Result, error) 
 		return Result{}, fmt.Errorf("commitment.ComputeGenesisRoot: iterate commitmentInputStore: %w", err)
 	}
 
-	hph := erigoncommitment.NewHexPatriciaHashed(20 /* accountKeyLen */, ctx)
-	rootBytes, err := hph.Process(context.Background(), upds, "state-actor-genesis", nil, erigoncommitment.WarmupConfig{})
+	hph := erigoncommitment.NewHexPatriciaHashed(20 /* accountKeyLen */, rootCtx)
+	pph := erigoncommitment.NewConcurrentPatriciaHashed(hph, rootCtx)
+	defer pph.Close()
+	rootBytes, err := pph.Process(
+		context.Background(),
+		upds,
+		"state-actor-genesis",
+		nil,
+		erigoncommitment.WarmupConfig{CtxFactory: factory},
+	)
 	if err != nil {
 		return Result{}, fmt.Errorf("commitment.ComputeGenesisRoot: Process: %w", err)
 	}
@@ -148,12 +212,15 @@ func ComputeGenesisRoot(commitmentInputStore *streamsort.Store) (Result, error) 
 	var root gethcommon.Hash
 	copy(root[:], rootBytes)
 
-	hphState, err := hph.EncodeCurrentState(nil)
+	// HPHState comes from the root trie after all subtrees have folded
+	// back into root.grid[0]. RootTrie() returns the same root HPH we
+	// constructed above.
+	hphState, err := pph.RootTrie().EncodeCurrentState(nil)
 	if err != nil {
 		return Result{}, fmt.Errorf("commitment.ComputeGenesisRoot: EncodeCurrentState: %w", err)
 	}
 
-	return Result{Root: root, BranchNodes: ctx.branches, HPHState: hphState}, nil
+	return Result{Root: root, BranchNodes: mergedBranches, HPHState: hphState}, nil
 }
 
 // ComputeGenesisRootFromAccounts is a backward-compat wrapper for
@@ -195,31 +262,38 @@ func ComputeGenesisRootFromAccounts(accounts []Account) (Result, error) {
 	return ComputeGenesisRoot(store)
 }
 
-// genesisCtx implements erigoncommitment.PatriciaContext over a
-// streamsort-backed commitmentInputStore (random-access via Pebble).
-// `branches` stays in memory.
-type genesisCtx struct {
+// subtreeCtx implements erigoncommitment.PatriciaContext over a
+// streamsort-backed commitmentInputStore (random-access via Pebble,
+// thread-safe read path) plus a PER-WORKER branches map.
+//
+// Lifecycle: one subtreeCtx per ConcurrentPatriciaHashed worker (16 of
+// them inside ParallelHashSort) plus one for the root HPH. The
+// per-worker branches map is mutated only by that worker's
+// followAndUpdate PutBranch calls; on worker exit, the closeFn
+// returned by the factory merges it into a shared mergedBranches map
+// under mergeMu. Subtree branch keys are disjoint by first nibble so
+// the post-merge has no overwrite ambiguity.
+type subtreeCtx struct {
 	commitmentInputStore *streamsort.Store
 	branches             map[string][]byte
-	tmpDir               string
 }
 
-func (c *genesisCtx) Branch(prefix []byte) ([]byte, erigonkv.Step, error) {
+func (c *subtreeCtx) Branch(prefix []byte) ([]byte, erigonkv.Step, error) {
 	if data, ok := c.branches[string(prefix)]; ok {
 		return data, 0, nil
 	}
 	return nil, 0, nil
 }
 
-func (c *genesisCtx) PutBranch(prefix []byte, data []byte, prevData []byte) error {
+func (c *subtreeCtx) PutBranch(prefix []byte, data []byte, prevData []byte) error {
 	c.branches[string(prefix)] = append([]byte(nil), data...)
 	return nil
 }
 
-func (c *genesisCtx) Account(plainKey []byte) (*erigoncommitment.Update, error) {
+func (c *subtreeCtx) Account(plainKey []byte) (*erigoncommitment.Update, error) {
 	enc, err := c.commitmentInputStore.Get(plainKey)
 	if err != nil {
-		return nil, fmt.Errorf("commitment.genesisCtx.Account: Get(%x): %w", plainKey, err)
+		return nil, fmt.Errorf("commitment.subtreeCtx.Account: Get(%x): %w", plainKey, err)
 	}
 	if enc == nil {
 		u := new(erigoncommitment.Update)
@@ -229,21 +303,21 @@ func (c *genesisCtx) Account(plainKey []byte) (*erigoncommitment.Update, error) 
 	var u erigoncommitment.Update
 	pos, err := u.Decode(enc, 0)
 	if err != nil {
-		return nil, fmt.Errorf("commitment.genesisCtx.Account: decode plainKey=%x: %w", plainKey, err)
+		return nil, fmt.Errorf("commitment.subtreeCtx.Account: decode plainKey=%x: %w", plainKey, err)
 	}
 	if pos != len(enc) {
-		return nil, fmt.Errorf("commitment.genesisCtx.Account: trailing bytes after decode")
+		return nil, fmt.Errorf("commitment.subtreeCtx.Account: trailing bytes after decode")
 	}
 	if u.Flags&erigoncommitment.StorageUpdate != 0 {
-		return nil, errors.New("commitment.genesisCtx.Account: read storage entry via Account()")
+		return nil, errors.New("commitment.subtreeCtx.Account: read storage entry via Account()")
 	}
 	return &u, nil
 }
 
-func (c *genesisCtx) Storage(plainKey []byte) (*erigoncommitment.Update, error) {
+func (c *subtreeCtx) Storage(plainKey []byte) (*erigoncommitment.Update, error) {
 	enc, err := c.commitmentInputStore.Get(plainKey)
 	if err != nil {
-		return nil, fmt.Errorf("commitment.genesisCtx.Storage: Get(%x): %w", plainKey, err)
+		return nil, fmt.Errorf("commitment.subtreeCtx.Storage: Get(%x): %w", plainKey, err)
 	}
 	if enc == nil {
 		u := new(erigoncommitment.Update)
@@ -253,10 +327,10 @@ func (c *genesisCtx) Storage(plainKey []byte) (*erigoncommitment.Update, error) 
 	var u erigoncommitment.Update
 	pos, err := u.Decode(enc, 0)
 	if err != nil {
-		return nil, fmt.Errorf("commitment.genesisCtx.Storage: decode plainKey=%x: %w", plainKey, err)
+		return nil, fmt.Errorf("commitment.subtreeCtx.Storage: decode plainKey=%x: %w", plainKey, err)
 	}
 	if pos != len(enc) {
-		return nil, fmt.Errorf("commitment.genesisCtx.Storage: trailing bytes after decode")
+		return nil, fmt.Errorf("commitment.subtreeCtx.Storage: trailing bytes after decode")
 	}
 	return &u, nil
 }
