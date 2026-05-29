@@ -64,7 +64,7 @@ func WriteCommitment(
 // WriteCommitmentPlaceholder emits a 1-entry commitment.<from>-<to>.kv
 // containing ONLY the KeyCommitmentState record (no branch nodes).
 // Used by the multi-range orchestrator for the older ranges in the
-// tail-pyramid layout — the daemon's first-FCU SeekCommitment reads
+// tiered LSM pyramid layout — the daemon's first-FCU SeekCommitment reads
 // only the NEWEST visible commitment file (db/state/domain.go:1290-1369
 // newest-wins GetLatest), so the placeholder's KeyCommitmentState is
 // inert; its sole purpose is to satisfy the integrity-checker

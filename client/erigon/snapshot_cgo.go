@@ -19,34 +19,44 @@ import (
 	"github.com/nerolation/state-actor/internal/streamsort"
 )
 
-// numRanges is the depth of the tail-pyramid LSM layout we emit. Five
-// non-overlapping power-of-two-aligned step ranges (rangeIdx 0..4) —
-// see ranges[] below. Spec entries pin to rangeIdx=0 (deepest cold
-// storage); autofill fills rangeIdx=4 down to 1 by byte-count milestones.
-const numRanges = 5
+// numRanges is the depth of the tiered LSM pyramid layout we emit.
+// Four non-overlapping power-of-two-aligned step ranges (rangeIdx 0..3) —
+// see ranges[] below. Spec entries pin to rangeIdx=0 (L4 deepest cold
+// storage); autofill fills the pyramid TOP DOWN by byte-count
+// milestones — rangeIdx=3 (L1, top) fills first; overflow past 11.5
+// GiB spills DOWNWARD into L2, L3, and finally L4 alongside the spec.
+const numRanges = 4
 
 // ranges is the snapshot-file layout state-actor emits. Each range is
 // power-of-two-aligned per upstream Erigon's merge invariant at
 // db/state/merge.go::calculateMergeStartTxNum (a file's startTxNum
-// MUST be a multiple of (endStep & -endStep)). Erigon's reader walks
-// newest→oldest, so:
+// MUST be a multiple of (endStep & -endStep)). Erigon's reader sorts
+// visibleFiles ascending by endTxNum (db/state/dirty_files.go:208-213)
+// then walks DESCENDING (db/state/domain.go:1318) — so the file with
+// the HIGHEST endStep is probed FIRST:
 //
-//   rangeIdx=4 ([30, 31), 1 step)  — probed FIRST  (autofill fills here)
-//   rangeIdx=3 ([28, 30), 2 steps) — probed 2nd
-//   rangeIdx=2 ([24, 28), 4 steps) — probed 3rd
-//   rangeIdx=1 ([16, 24), 8 steps) — probed 4th
-//   rangeIdx=0 ([0, 16), 16 steps) — probed LAST  (spec lives here)
+//   rangeIdx=3 ([448, 449),   1 step ) — L1 TOP   — probed FIRST
+//                                        (1.5 GiB autofill + commitment branches)
+//   rangeIdx=2 ([384, 448),  64 steps) — L2       — probed 2nd
+//                                        (3 GiB autofill)
+//   rangeIdx=1 ([256, 384), 128 steps) — L3       — probed 3rd
+//                                        (7 GiB autofill)
+//   rangeIdx=0 ([  0, 256), 256 steps) — L4 BOTTOM — probed LAST
+//                                        (13.5 GiB autofill overflow + ALL spec)
 //
-// A cold spec-key lookup forces 4 existence-filter probes on the upper
-// files (populated by autofill, ~1% FPR) + 1 BT walk on the deep
-// rangeIdx=0 file — the realistic worst-case cold-key read path the
-// bench is supposed to measure on a production-like Erigon node.
+// A cold spec-key lookup forces 3 existence-filter probes on the upper
+// files (L1/L2/L3, populated by autofill with ~1% FPR) + 1 BT walk on
+// the deep rangeIdx=0 file. Autofill-key cost averages ~3.3 probes
+// (geometric weighting). The size pyramid (1.5 / 3 / 7 / 13.5 GiB)
+// matches mainnet Erigon's steady-state shape post-merger collapse to
+// power-of-two-aligned super-blocks capped at StepsInFrozenFile
+// (default 256 per db/config3/config3.go:34; clamp enforced at
+// db/state/aggregator.go:1744 + db/state/merge.go:102).
 var ranges = [numRanges]snap.StepRange{
-	{From: 0, To: 16},  // rangeIdx=0 — spec (deepest)
-	{From: 16, To: 24}, // rangeIdx=1
-	{From: 24, To: 28}, // rangeIdx=2
-	{From: 28, To: 30}, // rangeIdx=3
-	{From: 30, To: 31}, // rangeIdx=4 — autofill (shallowest, fresh)
+	{From: 0, To: 256},   // rangeIdx=0 — L4 deepest (spec + autofill overflow)
+	{From: 256, To: 384}, // rangeIdx=1 — L3
+	{From: 384, To: 448}, // rangeIdx=2 — L2
+	{From: 448, To: 449}, // rangeIdx=3 — L1 top (commitment branches live here)
 }
 
 // writeSnapshots is the streaming multi-range snapshot orchestrator.
@@ -68,14 +78,15 @@ var ranges = [numRanges]snap.StepRange{
 //      for autofill — this is the OOM fix.
 //   4. Run HPH commitment over the commitmentInputStore (disk-backed
 //      ctx.Account/Storage callbacks via streamsort.Get).
-//   5. Multi-range write loop — 5 ranges × 4 domains:
+//   5. Multi-range write loop — 4 ranges × 4 domains:
 //      - Accounts/Storage/Code: per-range WriteDomain with
 //        FromStreamsortRange.
 //      - Commitment: branches + KeyCommitmentState in NEWEST range
-//        only (commitment.30-31.kv); older 4 ranges get 1-entry
-//        placeholder files (empty KeyCommitmentState) — satisfies the
-//        integrity-checker's AddDependencyBtwnDomains(AccountsDomain,
-//        CommitmentDomain) without duplicating branch data.
+//        only (commitment.448-449.kv = L1 top); older 3 ranges get
+//        1-entry placeholder files (empty KeyCommitmentState) —
+//        satisfies the integrity-checker's
+//        AddDependencyBtwnDomains(AccountsDomain, CommitmentDomain)
+//        without duplicating branch data.
 //
 // Returns the HPH root; runImpl patches it into block-0 header.stateRoot.
 func writeSnapshots(
@@ -410,19 +421,24 @@ func putStorageSlot(
 	return nil
 }
 
-// pickAutofillRange returns the rangeIdx for the next autofill entry,
-// shallowest-first (rangeIdx=numRanges-1 fills first; spills DOWNWARD
-// to rangeIdx=1 as each upper range hits its milestone). rangeIdx=0
-// is reserved for spec.
+// pickAutofillRange returns the rangeIdx for the next autofill entry.
+// TOP first (rangeIdx=numRanges-1 = L1 fills first; spills DOWNWARD
+// to L2, L3, and finally L4 as each upper range hits its milestone).
 //
-// Per the plan's tail-pyramid layout: autofill represents "fresh"
-// data that lives in the upper LSM layers (queried first by the
-// daemon's newest→oldest reader walk). Spec data is "cold" — pinned
-// to the deepest layer (rangeIdx=0), only reached after the reader's
-// existence-filter probes miss on all upper files.
+// Per the plan's tiered LSM pyramid (Layout C+): autofill represents
+// "fresh" data that lives in the upper LSM layers (queried first by
+// the daemon's newest→oldest reader walk). Spec data is "cold" —
+// pinned to L4 (rangeIdx=0, deepest), reached only after existence-
+// filter probes miss on L1/L2/L3. Once autofill exceeds the L3
+// milestone (11.5 GiB cumulative across upper tiers), all remaining
+// autofill OVERFLOW also routes to rangeIdx=0 — L4 holds spec PLUS
+// the autofill tail.
 //
 // milestones[i] is the cumulative byte threshold AFTER which range
 // (numRanges-1-i) is considered full and we spill to (numRanges-2-i).
+// totalAuto sums bytesIn[1..numRanges-1] (excluding rangeIdx=0) so
+// spec bytes never count against autofill thresholds, AND the overflow
+// path (return 0) stays sticky once the L3 milestone is exceeded.
 func pickAutofillRange(bytesIn [numRanges]uint64, milestones [numRanges - 1]uint64) uint8 {
 	totalAuto := uint64(0)
 	for i := uint8(1); i < numRanges; i++ {
@@ -433,22 +449,33 @@ func pickAutofillRange(bytesIn [numRanges]uint64, milestones [numRanges - 1]uint
 			return uint8(numRanges - 1 - i)
 		}
 	}
-	return 1 // overflow past targetSize — keep packing the lowest autofill range
+	return 0 // overflow past 11.5 GiB — pack into L4 alongside spec
 }
 
-// computeAutofillMilestones derives the per-step byte thresholds from
-// the runtime target-size cap. Geometric pyramid: 50% / 25% / 12.5% /
-// 12.5% of target into ranges 4, 3, 2, 1 respectively.
+// computeAutofillMilestones returns the absolute cumulative byte
+// thresholds for the tiered LSM pyramid. Values are independent of
+// --target-size: the tier SHAPE must match real-world Erigon's
+// pyramid regardless of how much state the bench instructs us to
+// generate.
+//
+//	milestones[0] =  1.5 GiB — L1 (rangeIdx=3) fills 0    → 1.5  GiB
+//	milestones[1] =  4.5 GiB — L2 (rangeIdx=2) fills 1.5  → 4.5  GiB
+//	milestones[2] = 11.5 GiB — L3 (rangeIdx=1) fills 4.5  → 11.5 GiB
+//	overflow      → L4 (rangeIdx=0) — alongside spec
+//
+// For SPEC_TARGET_GB=1, only L1 fills (1 GB < 1.5 GiB cap) and
+// L2/L3/L4 receive empty placeholder files. For SPEC_TARGET_GB=25,
+// all four tiers fill in the 1.5 / 3 / 7 / 13.5 GiB pattern
+// documented in plans/so-what-we-have-enumerated-lantern.md.
+// The targetSize parameter is preserved for callsite signature
+// stability but is intentionally unused.
 func computeAutofillMilestones(targetSize uint64) [numRanges - 1]uint64 {
-	// Fallback if cfg.TargetSize wasn't set (parsed defaults).
-	if targetSize == 0 {
-		targetSize = 25 * 1024 * 1024 * 1024 // 25 GiB
-	}
+	_ = targetSize
+	const GiB = uint64(1024) * 1024 * 1024
 	return [numRanges - 1]uint64{
-		targetSize / 2,                  // rangeIdx=4 fills until 50%
-		targetSize / 2 + targetSize / 4, // rangeIdx=3 fills 50%-75%
-		targetSize / 2 + targetSize / 4 + targetSize / 8, // rangeIdx=2 fills 75%-87.5%
-		targetSize, // rangeIdx=1 fills 87.5%-100%
+		3 * GiB / 2,  //  1.5 GiB — L1 cap
+		9 * GiB / 2,  //  4.5 GiB — L2 cap
+		23 * GiB / 2, // 11.5 GiB — L3 cap (overflow → L4)
 	}
 }
 
