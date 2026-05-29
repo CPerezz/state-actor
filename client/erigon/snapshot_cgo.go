@@ -5,11 +5,14 @@ package erigon
 import (
 	"context"
 	"fmt"
+	mrand "math/rand"
+	"runtime"
+	"sync"
+	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/holiman/uint256"
-	mrand "math/rand"
 
 	"github.com/nerolation/state-actor/generator"
 	internalerigon "github.com/nerolation/state-actor/internal/erigon"
@@ -35,14 +38,14 @@ const numRanges = 4
 // then walks DESCENDING (db/state/domain.go:1318) — so the file with
 // the HIGHEST endStep is probed FIRST:
 //
-//   rangeIdx=3 ([448, 449),   1 step ) — L1 TOP   — probed FIRST
-//                                        (1.5 GiB autofill + commitment branches)
-//   rangeIdx=2 ([384, 448),  64 steps) — L2       — probed 2nd
-//                                        (3 GiB autofill)
-//   rangeIdx=1 ([256, 384), 128 steps) — L3       — probed 3rd
-//                                        (7 GiB autofill)
-//   rangeIdx=0 ([  0, 256), 256 steps) — L4 BOTTOM — probed LAST
-//                                        (13.5 GiB autofill overflow + ALL spec)
+//	rangeIdx=3 ([448, 449),   1 step ) — L1 TOP    — probed FIRST
+//	                                     (1.5 GiB autofill + commitment branches)
+//	rangeIdx=2 ([384, 448),  64 steps) — L2        — probed 2nd
+//	                                     (3 GiB autofill)
+//	rangeIdx=1 ([256, 384), 128 steps) — L3        — probed 3rd
+//	                                     (7 GiB autofill)
+//	rangeIdx=0 ([  0, 256), 256 steps) — L4 BOTTOM — probed LAST
+//	                                     (13.5 GiB autofill overflow + ALL spec)
 //
 // A cold spec-key lookup forces 3 existence-filter probes on the upper
 // files (L1/L2/L3, populated by autofill with ~1% FPR) + 1 BT walk on
@@ -59,34 +62,96 @@ var ranges = [numRanges]snap.StepRange{
 	{From: 448, To: 449}, // rangeIdx=3 — L1 top (commitment branches live here)
 }
 
-// writeSnapshots is the streaming multi-range snapshot orchestrator.
+// erigonWorkers is the size of the Phase 1 autofill encode-worker pool.
+// Defaults to min(NumCPU, 8) to match the proven cap from reth, besu,
+// and nethermind (client/reth/spec_storage_streaming_cgo.go:95-104,
+// client/besu/state_writer_cgo.go:298, client/nethermind/phase0_cgo.go).
+// Tests override via setErigonWorkers.
+var erigonWorkers = func() int {
+	n := runtime.NumCPU()
+	if n > 8 {
+		n = 8
+	}
+	if n < 1 {
+		n = 1
+	}
+	return n
+}()
+
+// setErigonWorkers swaps erigonWorkers for the duration of a test.
+// The returned function restores the previous value.
+func setErigonWorkers(n int) (restore func()) {
+	prev := erigonWorkers
+	erigonWorkers = n
+	return func() { erigonWorkers = prev }
+}
+
+// entityWork is one alloc entry queued for an encode-worker. The main
+// goroutine fills these and sends them on entityCh; workers consume
+// and call encodeEntity. rangeIdx is decided on the main thread BEFORE
+// send so routing stays deterministic regardless of worker scheduling
+// (cross-client invariance).
+type entityWork struct {
+	addr     common.Address
+	entry    *allocAccount
+	rangeIdx uint8
+}
+
+// domainWrite is one (key, value) tuple ready to be Put into a specific
+// streamsort. Sent from encode workers to per-domain writer goroutines.
+type domainWrite struct {
+	key   []byte
+	value []byte
+}
+
+// perDomainChans is the 4 per-domain channels — one dedicated writer
+// goroutine drains each. The 4096 buffer absorbs a single
+// 615-slot-contract burst without blocking the encoder.
+type perDomainChans struct {
+	accounts chan domainWrite
+	storage  chan domainWrite
+	code     chan domainWrite
+	commitIn chan domainWrite
+}
+
+// rangeCounts tracks per-(domain, rangeIdx) entry counts. Workers
+// increment via atomic.AddUint64 — multiple workers may emit for the
+// same range concurrently. Phase 5 reads via plain access AFTER all
+// workers have drained (sync.WaitGroup.Wait provides the
+// happens-before barrier).
+type rangeCounts struct {
+	accounts [numRanges]uint64
+	storage  [numRanges]uint64
+	code     [numRanges]uint64
+}
+
+// writeSnapshots is the multi-range streaming snapshot orchestrator
+// with a Phase 1 channel-pipeline encode-worker pool and Phase 3
+// WaitGroup fan-out across the 12 (range, domain) tuples.
 //
 // Memory bounded by streamsort working set (~4 stores × ~256 MiB
 // memtable = ~1 GB) regardless of --target-size. Disk usage scales
 // with the autofill payload (~20 GB at 25 GB target), landing under
-// <cfg.DBPath>/streamsort-<domain>/ on the bind-mounted filesystem,
-// NOT the container overlay.
+// <cfg.DBPath>/streamsort-<domain>/ on the bind-mounted filesystem.
 //
 // Phases:
-//   1. Open 4 streamsorts (accounts/storage/code/commitmentInputs)
-//      under cfg.DBPath.
-//   2. Process foundational.Spec into all 4 stores at rangeIdx=0.
-//   3. Run AutoFill RNG loop (byte-for-byte with geth's draw
-//      sequence — preserves cross-client invariance). Each draw:
-//      pick rangeIdx via byte-count milestones; encode + write
-//      directly to all 4 streamsorts. NO in-memory aggregation
-//      for autofill — this is the OOM fix.
-//   4. Run HPH commitment over the commitmentInputStore (disk-backed
-//      ctx.Account/Storage callbacks via streamsort.Get).
-//   5. Multi-range write loop — 4 ranges × 4 domains:
-//      - Accounts/Storage/Code: per-range WriteDomain with
-//        FromStreamsortRange.
-//      - Commitment: branches + KeyCommitmentState in NEWEST range
-//        only (commitment.448-449.kv = L1 top); older 3 ranges get
-//        1-entry placeholder files (empty KeyCommitmentState) —
-//        satisfies the integrity-checker's
-//        AddDependencyBtwnDomains(AccountsDomain, CommitmentDomain)
-//        without duplicating branch data.
+//  1. Open 4 streamsorts (accounts/storage/code/commitmentInputs)
+//     under cfg.DBPath.
+//  2. Spawn N encode workers (N = erigonWorkers) + 4 per-domain
+//     writer goroutines (one per streamsort).
+//  3. Main goroutine drains foundational.Spec + runs the AutoFill
+//     RNG loop, sending entityWork records to entityCh. Workers
+//     consume, encode SerialiseV3 + commitment-update, emit
+//     (key, value) tuples to per-domain channels. Writer goroutines
+//     drain channels into streamsort.Put. CPU encode and disk I/O
+//     overlap; RNG order stays on main thread for cross-client
+//     invariance.
+//  4. Run HPH commitment over the commitmentInputStore (disk-backed
+//     ctx.Account/Storage callbacks via streamsort.Get).
+//  5a. Marshal branches map into branchesStore (sequential — small).
+//  5b. Multi-range write loop — 4 ranges × 3 domains FAN OUT into
+//      goroutines (semaphore-bounded at NumCPU). Commitment phase
+//      stays serial (small + shared branchesStore).
 //
 // Returns the HPH root; runImpl patches it into block-0 header.stateRoot.
 func writeSnapshots(
@@ -120,31 +185,77 @@ func writeSnapshots(
 	}
 	defer commitmentInputStore.Close()
 
-	// Per-(domain, rangeIdx) entry counts for the WriteDomain keyCount arg.
-	var counts struct {
-		Accounts [numRanges]uint64
-		Storage  [numRanges]uint64
-		Code     [numRanges]uint64
-	}
-
-	// Per-rangeIdx running byte counter for the autofill milestone routing.
-	// Only the autofill loop reads/writes this — spec is pinned to 0.
+	// Per-rangeIdx running byte counter for autofill milestone routing.
+	// Main-goroutine-only — never touched by workers.
 	var bytesIn [numRanges]uint64
 
-	// -- Step 2: drain foundational.Spec into all 4 stores at rangeIdx=0.
+	// counts: atomic per-(domain, rangeIdx) increments by workers.
+	var counts rangeCounts
+
+	// -- Step 2: spawn worker pool + per-domain writer goroutines.
+	pipelineCtx, cancelPipeline := context.WithCancel(ctx)
+	defer cancelPipeline()
+
+	chans := &perDomainChans{
+		accounts: make(chan domainWrite, 4096),
+		storage:  make(chan domainWrite, 4096),
+		code:     make(chan domainWrite, 4096),
+		commitIn: make(chan domainWrite, 4096),
+	}
+
+	N := erigonWorkers
+	entityCh := make(chan entityWork, 2*N)
+	encodeErrCh := make(chan error, N)
+	writerErrCh := make(chan error, 4)
+
+	var encodeWg sync.WaitGroup
+	encodeWg.Add(N)
+	for i := 0; i < N; i++ {
+		go func() {
+			defer encodeWg.Done()
+			if err := autofillEncodeWorker(pipelineCtx, entityCh, chans, &counts); err != nil {
+				select {
+				case encodeErrCh <- err:
+				default:
+				}
+				cancelPipeline()
+			}
+		}()
+	}
+
+	var writerWg sync.WaitGroup
+	writerWg.Add(4)
+	go runDomainWriter(pipelineCtx, &writerWg, writerErrCh, cancelPipeline, chans.accounts, accountsStore, "accounts")
+	go runDomainWriter(pipelineCtx, &writerWg, writerErrCh, cancelPipeline, chans.storage, storageStore, "storage")
+	go runDomainWriter(pipelineCtx, &writerWg, writerErrCh, cancelPipeline, chans.code, codeStore, "code")
+	go runDomainWriter(pipelineCtx, &writerWg, writerErrCh, cancelPipeline, chans.commitIn, commitmentInputStore, "commitmentInput")
+
+	// sendEntity exits early if the pipeline already cancelled (a worker
+	// or writer failed mid-stream).
+	sendEntity := func(ew entityWork) error {
+		select {
+		case entityCh <- ew:
+			return nil
+		case <-pipelineCtx.Done():
+			return pipelineCtx.Err()
+		}
+	}
+
+	// -- Step 3a: drain foundational.Spec → entityCh at rangeIdx=0.
 	// Also build genesisAddrs for the dedup-redraw loop (matches geth
 	// byte-for-byte: dedup against spec only, never against other
 	// autofill draws — see client/geth/state_writer.go:120-148).
 	genesisAddrs := make(map[common.Address]struct{}, len(foundational.Spec))
+	var pipelineErr error
 	for addr, entry := range foundational.Spec {
 		genesisAddrs[addr] = struct{}{}
-		if err := putEntry(0, addr, entry, &counts.Accounts[0], &counts.Storage[0], &counts.Code[0],
-			accountsStore, storageStore, codeStore, commitmentInputStore); err != nil {
-			return common.Hash{}, err
+		if err := sendEntity(entityWork{addr: addr, entry: entry, rangeIdx: 0}); err != nil {
+			pipelineErr = err
+			break
 		}
 	}
 
-	// -- Step 3: AutoFill RNG loop — STREAMING.
+	// -- Step 3b: AutoFill RNG loop — STREAMING (main thread only).
 	//
 	// The dedup-redraw loop MUST match client/geth/state_writer.go:116-148
 	// byte-for-byte: geth burns RNG draws on collision until it finds a
@@ -156,10 +267,10 @@ func writeSnapshots(
 	// AutoFill.Draw{EOA,Contract} return non-nil for all valid plans (a
 	// nil return would crash geth at the same point — we mirror that
 	// contract rather than guard against it).
-	if cfg.AutoFill != nil {
+	if pipelineErr == nil && cfg.AutoFill != nil {
 		rng := mrand.New(mrand.NewSource(cfg.Seed))
 		milestones := computeAutofillMilestones(cfg.TargetSize)
-		for i := 0; i < cfg.AutoFill.NumEOAs; i++ {
+		for i := 0; i < cfg.AutoFill.NumEOAs && pipelineErr == nil; i++ {
 			acc := cfg.AutoFill.DrawEOA(rng)
 			for _, dup := genesisAddrs[acc.Address]; dup; {
 				acc = cfg.AutoFill.DrawEOA(rng)
@@ -170,17 +281,15 @@ func writeSnapshots(
 			if acc.StateAccount.Balance != nil {
 				entry.Balance = acc.StateAccount.Balance.ToBig()
 			}
-			if err := putEntry(rangeIdx, acc.Address, entry,
-				&counts.Accounts[rangeIdx], &counts.Storage[rangeIdx], &counts.Code[rangeIdx],
-				accountsStore, storageStore, codeStore, commitmentInputStore); err != nil {
-				return common.Hash{}, err
+			if err := sendEntity(entityWork{addr: acc.Address, entry: entry, rangeIdx: rangeIdx}); err != nil {
+				pipelineErr = err
+				break
 			}
-			// Track encoded byte size for milestone routing — account
-			// SerialiseV3 averages ~30 bytes; conservative estimate.
+			// Conservative per-entity estimate — SerialiseV3 averages ~30 B for an EOA.
 			bytesIn[rangeIdx] += 32
 			stats.AccountsCreated++
 		}
-		for i := 0; i < cfg.AutoFill.NumContracts; i++ {
+		for i := 0; i < cfg.AutoFill.NumContracts && pipelineErr == nil; i++ {
 			c := cfg.AutoFill.DrawContract(rng)
 			for _, dup := genesisAddrs[c.Address]; dup; {
 				c = cfg.AutoFill.DrawContract(rng)
@@ -195,29 +304,55 @@ func writeSnapshots(
 				entry.Code = c.Code
 				stats.CodeBytes += uint64(len(c.Code))
 			}
-			if err := putEntry(rangeIdx, c.Address, entry,
-				&counts.Accounts[rangeIdx], &counts.Storage[rangeIdx], &counts.Code[rangeIdx],
-				accountsStore, storageStore, codeStore, commitmentInputStore); err != nil {
-				return common.Hash{}, err
-			}
-			// Stream storage slots inline — slice released after iteration.
-			for _, s := range c.Storage {
-				if err := putStorageSlot(rangeIdx, c.Address, s.Key, s.Value,
-					&counts.Storage[rangeIdx], &bytesIn[rangeIdx],
-					storageStore, commitmentInputStore); err != nil {
-					return common.Hash{}, err
+			if len(c.Storage) > 0 {
+				entry.Storage = make(map[common.Hash]common.Hash, len(c.Storage))
+				for _, s := range c.Storage {
+					entry.Storage[s.Key] = s.Value
 				}
+			}
+			if err := sendEntity(entityWork{addr: c.Address, entry: entry, rangeIdx: rangeIdx}); err != nil {
+				pipelineErr = err
+				break
 			}
 			stats.StorageSlotsCreated += len(c.Storage)
 			stats.StorageBytes += uint64(len(c.Storage)) * 64
-			bytesIn[rangeIdx] += uint64(len(entry.Code)) + 32
+			// Conservative per-entity estimate covering account + code + slots.
+			bytesIn[rangeIdx] += uint64(len(entry.Code)) + 32 + uint64(len(c.Storage))*64
 			stats.ContractsCreated++
 		}
 	}
 	stats.TotalBytes = stats.StorageBytes + stats.CodeBytes
 
+	// Close entityCh → workers drain remaining items then exit.
+	close(entityCh)
+	encodeWg.Wait()
+
+	// Close per-domain channels → writers drain then exit.
+	close(chans.accounts)
+	close(chans.storage)
+	close(chans.code)
+	close(chans.commitIn)
+	writerWg.Wait()
+
+	// Surface the first encountered error. Worker errors take priority
+	// over the local pipelineErr (which is just ctx.Canceled in the
+	// cancel path; the real cause is in encodeErrCh or writerErrCh).
+	select {
+	case err := <-encodeErrCh:
+		return common.Hash{}, fmt.Errorf("writeSnapshots: encode worker: %w", err)
+	default:
+	}
+	select {
+	case err := <-writerErrCh:
+		return common.Hash{}, fmt.Errorf("writeSnapshots: domain writer: %w", err)
+	default:
+	}
+	if pipelineErr != nil {
+		return common.Hash{}, fmt.Errorf("writeSnapshots: pipeline: %w", pipelineErr)
+	}
+
 	// -- Step 4: HPH commitment walk over commitmentInputStore.
-	// ctx.Account/Storage callbacks now read from streamsort.Get
+	// ctx.Account/Storage callbacks read from streamsort.Get
 	// (disk-backed). branches map stays in memory (bounded).
 	result, err := internalcommitment.ComputeGenesisRoot(commitmentInputStore)
 	if err != nil {
@@ -243,7 +378,7 @@ func writeSnapshots(
 		nBranches++
 	}
 
-	// -- Step 5b: snap.NewWriter + multi-range emit.
+	// -- Step 5b: snap.NewWriter + parallel multi-range emit.
 	settings := snap.Settings{
 		Seed:              cfg.Seed,
 		StepSize:          internalerigon.StepSize,
@@ -256,33 +391,56 @@ func writeSnapshots(
 	}
 	defer w.Close()
 
-	for i := uint8(0); i < numRanges; i++ {
-		r := ranges[i]
-		if err := w.WriteDomain(ctx, snap.DomainAccounts, r, counts.Accounts[i],
-			snap.FromStreamsortRange(accountsStore, i)); err != nil {
-			return common.Hash{}, fmt.Errorf("writeSnapshots: WriteDomain(Accounts, range=%v): %w", r, err)
+	// Fan out 12 independent WriteDomain calls (4 ranges × 3 domains).
+	// Each tuple has its own .kv + accessors output, its own streamsort
+	// prefix-scan input, and no shared mutable state — safe to run in
+	// parallel. Semaphore-bound at NumCPU keeps seg.Compressor pressure
+	// realistic on small hosts.
+	type domainSpec struct {
+		domain snap.Domain
+		store  *streamsort.Store
+		counts *[numRanges]uint64
+	}
+	domainSpecs := []domainSpec{
+		{snap.DomainAccounts, accountsStore, &counts.accounts},
+		{snap.DomainStorage, storageStore, &counts.storage},
+		{snap.DomainCode, codeStore, &counts.code},
+	}
+	emitErrCh := make(chan error, numRanges*len(domainSpecs))
+	var emitWg sync.WaitGroup
+	sem := make(chan struct{}, runtime.NumCPU())
+	for r := uint8(0); r < numRanges; r++ {
+		for _, ds := range domainSpecs {
+			sem <- struct{}{}
+			emitWg.Add(1)
+			go func(r uint8, ds domainSpec) {
+				defer func() { <-sem; emitWg.Done() }()
+				count := ds.counts[r]
+				if err := w.WriteDomain(ctx, ds.domain, ranges[r], count,
+					snap.FromStreamsortRange(ds.store, r)); err != nil {
+					select {
+					case emitErrCh <- fmt.Errorf("WriteDomain(%v, range=%v): %w", ds.domain, ranges[r], err):
+					default:
+					}
+				}
+			}(r, ds)
 		}
-		if err := w.WriteDomain(ctx, snap.DomainStorage, r, counts.Storage[i],
-			snap.FromStreamsortRange(storageStore, i)); err != nil {
-			return common.Hash{}, fmt.Errorf("writeSnapshots: WriteDomain(Storage, range=%v): %w", r, err)
-		}
-		if err := w.WriteDomain(ctx, snap.DomainCode, r, counts.Code[i],
-			snap.FromStreamsortRange(codeStore, i)); err != nil {
-			return common.Hash{}, fmt.Errorf("writeSnapshots: WriteDomain(Code, range=%v): %w", r, err)
-		}
+	}
+	emitWg.Wait()
+	select {
+	case err := <-emitErrCh:
+		return common.Hash{}, fmt.Errorf("writeSnapshots: %w", err)
+	default:
 	}
 
 	// Commitment: branches + KeyCommitmentState in NEWEST range only.
+	// Serial after the fan-out — commitment is small (~200 MB branches
+	// at full bench scale) and the placeholders share branchesStore-
+	// derived emptyKeyState, so parallelization gain is negligible.
 	newestRange := ranges[numRanges-1]
 	if err := snap.WriteCommitment(ctx, w, newestRange, keyStateValue, branchesStore, nBranches); err != nil {
 		return common.Hash{}, fmt.Errorf("writeSnapshots: WriteCommitment(newest): %w", err)
 	}
-	// Older ranges get 1-entry placeholder files (empty trieState).
-	// Daemon's first-FCU SeekCommitment reads ONLY the newest visible
-	// commitment file's KeyCommitmentState per upstream's newest-wins
-	// GetLatest path (db/state/domain.go:1290-1369), so older placeholder
-	// records are inert — they only exist to satisfy the integrity
-	// checker's AddDependencyBtwnDomains rule at every accounts range.
 	emptyKeyState, err := internalcommitment.EncodeKeyCommitmentStateValue(0, 0, nil)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("writeSnapshots: encode empty KeyCommitmentState: %w", err)
@@ -294,104 +452,137 @@ func writeSnapshots(
 	}
 
 	if cfg.Verbose {
-		fmt.Printf("client/erigon: wrote snapshots: spec=%d autofill_accounts=%d contracts=%d storage_slots=%d branches=%d root=%s\n",
-			len(foundational.Spec), stats.AccountsCreated, stats.ContractsCreated, stats.StorageSlotsCreated, nBranches, result.Root.Hex())
+		fmt.Printf("client/erigon: wrote snapshots: spec=%d autofill_accounts=%d contracts=%d storage_slots=%d branches=%d workers=%d root=%s\n",
+			len(foundational.Spec), stats.AccountsCreated, stats.ContractsCreated, stats.StorageSlotsCreated, nBranches, N, result.Root.Hex())
 		fmt.Printf("client/erigon: per-range entry counts: accounts=%v storage=%v code=%v\n",
-			counts.Accounts, counts.Storage, counts.Code)
+			counts.accounts, counts.storage, counts.code)
 	}
 
 	return result.Root, nil
 }
 
-// putEntry encodes one alloc entry + writes to all 4 streamsorts.
-//
-// For accounts/storage/code stores: composite key = (rangeIdx:u8 || ...)
-// — enables prefix-scan per range via FromStreamsortRange.
-// For commitmentInputStore: plain key (no rangeIdx prefix) — ctx.Account
-// looks up by plain key during the HPH walk, and key-uniqueness is
-// global across ranges (every address shows up in exactly one range).
-//
-// Updates per-(domain, range) counters via the *uint64 pointers.
-func putEntry(
-	rangeIdx uint8,
-	addr common.Address,
-	entry *allocAccount,
-	nAcct, nStor, nCode *uint64,
-	accountsStore, storageStore, codeStore, commitmentInputStore *streamsort.Store,
+// runDomainWriter is the goroutine entry-point for one per-domain
+// writer. Drains `in` into `store` until either the channel closes
+// (clean shutdown) or ctx cancels (error path). On error, pushes to
+// errCh and triggers cancel.
+func runDomainWriter(
+	ctx context.Context,
+	wg *sync.WaitGroup,
+	errCh chan<- error,
+	cancel context.CancelFunc,
+	in <-chan domainWrite,
+	store *streamsort.Store,
+	label string,
+) {
+	defer wg.Done()
+	if err := domainWriter(ctx, in, store, label); err != nil {
+		select {
+		case errCh <- err:
+		default:
+		}
+		cancel()
+	}
+}
+
+// autofillEncodeWorker consumes entityWork from entityCh, encodes
+// each entry on a worker goroutine, and emits (key, value) tuples to
+// the per-domain channels. Exits cleanly on entityCh close OR ctx
+// cancellation.
+func autofillEncodeWorker(
+	ctx context.Context,
+	in <-chan entityWork,
+	out *perDomainChans,
+	counts *rangeCounts,
 ) error {
-	// Compose snap-store key: (rangeIdx || addr).
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case ew, ok := <-in:
+			if !ok {
+				return nil
+			}
+			if err := encodeEntity(ctx, ew, out, counts); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+// encodeEntity is the worker-side encode for one alloc entry. Emits:
+//   - 1 account row → accounts channel (always)
+//   - 1 code row → code channel (only if entity has bytecode)
+//   - len(entry.Storage) storage rows → storage + commitIn channels
+//   - 1 commitment-input row → commitIn channel (account-level update)
+//
+// All composite keys + encoded values are computed here (CPU-bound).
+// The per-domain writer goroutines absorb the disk-bound Put.
+func encodeEntity(
+	ctx context.Context,
+	ew entityWork,
+	out *perDomainChans,
+	counts *rangeCounts,
+) error {
 	addrComposite := make([]byte, 0, 1+20)
-	addrComposite = append(addrComposite, rangeIdx)
-	addrComposite = append(addrComposite, addr[:]...)
+	addrComposite = append(addrComposite, ew.rangeIdx)
+	addrComposite = append(addrComposite, ew.addr[:]...)
 
 	// Accounts snapshot value: SerialiseV3.
 	acct := account.Account{
-		Nonce:    entry.Nonce,
+		Nonce:    ew.entry.Nonce,
 		CodeHash: account.EmptyCodeHash,
 	}
-	if entry.Balance != nil {
-		b, overflow := uint256.FromBig(entry.Balance)
+	var balance *uint256.Int
+	if ew.entry.Balance != nil {
+		b, overflow := uint256.FromBig(ew.entry.Balance)
 		if overflow {
-			return fmt.Errorf("putEntry: balance overflow for %s", addr.Hex())
+			return fmt.Errorf("encodeEntity: balance overflow for %s", ew.addr.Hex())
 		}
 		acct.Balance = *b
+		balance = b
 	}
-	if len(entry.Code) > 0 {
-		h := crypto.Keccak256Hash(entry.Code)
+	if len(ew.entry.Code) > 0 {
+		h := crypto.Keccak256Hash(ew.entry.Code)
 		copy(acct.CodeHash[:], h[:])
 	}
-	if err := accountsStore.Put(addrComposite, account.SerialiseV3(acct)); err != nil {
-		return fmt.Errorf("putEntry: put accounts[%s]: %w", addr.Hex(), err)
+	if err := sendDomainWrite(ctx, out.accounts, domainWrite{key: addrComposite, value: account.SerialiseV3(acct)}); err != nil {
+		return err
 	}
-	(*nAcct)++
+	atomic.AddUint64(&counts.accounts[ew.rangeIdx], 1)
 
 	// Code snapshot value: raw bytecode keyed by addr.
-	if len(entry.Code) > 0 {
-		if err := codeStore.Put(addrComposite, entry.Code); err != nil {
-			return fmt.Errorf("putEntry: put code[%s]: %w", addr.Hex(), err)
+	if len(ew.entry.Code) > 0 {
+		if err := sendDomainWrite(ctx, out.code, domainWrite{key: addrComposite, value: ew.entry.Code}); err != nil {
+			return err
 		}
-		(*nCode)++
+		atomic.AddUint64(&counts.code[ew.rangeIdx], 1)
 	}
 
-	// Foundational entries may have inline Storage (PreAlloc /
-	// GenesisStorage). Stream into storageStore + commitmentInputStore.
-	for slot, value := range entry.Storage {
-		if err := putStorageSlot(rangeIdx, addr, slot, value,
-			nStor, nil, storageStore, commitmentInputStore); err != nil {
+	// Inline storage (foundational PreAlloc + contract autofill).
+	for slot, value := range ew.entry.Storage {
+		if err := encodeStorageSlot(ctx, ew.rangeIdx, ew.addr, slot, value, out, counts); err != nil {
 			return err
 		}
 	}
 
-	// Commitment input value: Update.Encode keyed by plain addr.
-	var balance *uint256.Int
-	if entry.Balance != nil {
-		b, overflow := uint256.FromBig(entry.Balance)
-		if overflow {
-			return fmt.Errorf("putEntry: balance overflow for commitment %s", addr.Hex())
-		}
-		balance = b
-	}
-	commitBytes := internalcommitment.EncodeAccountUpdate(entry.Nonce, balance, entry.Code)
-	if err := commitmentInputStore.Put(addr[:], commitBytes); err != nil {
-		return fmt.Errorf("putEntry: put commitmentInput[%s]: %w", addr.Hex(), err)
-	}
-	return nil
+	// Commitment input: account-level Update keyed by plain addr.
+	commitBytes := internalcommitment.EncodeAccountUpdate(ew.entry.Nonce, balance, ew.entry.Code)
+	addrKey := make([]byte, 20)
+	copy(addrKey, ew.addr[:])
+	return sendDomainWrite(ctx, out.commitIn, domainWrite{key: addrKey, value: commitBytes})
 }
 
-// putStorageSlot writes one (addr, slot, value) tuple to storageStore +
-// commitmentInputStore. Skip on all-zero value (Erigon's StorageDomain
-// treats absent ≡ zero; storing zero is wrong).
-//
-// bytesAcc may be nil if caller doesn't track byte counts for this slot
-// (e.g. foundational storage isn't milestone-routed).
-func putStorageSlot(
+// encodeStorageSlot encodes one (addr, slot, value) tuple. Skip on
+// all-zero value (Erigon's StorageDomain treats absent ≡ zero;
+// storing zero is wrong).
+func encodeStorageSlot(
+	ctx context.Context,
 	rangeIdx uint8,
 	addr common.Address,
 	slotKey common.Hash,
 	slotValue common.Hash,
-	nStor *uint64,
-	bytesAcc *uint64,
-	storageStore, commitmentInputStore *streamsort.Store,
+	out *perDomainChans,
+	counts *rangeCounts,
 ) error {
 	trimmed := trimLeadingZeros(slotValue[:])
 	if len(trimmed) == 0 {
@@ -402,23 +593,53 @@ func putStorageSlot(
 	composite = append(composite, rangeIdx)
 	composite = append(composite, addr[:]...)
 	composite = append(composite, slotKey[:]...)
-	if err := storageStore.Put(composite, trimmed); err != nil {
-		return fmt.Errorf("putStorageSlot: put storage[%x|%x]: %w", addr, slotKey, err)
+	if err := sendDomainWrite(ctx, out.storage, domainWrite{key: composite, value: trimmed}); err != nil {
+		return err
 	}
-	(*nStor)++
+	atomic.AddUint64(&counts.storage[rangeIdx], 1)
 
 	// Plain key for commitment: addr || slot = 52 bytes (no rangeIdx).
 	plainKey := make([]byte, 0, 20+32)
 	plainKey = append(plainKey, addr[:]...)
 	plainKey = append(plainKey, slotKey[:]...)
 	commitBytes := internalcommitment.EncodeStorageUpdate(slotValue[:])
-	if err := commitmentInputStore.Put(plainKey, commitBytes); err != nil {
-		return fmt.Errorf("putStorageSlot: put commitmentInput storage[%x|%x]: %w", addr, slotKey, err)
+	return sendDomainWrite(ctx, out.commitIn, domainWrite{key: plainKey, value: commitBytes})
+}
+
+// sendDomainWrite is the cancel-aware channel send used by encoders.
+func sendDomainWrite(ctx context.Context, ch chan<- domainWrite, dw domainWrite) error {
+	select {
+	case ch <- dw:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	if bytesAcc != nil {
-		*bytesAcc += uint64(len(trimmed)) + 64
+}
+
+// domainWriter drains a single per-domain channel into the
+// corresponding streamsort. streamsort is single-writer by design
+// (internal/streamsort/streamsort.go) — having exactly one writer
+// goroutine per domain is what makes the worker pool safe without a
+// mutex on the streamsort itself.
+func domainWriter(
+	ctx context.Context,
+	in <-chan domainWrite,
+	store *streamsort.Store,
+	label string,
+) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case dw, ok := <-in:
+			if !ok {
+				return nil
+			}
+			if err := store.Put(dw.key, dw.value); err != nil {
+				return fmt.Errorf("domainWriter[%s]: %w", label, err)
+			}
+		}
 	}
-	return nil
 }
 
 // pickAutofillRange returns the rangeIdx for the next autofill entry.
