@@ -212,6 +212,26 @@ func ComputeGenesisRoot(commitmentInputStore *streamsort.Store) (Result, error) 
 	var root gethcommon.Hash
 	copy(root[:], rootBytes)
 
+	// Flush the root HPH's deferred branch updates into rootCtx.PutBranch.
+	//
+	// NewHexPatriciaHashed defaults branchEncoder to deferred mode
+	// (hex_patricia_hashed.go:160 upstream). SpawnSubTrie explicitly
+	// disables deferred mode for the per-nibble mounts
+	// (hex_concurrent_patricia_hashed.go:128 upstream), but the root
+	// keeps it. The serial HexPatriciaHashed.Process flushes deferred
+	// updates at its tail (hex_patricia_hashed.go:2889) — but
+	// ConcurrentPatriciaHashed.ParallelHashSort
+	// (hex_concurrent_patricia_hashed.go:207-295) returns rootHash
+	// without that flush. Without this explicit call, the
+	// mergedBranches map is missing the root-level (empty-prefix,
+	// compact-key 0x10) branch entry, which causes a divergent root
+	// vs serial HPH at any alloc that produces a 16-cell root branch
+	// and a daemon FCU panic when SeekCommitment restores HPH state
+	// and the first block-0 update calls ctx.Branch(nil).
+	if err := pph.RootTrie().ApplyAndClearInlineDeferredUpdates(); err != nil {
+		return Result{}, fmt.Errorf("commitment.ComputeGenesisRoot: ApplyAndClearInlineDeferredUpdates: %w", err)
+	}
+
 	// HPHState comes from the root trie after all subtrees have folded
 	// back into root.grid[0]. RootTrie() returns the same root HPH we
 	// constructed above.
@@ -258,6 +278,13 @@ func ComputeGenesisRootFromAccounts(accounts []Account) (Result, error) {
 				return Result{}, fmt.Errorf("ComputeGenesisRootFromAccounts: put storage %s/%s: %w", a.Address.Hex(), slot.Hex(), err)
 			}
 		}
+	}
+	// ComputeGenesisRoot requires its input streamsort to be Finalized
+	// — Iterate and Get on the store both gate on the Finalize state
+	// transition. The wrapper Puts everything here, so we Finalize
+	// before delegating.
+	if err := store.Finalize(); err != nil {
+		return Result{}, fmt.Errorf("ComputeGenesisRootFromAccounts: Finalize: %w", err)
 	}
 	return ComputeGenesisRoot(store)
 }

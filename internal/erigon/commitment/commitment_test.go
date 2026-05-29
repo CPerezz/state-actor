@@ -4,9 +4,11 @@ package commitment
 
 import (
 	"bytes"
+	"encoding/binary"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/holiman/uint256"
 )
 
@@ -92,6 +94,67 @@ func TestContractWithStorageProducesRoot(t *testing.T) {
 		t.Error("expected at least one branch node for contract+storage alloc")
 	}
 	t.Logf("contract+3slots root: %s (%d branch nodes)", res.Root.Hex(), len(res.BranchNodes))
+}
+
+// TestComputeGenesisRoot_IncludesRootBranch is the regression gate for
+// the bug where ParallelHashSort returned the root hash without
+// flushing the root HexPatriciaHashed's deferred branch updates.
+// Without the explicit ApplyAndClearInlineDeferredUpdates call in
+// ComputeGenesisRoot, the resulting BranchNodes map would be missing
+// the root-level (depth-0) branch entry, producing silent state-root
+// divergence at any alloc that lands in 16+ distinct first nibbles.
+//
+// The fixture: 16 EOAs with addresses chosen so their keccak256 hashes
+// span all 16 first nibbles. The resulting trie has a 16-cell root
+// branch — exactly the structure that exposes the bug. The leaves of
+// a single-leaf-per-nibble trie are stored inline in the root branch
+// (no extra branch nodes), so a missing root branch means
+// len(BranchNodes) == 0.
+func TestComputeGenesisRoot_IncludesRootBranch(t *testing.T) {
+	accounts := generateAccountsSpanningAllFirstNibbles(t)
+	if len(accounts) != 16 {
+		t.Fatalf("fixture should have 16 accounts; got %d", len(accounts))
+	}
+	res, err := ComputeGenesisRootFromAccounts(accounts)
+	if err != nil {
+		t.Fatalf("ComputeGenesisRootFromAccounts: %v", err)
+	}
+	if (res.Root == common.Hash{}) {
+		t.Fatal("expected non-zero root for 16-account alloc")
+	}
+	if len(res.BranchNodes) == 0 {
+		t.Fatalf("expected ≥ 1 branch node for 16-account alloc spanning all first nibbles; got 0 — root-level branch was not flushed (Bug 2 regression: ApplyAndClearInlineDeferredUpdates not called after pph.Process)")
+	}
+	t.Logf("16-account root: %s (%d branch nodes)", res.Root.Hex(), len(res.BranchNodes))
+}
+
+// generateAccountsSpanningAllFirstNibbles produces 16 Accounts whose
+// keccak256(addr) bytes start with each of the 16 hex nibbles. Brute-
+// force search; on typical machines this terminates within milliseconds.
+func generateAccountsSpanningAllFirstNibbles(t *testing.T) []Account {
+	t.Helper()
+	seen := make(map[byte]Account, 16)
+	for i := uint64(0); len(seen) < 16; i++ {
+		var addr common.Address
+		binary.BigEndian.PutUint64(addr[12:], i+1)
+		firstNibble := crypto.Keccak256Hash(addr[:])[0] >> 4
+		if _, ok := seen[firstNibble]; ok {
+			continue
+		}
+		seen[firstNibble] = Account{
+			Address: addr,
+			Nonce:   i + 1,
+			Balance: uint256.NewInt(1000 + i),
+		}
+		if i > 100_000 {
+			t.Fatalf("could not find 16 distinct first nibbles within %d attempts (got %d)", i, len(seen))
+		}
+	}
+	out := make([]Account, 0, 16)
+	for _, a := range seen {
+		out = append(out, a)
+	}
+	return out
 }
 
 func branchNodesBytes(m map[string][]byte) []byte {

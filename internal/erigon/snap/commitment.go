@@ -58,6 +58,12 @@ func WriteCommitment(
 	if err := branches.Put(KeyCommitmentState, keyState); err != nil {
 		return fmt.Errorf("snap.WriteCommitment: put KeyCommitmentState: %w", err)
 	}
+	// Finalize the branches store before WriteDomain consumes it via
+	// FromStreamsort → Iterate. Iterate requires the store to be
+	// Finalized; without this call FromStreamsort returns an error.
+	if err := branches.Finalize(); err != nil {
+		return fmt.Errorf("snap.WriteCommitment: Finalize branches: %w", err)
+	}
 	return w.WriteDomain(ctx, DomainCommitment, r, branchCount+1, FromStreamsort(branches))
 }
 
@@ -95,6 +101,9 @@ func WriteCommitmentPlaceholder(
 	defer tmpStore.Close()
 	if err := tmpStore.Put(KeyCommitmentState, keyState); err != nil {
 		return fmt.Errorf("snap.WriteCommitmentPlaceholder: put KeyCommitmentState: %w", err)
+	}
+	if err := tmpStore.Finalize(); err != nil {
+		return fmt.Errorf("snap.WriteCommitmentPlaceholder: Finalize: %w", err)
 	}
 	return w.WriteDomain(ctx, DomainCommitment, r, 1, FromStreamsort(tmpStore))
 }

@@ -351,6 +351,29 @@ func writeSnapshots(
 		return common.Hash{}, fmt.Errorf("writeSnapshots: pipeline: %w", pipelineErr)
 	}
 
+	// Finalize the 4 streamsorts. After this they enter their FINALIZED
+	// state and Get/Iterate become safe for concurrent callers — Phase 2
+	// (ConcurrentPatriciaHashed, 16 workers) does concurrent
+	// commitmentInputStore.Get; Phase 5b (12-way WriteDomain fan-out)
+	// does concurrent accountsStore/storageStore/codeStore.Iterate.
+	// Without Finalize, the post-Phase-1 batch flush would race against
+	// the next call's batch.Commit and trigger pebble: batch already
+	// committing. Finalize moves the flush to a one-shot mutex-serialized
+	// transition so the read path is lock-free.
+	for _, fz := range []struct {
+		name  string
+		store *streamsort.Store
+	}{
+		{"accounts", accountsStore},
+		{"storage", storageStore},
+		{"code", codeStore},
+		{"commitmentInput", commitmentInputStore},
+	} {
+		if err := fz.store.Finalize(); err != nil {
+			return common.Hash{}, fmt.Errorf("writeSnapshots: Finalize %s streamsort: %w", fz.name, err)
+		}
+	}
+
 	// -- Step 4: HPH commitment walk over commitmentInputStore.
 	// ctx.Account/Storage callbacks read from streamsort.Get
 	// (disk-backed). branches map stays in memory (bounded).
