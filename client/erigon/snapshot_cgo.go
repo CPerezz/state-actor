@@ -192,7 +192,7 @@ func writeSnapshots(
 			}
 			// Stream storage slots inline — slice released after iteration.
 			for _, s := range c.Storage {
-				if err := putStorageSlot(rangeIdx, c.Address, s,
+				if err := putStorageSlot(rangeIdx, c.Address, s.Key, s.Value,
 					&counts.Storage[rangeIdx], &bytesIn[rangeIdx],
 					storageStore, commitmentInputStore); err != nil {
 					return common.Hash{}, err
@@ -346,12 +346,10 @@ func putEntry(
 	// Foundational entries may have inline Storage (PreAlloc /
 	// GenesisStorage). Stream into storageStore + commitmentInputStore.
 	for slot, value := range entry.Storage {
-		valBytes := value[:]
-		if err := putStorageSlot(rangeIdx, addr, entitygenSlot(slot, value),
+		if err := putStorageSlot(rangeIdx, addr, slot, value,
 			nStor, nil, storageStore, commitmentInputStore); err != nil {
 			return err
 		}
-		_ = valBytes
 	}
 
 	// Commitment input value: Update.Encode keyed by plain addr.
@@ -379,12 +377,13 @@ func putEntry(
 func putStorageSlot(
 	rangeIdx uint8,
 	addr common.Address,
-	s storageSlot,
+	slotKey common.Hash,
+	slotValue common.Hash,
 	nStor *uint64,
 	bytesAcc *uint64,
 	storageStore, commitmentInputStore *streamsort.Store,
 ) error {
-	trimmed := trimLeadingZeros(s.value[:])
+	trimmed := trimLeadingZeros(slotValue[:])
 	if len(trimmed) == 0 {
 		return nil
 	}
@@ -392,36 +391,25 @@ func putStorageSlot(
 	composite := make([]byte, 0, 1+20+32)
 	composite = append(composite, rangeIdx)
 	composite = append(composite, addr[:]...)
-	composite = append(composite, s.key[:]...)
+	composite = append(composite, slotKey[:]...)
 	if err := storageStore.Put(composite, trimmed); err != nil {
-		return fmt.Errorf("putStorageSlot: put storage[%x|%x]: %w", addr, s.key, err)
+		return fmt.Errorf("putStorageSlot: put storage[%x|%x]: %w", addr, slotKey, err)
 	}
 	(*nStor)++
 
 	// Plain key for commitment: addr || slot = 52 bytes (no rangeIdx).
 	plainKey := make([]byte, 0, 20+32)
 	plainKey = append(plainKey, addr[:]...)
-	plainKey = append(plainKey, s.key[:]...)
-	commitBytes := internalcommitment.EncodeStorageUpdate(s.value[:])
+	plainKey = append(plainKey, slotKey[:]...)
+	commitBytes := internalcommitment.EncodeStorageUpdate(slotValue[:])
 	if err := commitmentInputStore.Put(plainKey, commitBytes); err != nil {
-		return fmt.Errorf("putStorageSlot: put commitmentInput storage[%x|%x]: %w", addr, s.key, err)
+		return fmt.Errorf("putStorageSlot: put commitmentInput storage[%x|%x]: %w", addr, slotKey, err)
 	}
 	if bytesAcc != nil {
 		*bytesAcc += uint64(len(trimmed)) + 64
 	}
 	return nil
 }
-
-// storageSlot bridges the entitygen-side StorageSlot (typed differently
-// for autofill vs PreAlloc) and the foundational entry.Storage map's
-// (common.Hash, common.Hash) pair, both of which putStorageSlot
-// consumes uniformly.
-type storageSlot struct {
-	key   common.Hash
-	value common.Hash
-}
-
-func entitygenSlot(k, v common.Hash) storageSlot { return storageSlot{key: k, value: v} }
 
 // pickAutofillRange returns the rangeIdx for the next autofill entry,
 // shallowest-first (rangeIdx=numRanges-1 fills first; spills DOWNWARD
