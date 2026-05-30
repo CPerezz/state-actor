@@ -24,5 +24,15 @@ func createTempFile(finalPath string) (string, *os.File, error) {
 	if err != nil {
 		return "", nil, err
 	}
+	// os.CreateTemp hardcodes mode 0o600 regardless of umask. The
+	// downstream Erigon daemon runs as a different uid and silently
+	// fails to open files it can't read — chmod to 0o644 so the
+	// renamed final .bt is world-readable. See bd85125 / 05c3ebd
+	// for the broader context.
+	if err := f.Chmod(0o644); err != nil {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		return "", nil, fmt.Errorf("btindex: chmod temp: %w", err)
+	}
 	return f.Name(), f, nil
 }

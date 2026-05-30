@@ -203,6 +203,16 @@ func (c *Compressor) Compress() error {
 	if err != nil {
 		return fmt.Errorf("seg: create temp output: %w", err)
 	}
+	// os.CreateTemp hardcodes mode 0o600 regardless of umask. The
+	// downstream Erigon daemon runs as a different uid (see commit
+	// bd85125 / 05c3ebd context) and silently fails to open files it
+	// can't read — chmod to 0o644 so the renamed final .kv is
+	// world-readable.
+	if err := tmpFile.Chmod(0o644); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpFile.Name())
+		return fmt.Errorf("seg: chmod temp output: %w", err)
+	}
 	tmpFileName := tmpFile.Name()
 	defer func() {
 		// On any error after this point, remove the temp file.

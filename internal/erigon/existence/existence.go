@@ -196,5 +196,16 @@ func createTemp(file string) (*os.File, error) {
 		dir = "."
 	}
 	pattern := fmt.Sprintf("%s.*.tmp", base)
-	return os.CreateTemp(dir, pattern)
+	f, err := os.CreateTemp(dir, pattern)
+	if err != nil {
+		return nil, err
+	}
+	// os.CreateTemp hardcodes 0o600 — chmod to 0o644 so the final
+	// renamed .kvei is world-readable by the downstream daemon.
+	if err := f.Chmod(0o644); err != nil {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		return nil, fmt.Errorf("existence: chmod temp: %w", err)
+	}
+	return f, nil
 }

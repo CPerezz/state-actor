@@ -247,6 +247,15 @@ func (w *Writer) Build(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("recsplit: create temp: %w", err)
 	}
+	// os.CreateTemp hardcodes 0o600 — the daemon (separate uid)
+	// can't read it. Chmod to 0o644 before the rename so the final
+	// .kvi is readable.
+	if err := w.indexF.Chmod(0o644); err != nil {
+		_ = w.indexF.Close()
+		_ = os.Remove(w.indexF.Name())
+		w.indexF = nil
+		return fmt.Errorf("recsplit: chmod temp: %w", err)
+	}
 	defer func() {
 		if w.indexF != nil {
 			_ = w.indexF.Close()
