@@ -31,7 +31,12 @@ type rawWordsFile struct {
 }
 
 func newRawWordsFile(filePath string) (*rawWordsFile, error) {
-	f, err := os.Create(filePath)
+	// Explicit 0o644 (vs os.Create's mode 0o666 & ~umask): the downstream
+	// Erigon daemon runs in a separate container as a different uid, and
+	// inside state-actor's docker container umask defaults to 077 — so
+	// os.Create here used to produce 0o600 files unreadable by the daemon.
+	// See feedback_snapshot_file_perms in the project memory.
+	f, err := os.OpenFile(filePath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
 		return nil, err
 	}

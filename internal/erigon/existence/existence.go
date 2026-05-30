@@ -118,7 +118,11 @@ func (b *FilterBuilder) AddHash(hash uint64) error {
 // released (set to nil) and further AddHash returns an error.
 func (b *FilterBuilder) Build() error {
 	if b.empty {
-		cf, err := os.Create(b.filePath)
+		// Explicit 0o644 — see seg/rawwords.go for the umask-induced
+		// 0o600 issue we hit on the bench host when the daemon
+		// (separate container, different uid) couldn't read snapshot
+		// files state-actor wrote.
+		cf, err := os.OpenFile(b.filePath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o644)
 		if err != nil {
 			return fmt.Errorf("existence: create empty %s: %w", b.fileName, err)
 		}
