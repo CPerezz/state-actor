@@ -392,7 +392,23 @@ func writeSnapshots(
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("writeSnapshots: ComputeGenesisRoot: %w", err)
 	}
-	keyStateValue, err := internalcommitment.EncodeKeyCommitmentStateValue(0, 0, result.HPHState)
+	// KeyCommitmentState's encoded txNum MUST match the newest commitment
+	// file's startStep, or Erigon's SeekCommitment treats the snapshot
+	// commitment state as out-of-date and refuses to build blocks:
+	//
+	//   [2/3 BuilderExecution] seek commitment failed:
+	//     "commitment" state out of date: step 0, expected step 448
+	//
+	// Erigon decodes step = txNum / stepSize from the encoded value
+	// (commitmentdb/commitment_context.go::DecodeTxBlockNums), then
+	// cross-checks against the file's startStep (= ranges[numRanges-1].From).
+	// We were encoding txNum=0 → decoded step=0, mismatching the
+	// newest file's step 448 (= ranges[3].From with stepSize=390625).
+	//
+	// Fix: encode the first txNum of the newest file's step range.
+	// blockNum stays 0 — we're still at genesis.
+	newestStartTxNum := uint64(ranges[numRanges-1].From) * internalerigon.StepSize
+	keyStateValue, err := internalcommitment.EncodeKeyCommitmentStateValue(newestStartTxNum, 0, result.HPHState)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("writeSnapshots: encode KeyCommitmentState: %w", err)
 	}
