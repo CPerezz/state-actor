@@ -8,8 +8,9 @@
   `erc20` template (only `raw` and `eoa` consumed it), even though
   [`docs/SPEC.md`](docs/SPEC.md) described it as the cross-template
   storage-budget control. Now the slot budget falls back to deriving
-  `total_owners` (one slot per random holder, minus the three fixed
-  metadata slots: `_name`, `_symbol`, `_totalSupply`). Explicit
+  `total_owners` (one slot per random holder, minus up to three metadata
+  slots — `_name`/`_symbol` always, `_totalSupply` only when supply > 0).
+  Explicit
   `total_owners` / `total_allowances` continue to win — precedence is
   "explicit > implicit", matching the existing `owners` + `total_owners`
   composition pattern. Adds four regression tests in

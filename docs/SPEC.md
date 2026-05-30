@@ -107,8 +107,9 @@ precedence over implicit byte budgets.
 
 For `erc20` specifically: if neither `total_owners` nor
 `total_allowances` is set, `approximate_size_bytes` derives the random
-owner count (one slot per holder, minus the three fixed metadata slots:
-name, symbol, totalSupply).
+owner count (one slot per holder, minus up to three metadata slots:
+`_name` and `_symbol` are always written; `_totalSupply` only when at
+least one holder has a non-zero balance).
 
 ## Templates
 
@@ -152,9 +153,10 @@ name, symbol, totalSupply).
 `approximate_size_bytes` (set at the entity level, not inside
 `parameters:`) works as a fallback: when neither `total_owners` nor
 `total_allowances` is set, the slot budget is converted to a random
-holder count (one slot per holder, minus three fixed metadata slots).
+holder count (one slot per holder, minus up to three metadata slots —
+`_name`/`_symbol` always, `_totalSupply` when supply > 0).
 The example below produces ~71.4M random `_balances` entries at the
-calibrated 140 B/slot trie cost:
+calibrated 140 B/slot cost:
 
 ```yaml
 - kind: contract
