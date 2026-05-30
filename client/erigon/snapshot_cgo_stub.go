@@ -29,12 +29,7 @@ func writeSnapshots(
 			"(the snapshot commitment writer depends on Erigon's vendored HexPatriciaHashed)")
 }
 
-// patchGenesisHeaderStateRoot stub for the !cgo_erigon_commitment build.
-// patchGenesisHeaderStateRoot proper lives in commitment_cgo.go (which
-// the cgo_erigon_commitment build provides). Under the no-commitment
-// build the header is left untouched — fine, because writeSnapshots
-// already returned an error above.
-func patchGenesisHeaderStateRoot(_ string, _ common.Hash) error {
-	return errors.New(
-		"client/erigon: patchGenesisHeaderStateRoot requires the cgo_erigon_commitment build tag")
-}
+// patchGenesisHeaderStateRoot's real implementation lives in the
+// untagged client/erigon/genesis_patch.go (it has no cgo dependency).
+// No build-tag-gated stub needed — the function is unconditionally
+// available regardless of cgo_erigon_commitment.
