@@ -669,6 +669,64 @@ func TestERC20ApproximateSizeBytesNeverShrinksExplicitOwners(t *testing.T) {
 	}
 }
 
+// TestERC20ApproximateSizeBytesBelowMetadataFloor pins the boundary: when the
+// slot budget is <= the metadata reservation (erc20MetadataSlots), the fallback
+// derives <= 0 random owners and leaves the contract at its metadata floor.
+// With zero holders _totalSupply is suppressed, so only _name + _symbol land —
+// two entries, not three. (Documents the off-by-one the build.go projection
+// tolerates around 3 slots; immaterial at GB scale.)
+func TestERC20ApproximateSizeBytesBelowMetadataFloor(t *testing.T) {
+	tokenAddr := common.HexToAddress("0x0000000000000000000000000000000000000ab5")
+	// bytesPerSlot=64: 128 B -> 2 slots (< floor), 192 B -> 3 slots (== floor).
+	// Both yield 0 random owners -> 0 supply -> _totalSupply unwritten.
+	for _, budget := range []uint64{128, 192} {
+		ent := spec.Entity{
+			Kind: spec.KindContract, Template: "erc20",
+			ApproximateSizeBytes: budget,
+			Parameters: map[string]any{
+				"symbol": "X", "name": "X", "decimals": 18,
+			},
+		}
+		ctx := Context{Seed: 1, Sizer: fixedSizer{bytesPerSlot: 64}, ResolvedAddress: tokenAddr}
+		out, err := erc20Template{}.Expand(ctx, ent)
+		if err != nil {
+			t.Fatalf("Expand(%d): %v", budget, err)
+		}
+		storage := collectMap(out[0].Storage)
+		if len(storage) != 2 {
+			t.Errorf("approximate_size_bytes=%d: storage count got %d, want 2 (_name + _symbol only)", budget, len(storage))
+		}
+	}
+}
+
+// TestERC20ApproximateSizeBytesSuppressedByTotalAllowances pins the precedence
+// guard's cross-dimension behaviour: setting total_allowances (which sizes a
+// different mapping) suppresses the approximate_size_bytes owner fallback
+// entirely, because the guard requires BOTH total_owners and total_allowances
+// to be unset. The large byte budget must be ignored.
+func TestERC20ApproximateSizeBytesSuppressedByTotalAllowances(t *testing.T) {
+	tokenAddr := common.HexToAddress("0x0000000000000000000000000000000000000ab6")
+	ent := spec.Entity{
+		Kind: spec.KindContract, Template: "erc20",
+		ApproximateSizeBytes: 1_000_000, // ~15,625 slots at 64 B/slot — must be ignored
+		Parameters: map[string]any{
+			"symbol": "X", "name": "X", "decimals": 18,
+			"total_allowances": 5, // suppresses the owner fallback
+		},
+	}
+	ctx := Context{Seed: 1, Sizer: fixedSizer{bytesPerSlot: 64}, ResolvedAddress: tokenAddr}
+	out, err := erc20Template{}.Expand(ctx, ent)
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	storage := collectMap(out[0].Storage)
+	// _name + _symbol (no random owners -> _totalSupply suppressed) + 5 random
+	// allowances = 7. NOT the ~15,625 the byte budget would imply.
+	if len(storage) != 7 {
+		t.Errorf("storage count got %d, want 7 (2 metadata + 5 random allowances; owner fallback suppressed)", len(storage))
+	}
+}
+
 func TestERC20RuntimeBytecodePinned(t *testing.T) {
 	// Guards against unintentional changes to the vendored OZ v5.6.1
 	// ERC20 deployed runtime bytecode (internal/templates/erc20_oz_v5.hex).
