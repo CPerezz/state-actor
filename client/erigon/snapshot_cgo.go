@@ -392,23 +392,18 @@ func writeSnapshots(
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("writeSnapshots: ComputeGenesisRoot: %w", err)
 	}
-	// KeyCommitmentState's encoded txNum MUST match the newest commitment
-	// file's startStep, or Erigon's SeekCommitment treats the snapshot
-	// commitment state as out-of-date and refuses to build blocks:
-	//
-	//   [2/3 BuilderExecution] seek commitment failed:
-	//     "commitment" state out of date: step 0, expected step 448
-	//
-	// Erigon decodes step = txNum / stepSize from the encoded value
-	// (commitmentdb/commitment_context.go::DecodeTxBlockNums), then
-	// cross-checks against the file's startStep (= ranges[numRanges-1].From).
-	// We were encoding txNum=0 → decoded step=0, mismatching the
-	// newest file's step 448 (= ranges[3].From with stepSize=390625).
-	//
-	// Fix: encode the first txNum of the newest file's step range.
-	// blockNum stays 0 — we're still at genesis.
-	newestStartTxNum := uint64(ranges[numRanges-1].From) * internalerigon.StepSize
-	keyStateValue, err := internalcommitment.EncodeKeyCommitmentStateValue(newestStartTxNum, 0, result.HPHState)
+	// KeyCommitmentState encodes (txNum=0, blockNum=0) — the chain is at
+	// genesis (txNum=0 in MDBX's MaxTxNum table) and the encoded txNum
+	// must round-trip through restoreTxNum's FindBlockNum lookup. The
+	// "step" in SeekCommitment's CheckDataAvailable is derived from the
+	// FILE's endTxNum (commitmentdb/reader.go:31 +
+	// db/state/domain.go:1631 + db/state/aggregator.go:1224-1244) — NOT
+	// from the encoded payload. So our tiered layout's newest file
+	// (commitment.448-449.kv) naturally provides step=448 (or 449)
+	// from its filename, satisfying frozenSteps without us encoding any
+	// real chain progress. Encoding a non-zero txNum here trips
+	// exec3.go:84 ("TxNums index not filled") instead.
+	keyStateValue, err := internalcommitment.EncodeKeyCommitmentStateValue(0, 0, result.HPHState)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("writeSnapshots: encode KeyCommitmentState: %w", err)
 	}
