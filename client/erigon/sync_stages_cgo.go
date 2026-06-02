@@ -78,24 +78,14 @@ func writeSyncStageMarkers(dbPath string) error {
 		// Value 1 = "first block has been seen"; matches genesis at
 		// block 0 + 1 system tx.
 		{"OtterSync", 1},
-		// Execution=1: tells the daemon's stage runner that block 0's
-		// exec stage already ran. Without this, the boot path may run
-		// ExecV3 → re-execute block 0 → ComputeCommitment(saveStateAfter=true)
-		// → write KeyCommitmentState into sd.mem with txNum=1 → the
-		// published SD's parent.mem shadows the file lookup, returning
-		// step=1/stepSize=0 to the builder's CheckDataAvailable
-		// (commitmentdb/reader.go:31) → "step 0, expected step 448".
-		// Paired with EncodeKeyCommitmentStateValue(1, 0, ...) at
-		// snapshot_cgo.go:406 (which makes SeekCommitment return
-		// inputTxNum=1 matching the MaxTxNum[0]=1 invariant from
-		// genesis_write.go:313). The combined effect is that the daemon
-		// recognises block 0 as fully processed and the builder reads
-		// commitment state from files.
+		// Other stages: 0 is the no-progress sentinel. erigon's stage
+		// runner sees this as "stage not yet run" rather than
+		// "missing"; the FCU flow handles 0 correctly post the gate.
 		{"Headers", 0},
 		{"BlockHashes", 0},
 		{"Bodies", 0},
 		{"Senders", 0},
-		{"Execution", 1},
+		{"Execution", 0},
 		{"CustomTrace", 0},
 		{"TxLookup", 0},
 		{"Finish", 0},
