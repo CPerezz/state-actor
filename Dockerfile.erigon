@@ -116,7 +116,16 @@ RUN mkdir -p /out && go build -mod=mod -tags "cgo_erigon cgo_erigon_commitment g
 # above are exercised at daemon runtime, not just during state-actor's
 # generation phase. Transient: revert once the underlying step=0 bug
 # is resolved and we no longer need the instrumented daemon.
-RUN cd /erigon-src && go build -mod=mod -ldflags "-s -w" -o /out/erigon ./cmd/erigon
+#
+# `unset GOFLAGS` is critical: the state-actor build above sets
+# GOFLAGS=-tags=cgo_erigon,cgo_erigon_commitment,gofuzz which is
+# specific to state-actor's vendored Erigon import path. Building
+# upstream erigon's own cmd/erigon with those tags fails (tags refer
+# to packages that exist in state-actor but not upstream).
+RUN cd /erigon-src && \
+    unset GOFLAGS && \
+    go mod download -x 2>&1 | tail -5 && \
+    go build -mod=mod -ldflags "-s -w" -o /out/erigon ./cmd/erigon
 
 # ---------- Stage 2: extract erigon binary (pinned digest, fallback) ----------
 # Kept for documentation / fallback parity. The runtime stage below
