@@ -110,11 +110,18 @@ RUN go mod tidy -e
 # transitive would re-trigger "updates to go.mod needed".
 RUN mkdir -p /out && go build -mod=mod -tags "cgo_erigon cgo_erigon_commitment gofuzz" -ldflags "-s -w" -o /out/state-actor ./
 
-# ---------- Stage 2: extract erigon binary (pinned digest) ----------
-# We pull the erigon CLI from the upstream image (digest-pinned per
-# internal/erigon/constants.go PinnedErigonDigest) and copy just the
-# binary into the runtime stage. This keeps the runtime small and
-# guarantees the exact `erigon init` semantics state-actor depends on.
+# Also build erigon binary from /erigon-src (with our patches applied
+# above). The daemon launched by scripts/run-bloatnet.sh will use THIS
+# binary, not the upstream image — so any patches/*.patch we apply
+# above are exercised at daemon runtime, not just during state-actor's
+# generation phase. Transient: revert once the underlying step=0 bug
+# is resolved and we no longer need the instrumented daemon.
+RUN cd /erigon-src && go build -mod=mod -ldflags "-s -w" -o /out/erigon ./cmd/erigon
+
+# ---------- Stage 2: extract erigon binary (pinned digest, fallback) ----------
+# Kept for documentation / fallback parity. The runtime stage below
+# uses the locally-built /out/erigon, not this one, while the
+# instrumentation patch is active.
 FROM erigontech/erigon@sha256:bac6b266367ec59f82576cd8cef047171601fce3f0bbbef36e3e4db24727ff6e AS erigon-bin
 
 # ---------- Stage 3: minimal runtime image ----------
@@ -128,9 +135,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # state-actor binary (cgo_erigon-tagged).
 COPY --from=builder /out/state-actor /usr/local/bin/state-actor
 
-# erigon binary from the pinned upstream image. Place at /usr/local/bin/
-# so $PATH lookup finds it without extra args. PATH inheritance from the
-# debian-slim base already includes /usr/local/bin.
-COPY --from=erigon-bin /usr/local/bin/erigon /usr/local/bin/erigon
+# erigon binary built from /erigon-src (patched). The state-actor
+# generation phase and the bench daemon BOTH exec this binary, so the
+# instrumentation patches under patches/ are exercised at daemon
+# runtime. PATH inheritance from the debian-slim base includes
+# /usr/local/bin so name-only lookup finds it.
+COPY --from=builder /out/erigon /usr/local/bin/erigon
 
 ENTRYPOINT ["/usr/local/bin/state-actor"]
