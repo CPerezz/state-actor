@@ -482,22 +482,25 @@ func writeSnapshots(
 	default:
 	}
 
-	// Commitment: branches + KeyCommitmentState in NEWEST range only.
-	// Serial after the fan-out — commitment is small (~200 MB branches
-	// at full bench scale) and the placeholders share branchesStore-
-	// derived emptyKeyState, so parallelization gain is negligible.
-	newestRange := ranges[numRanges-1]
-	if err := snap.WriteCommitment(ctx, w, newestRange, keyStateValue, branchesStore, nBranches); err != nil {
-		return common.Hash{}, fmt.Errorf("writeSnapshots: WriteCommitment(newest): %w", err)
-	}
-	emptyKeyState, err := internalcommitment.EncodeKeyCommitmentStateValue(0, 0, nil)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("writeSnapshots: encode empty KeyCommitmentState: %w", err)
-	}
-	for i := 0; i < numRanges-1; i++ {
-		if err := snap.WriteCommitmentPlaceholder(ctx, w, ranges[i], emptyKeyState); err != nil {
-			return common.Hash{}, fmt.Errorf("writeSnapshots: WriteCommitmentPlaceholder(range=%v): %w", ranges[i], err)
-		}
+	// Commitment: SINGLE range covering [ranges[0].From, ranges[last].To)
+	// (Option 1 / "sanity check" layout — collapses the prior 4-tier
+	// LSM with 3 placeholders into one consolidated commitment file).
+	// frozenSteps(commitment) = ranges[last].To-1 / stepSize = 448 (same
+	// as the prior layout's newest file alone). The 3 small placeholder
+	// files disappear, eliminating their per-file create/recsplit/bloom
+	// overhead (~sub-second total).
+	//
+	// Visibility risk per DependencyIntegrityChecker
+	// (state_schema.go:69-70 / aggregator.go:373-391): accounts/storage
+	// files are kept at 4 tiers, so the cross-domain dependency check
+	// will look for matching-range commitment files and fail to find
+	// them for ranges [0,256)/[256,384)/[384,448). If the daemon then
+	// drops accounts/storage from visibleFiles, this run will fail at
+	// boot with a different symptom. That's the empirical signal this
+	// "Option 1 sanity check" is designed to surface.
+	fullRange := snap.StepRange{From: ranges[0].From, To: ranges[numRanges-1].To}
+	if err := snap.WriteCommitment(ctx, w, fullRange, keyStateValue, branchesStore, nBranches); err != nil {
+		return common.Hash{}, fmt.Errorf("writeSnapshots: WriteCommitment(full): %w", err)
 	}
 
 	if cfg.Verbose {
