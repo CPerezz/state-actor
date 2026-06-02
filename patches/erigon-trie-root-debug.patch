@@ -1,0 +1,63 @@
+diff --git a/execution/execmodule/exec_module.go b/execution/execmodule/exec_module.go
+index 0fa6ade3fc..89b6a61349 100644
+--- a/execution/execmodule/exec_module.go
++++ b/execution/execmodule/exec_module.go
+@@ -492,7 +492,13 @@ func (e *ExecModule) ValidateChain(ctx context.Context, blockHash common.Hash, b
+ 	// otherwise read stale MDBX and compute a wrong trie root. Head-extending
+ 	// payloads only — a fork payload needs unwindToCommonCanonical to revert
+ 	// doms to the common ancestor, which the parent link would shadow.
++	{
++		mdbxHead := rawdb.ReadHeadBlockHash(tx)
++		fmt.Printf("[INST-SA] ValidateChain parent-guard: blockNum=%d parentHash=%x mdbxHead=%x currentContext=%p guardWillFire=%v\n",
++			header.Number.Uint64(), header.ParentHash, mdbxHead, e.currentContext, e.currentContext != nil && header.ParentHash == mdbxHead)
++	}
+ 	if e.currentContext != nil && header.ParentHash == rawdb.ReadHeadBlockHash(tx) {
++		fmt.Printf("[INST-SA] ValidateChain SetParent FIRED for blockNum=%d\n", header.Number.Uint64())
+ 		doms.SetParent(e.currentContext)
+ 	}
+ 
+diff --git a/execution/execmodule/forkchoice.go b/execution/execmodule/forkchoice.go
+index 84347622b1..5ff45f5198 100644
+--- a/execution/execmodule/forkchoice.go
++++ b/execution/execmodule/forkchoice.go
+@@ -480,6 +480,8 @@ func (e *ExecModule) updateForkChoice(ctx context.Context, originalBlockHash, sa
+ 		return sendForkchoiceErrorWithoutWaiting(e.logger, outcomeCh, err, false)
+ 	}
+ 
++	fmt.Printf("[INST-SA] FCU updateForkChoice blockNum=%d blockHash=%x extendingFork=%x\n",
++		fcuHeader.Number.Uint64(), blockHash, e.forkValidator.ExtendingForkHeadHash())
+ 	mergeExtendingFork := blockHash == e.forkValidator.ExtendingForkHeadHash()
+ 	stateFlushingInParallel := mergeExtendingFork && e.syncCfg.ParallelStateFlushing
+ 	if mergeExtendingFork {
+@@ -812,6 +814,7 @@ func (e *ExecModule) dispatchNotificationsFromOverlay(sd *execctx.SharedDomains,
+ func (e *ExecModule) runForkchoiceFlushCommit(sd *execctx.SharedDomains, roTxToCloseBeforeCommit kv.TemporalTx, finishProgressBefore uint64, isSynced bool) ([]any, error) {
+ 	var timings []any
+ 
++	fmt.Printf("[INST-SA] runForkchoiceFlushCommit START sd=%p\n", sd)
+ 	rwTx, err := e.db.BeginTemporalRw(e.bacgroundCtx)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("fcu flush+commit: begin rw: %w", err)
+@@ -825,11 +828,23 @@ func (e *ExecModule) runForkchoiceFlushCommit(sd *execctx.SharedDomains, roTxToC
+ 	if roTxToCloseBeforeCommit != nil {
+ 		roTxToCloseBeforeCommit.Rollback()
+ 	}
++	{
++		mdbxHeadBefore := rawdb.ReadHeadBlockHash(rwTx)
++		fmt.Printf("[INST-SA] runForkchoiceFlushCommit about to Commit, current MDBX LastBlock=%x\n", mdbxHeadBefore)
++	}
+ 	commitStart := time.Now()
+ 	if err := rwTx.Commit(); err != nil {
+ 		return nil, err
+ 	}
+ 	timings = append(timings, "commit", common.Round(time.Since(commitStart), 0))
++	{
++		// Read back from a fresh tx to confirm the commit actually persisted.
++		if checkTx, err := e.db.BeginTemporalRo(e.bacgroundCtx); err == nil {
++			mdbxHeadAfter := rawdb.ReadHeadBlockHash(checkTx)
++			checkTx.Rollback()
++			fmt.Printf("[INST-SA] runForkchoiceFlushCommit DONE, fresh-tx MDBX LastBlock=%x\n", mdbxHeadAfter)
++		}
++	}
+ 
+ 	// Update head and announce block range (notifications already dispatched).
+ 	if e.hook != nil {
