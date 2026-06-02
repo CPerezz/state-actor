@@ -22,45 +22,34 @@ import (
 	"github.com/nerolation/state-actor/internal/streamsort"
 )
 
-// numRanges is the depth of the tiered LSM pyramid layout we emit.
-// Four non-overlapping power-of-two-aligned step ranges (rangeIdx 0..3) —
-// see ranges[] below. Spec entries pin to rangeIdx=0 (L4 deepest cold
-// storage); autofill fills the pyramid TOP DOWN by byte-count
-// milestones — rangeIdx=3 (L1, top) fills first; overflow past 11.5
-// GiB spills DOWNWARD into L2, L3, and finally L4 alongside the spec.
-const numRanges = 4
-
-// ranges is the snapshot-file layout state-actor emits. Each range is
-// power-of-two-aligned per upstream Erigon's merge invariant at
-// db/state/merge.go::calculateMergeStartTxNum (a file's startTxNum
-// MUST be a multiple of (endStep & -endStep)). Erigon's reader sorts
-// visibleFiles ascending by endTxNum (db/state/dirty_files.go:208-213)
-// then walks DESCENDING (db/state/domain.go:1318) — so the file with
-// the HIGHEST endStep is probed FIRST:
+// fullRange is the SINGLE [0, 1) step-range we emit for every domain
+// (accounts/storage/code/commitment). Per the 7-agent investigation
+// (T10): a multi-tier LSM pyramid with frozenSteps > 0 trips upstream
+// Erigon's commitment-state mem-write invariant — runtime writes
+// KeyCommitmentState at txNum=blockTxNum (~1-3 for early blocks),
+// stored as step=0, which fails CheckDataAvailable when frozenSteps>0
+// (commitmentdb/reader.go:31). A single [0, 1) range across all 4
+// domains makes frozenSteps=0, so the mem-write step (also 0) passes
+// the check (0 < 0 is false). All other upstream guards also pass:
 //
-//	rangeIdx=3 ([448, 449),   1 step ) — L1 TOP    — probed FIRST
-//	                                     (1.5 GiB autofill + commitment branches)
-//	rangeIdx=2 ([384, 448),  64 steps) — L2        — probed 2nd
-//	                                     (3 GiB autofill)
-//	rangeIdx=1 ([256, 384), 128 steps) — L3        — probed 3rd
-//	                                     (7 GiB autofill)
-//	rangeIdx=0 ([  0, 256), 256 steps) — L4 BOTTOM — probed LAST
-//	                                     (13.5 GiB autofill overflow + ALL spec)
+//	- exec3.go:557-561 alignment guard: maxStateStep=0 == cmtStep=0 → OK
+//	- DependencyIntegrityChecker (state_schema.go:69-70 + entity_integrity_check.go:133-155):
+//	  accounts.0-1 finds commitment.0-1 by exact-range match → OK
+//	- replaceShortenedKeysInBranch (domain_committed.go:54): shardSize<2
+//	  returns branches as-is, no plain-key lookup needed → OK
 //
-// A cold spec-key lookup forces 3 existence-filter probes on the upper
-// files (L1/L2/L3, populated by autofill with ~1% FPR) + 1 BT walk on
-// the deep rangeIdx=0 file. Autofill-key cost averages ~3.3 probes
-// (geometric weighting). The size pyramid (1.5 / 3 / 7 / 13.5 GiB)
-// matches mainnet Erigon's steady-state shape post-merger collapse to
-// power-of-two-aligned super-blocks capped at StepsInFrozenFile
-// (default 256 per db/config3/config3.go:34; clamp enforced at
-// db/state/aggregator.go:1744 + db/state/merge.go:102).
-var ranges = [numRanges]snap.StepRange{
-	{From: 0, To: 256},   // rangeIdx=0 — L4 deepest (spec + autofill overflow)
-	{From: 256, To: 384}, // rangeIdx=1 — L3
-	{From: 384, To: 448}, // rangeIdx=2 — L2
-	{From: 448, To: 449}, // rangeIdx=3 — L1 top (commitment branches live here)
-}
+// Upstream tests confirm this layout works (domain_test.go:1419
+// TestScanStaticFilesD; integrity_checker_test.go:152). The cross-client
+// genesis-state-root invariance is preserved because the HPH root is
+// content-addressed over the alloc, independent of file partitioning
+// (internal/erigon/commitment/commitment.go::ComputeGenesisRoot has no
+// file-layout parameter).
+//
+// State-actor's bench launches the daemon with `--snap.state.stop`
+// which sets ProduceE3=false (aggregator.go:1999-2027 early-returns
+// at :2023), freezing the [0, 1) layout — no merge or collation will
+// run, preserving the file forever.
+var fullRange = snap.StepRange{From: 0, To: 1}
 
 // erigonWorkers is the size of the Phase 1 autofill encode-worker pool.
 // Defaults to min(NumCPU, 8) to match the proven cap from reth, besu,
@@ -88,13 +77,10 @@ func setErigonWorkers(n int) (restore func()) {
 
 // entityWork is one alloc entry queued for an encode-worker. The main
 // goroutine fills these and sends them on entityCh; workers consume
-// and call encodeEntity. rangeIdx is decided on the main thread BEFORE
-// send so routing stays deterministic regardless of worker scheduling
-// (cross-client invariance).
+// and call encodeEntity.
 type entityWork struct {
-	addr     common.Address
-	entry    *allocAccount
-	rangeIdx uint8
+	addr  common.Address
+	entry *allocAccount
 }
 
 // domainWrite is one (key, value) tuple ready to be Put into a specific
@@ -114,15 +100,14 @@ type perDomainChans struct {
 	commitIn chan domainWrite
 }
 
-// rangeCounts tracks per-(domain, rangeIdx) entry counts. Workers
-// increment via atomic.AddUint64 — multiple workers may emit for the
-// same range concurrently. Phase 5 reads via plain access AFTER all
-// workers have drained (sync.WaitGroup.Wait provides the
-// happens-before barrier).
-type rangeCounts struct {
-	accounts [numRanges]uint64
-	storage  [numRanges]uint64
-	code     [numRanges]uint64
+// domainCounts tracks per-domain entry counts. Workers increment via
+// atomic.AddUint64. Phase 5 reads via plain access AFTER all workers
+// have drained (sync.WaitGroup.Wait provides the happens-before
+// barrier).
+type domainCounts struct {
+	accounts uint64
+	storage  uint64
+	code     uint64
 }
 
 // writeSnapshots is the multi-range streaming snapshot orchestrator
@@ -196,12 +181,8 @@ func writeSnapshots(
 	}
 	defer commitmentInputStore.Close()
 
-	// Per-rangeIdx running byte counter for autofill milestone routing.
-	// Main-goroutine-only — never touched by workers.
-	var bytesIn [numRanges]uint64
-
-	// counts: atomic per-(domain, rangeIdx) increments by workers.
-	var counts rangeCounts
+	// counts: atomic per-domain increments by workers.
+	var counts domainCounts
 
 	// -- Step 2: spawn worker pool + per-domain writer goroutines.
 	pipelineCtx, cancelPipeline := context.WithCancel(ctx)
@@ -252,7 +233,7 @@ func writeSnapshots(
 		}
 	}
 
-	// -- Step 3a: drain foundational.Spec → entityCh at rangeIdx=0.
+	// -- Step 3a: drain foundational.Spec → entityCh.
 	// Also build genesisAddrs for the dedup-redraw loop (matches geth
 	// byte-for-byte: dedup against spec only, never against other
 	// autofill draws — see client/geth/state_writer.go:120-148).
@@ -260,7 +241,7 @@ func writeSnapshots(
 	var pipelineErr error
 	for addr, entry := range foundational.Spec {
 		genesisAddrs[addr] = struct{}{}
-		if err := sendEntity(entityWork{addr: addr, entry: entry, rangeIdx: 0}); err != nil {
+		if err := sendEntity(entityWork{addr: addr, entry: entry}); err != nil {
 			pipelineErr = err
 			break
 		}
@@ -280,24 +261,20 @@ func writeSnapshots(
 	// contract rather than guard against it).
 	if pipelineErr == nil && cfg.AutoFill != nil {
 		rng := mrand.New(mrand.NewSource(cfg.Seed))
-		milestones := computeAutofillMilestones(cfg.TargetSize)
 		for i := 0; i < cfg.AutoFill.NumEOAs && pipelineErr == nil; i++ {
 			acc := cfg.AutoFill.DrawEOA(rng)
 			for _, dup := genesisAddrs[acc.Address]; dup; {
 				acc = cfg.AutoFill.DrawEOA(rng)
 				_, dup = genesisAddrs[acc.Address]
 			}
-			rangeIdx := pickAutofillRange(bytesIn, milestones)
 			entry := &allocAccount{Nonce: acc.StateAccount.Nonce}
 			if acc.StateAccount.Balance != nil {
 				entry.Balance = acc.StateAccount.Balance.ToBig()
 			}
-			if err := sendEntity(entityWork{addr: acc.Address, entry: entry, rangeIdx: rangeIdx}); err != nil {
+			if err := sendEntity(entityWork{addr: acc.Address, entry: entry}); err != nil {
 				pipelineErr = err
 				break
 			}
-			// Conservative per-entity estimate — SerialiseV3 averages ~30 B for an EOA.
-			bytesIn[rangeIdx] += 32
 			stats.AccountsCreated++
 		}
 		for i := 0; i < cfg.AutoFill.NumContracts && pipelineErr == nil; i++ {
@@ -306,7 +283,6 @@ func writeSnapshots(
 				c = cfg.AutoFill.DrawContract(rng)
 				_, dup = genesisAddrs[c.Address]
 			}
-			rangeIdx := pickAutofillRange(bytesIn, milestones)
 			entry := &allocAccount{Nonce: c.StateAccount.Nonce}
 			if c.StateAccount.Balance != nil {
 				entry.Balance = c.StateAccount.Balance.ToBig()
@@ -321,14 +297,12 @@ func writeSnapshots(
 					entry.Storage[s.Key] = s.Value
 				}
 			}
-			if err := sendEntity(entityWork{addr: c.Address, entry: entry, rangeIdx: rangeIdx}); err != nil {
+			if err := sendEntity(entityWork{addr: c.Address, entry: entry}); err != nil {
 				pipelineErr = err
 				break
 			}
 			stats.StorageSlotsCreated += len(c.Storage)
 			stats.StorageBytes += uint64(len(c.Storage)) * 64
-			// Conservative per-entity estimate covering account + code + slots.
-			bytesIn[rangeIdx] += uint64(len(entry.Code)) + 32 + uint64(len(c.Storage))*64
 			stats.ContractsCreated++
 		}
 	}
@@ -440,40 +414,37 @@ func writeSnapshots(
 	}
 	defer w.Close()
 
-	// Fan out 12 independent WriteDomain calls (4 ranges × 3 domains).
-	// Each tuple has its own .kv + accessors output, its own streamsort
-	// prefix-scan input, and no shared mutable state — safe to run in
-	// parallel. Semaphore-bound at NumCPU keeps seg.Compressor pressure
-	// realistic on small hosts.
+	// Fan out 3 independent WriteDomain calls (accounts/storage/code,
+	// each at the single [0,1) fullRange). Each call has its own .kv +
+	// accessors output, its own streamsort input, and no shared mutable
+	// state — safe to run in parallel. Semaphore-bound at NumCPU keeps
+	// seg.Compressor pressure realistic on small hosts.
 	type domainSpec struct {
 		domain snap.Domain
 		store  *streamsort.Store
-		counts *[numRanges]uint64
+		count  uint64
 	}
 	domainSpecs := []domainSpec{
-		{snap.DomainAccounts, accountsStore, &counts.accounts},
-		{snap.DomainStorage, storageStore, &counts.storage},
-		{snap.DomainCode, codeStore, &counts.code},
+		{snap.DomainAccounts, accountsStore, counts.accounts},
+		{snap.DomainStorage, storageStore, counts.storage},
+		{snap.DomainCode, codeStore, counts.code},
 	}
-	emitErrCh := make(chan error, numRanges*len(domainSpecs))
+	emitErrCh := make(chan error, len(domainSpecs))
 	var emitWg sync.WaitGroup
 	sem := make(chan struct{}, runtime.NumCPU())
-	for r := uint8(0); r < numRanges; r++ {
-		for _, ds := range domainSpecs {
-			sem <- struct{}{}
-			emitWg.Add(1)
-			go func(r uint8, ds domainSpec) {
-				defer func() { <-sem; emitWg.Done() }()
-				count := ds.counts[r]
-				if err := w.WriteDomain(ctx, ds.domain, ranges[r], count,
-					snap.FromStreamsortRange(ds.store, r)); err != nil {
-					select {
-					case emitErrCh <- fmt.Errorf("WriteDomain(%v, range=%v): %w", ds.domain, ranges[r], err):
-					default:
-					}
+	for _, ds := range domainSpecs {
+		sem <- struct{}{}
+		emitWg.Add(1)
+		go func(ds domainSpec) {
+			defer func() { <-sem; emitWg.Done() }()
+			if err := w.WriteDomain(ctx, ds.domain, fullRange, ds.count,
+				snap.FromStreamsort(ds.store)); err != nil {
+				select {
+				case emitErrCh <- fmt.Errorf("WriteDomain(%v): %w", ds.domain, err):
+				default:
 				}
-			}(r, ds)
-		}
+			}
+		}(ds)
 	}
 	emitWg.Wait()
 	select {
@@ -482,31 +453,18 @@ func writeSnapshots(
 	default:
 	}
 
-	// Commitment: SINGLE range covering [ranges[0].From, ranges[last].To)
-	// (Option 1 / "sanity check" layout — collapses the prior 4-tier
-	// LSM with 3 placeholders into one consolidated commitment file).
-	// frozenSteps(commitment) = ranges[last].To-1 / stepSize = 448 (same
-	// as the prior layout's newest file alone). The 3 small placeholder
-	// files disappear, eliminating their per-file create/recsplit/bloom
-	// overhead (~sub-second total).
-	//
-	// Visibility risk per DependencyIntegrityChecker
-	// (state_schema.go:69-70 / aggregator.go:373-391): accounts/storage
-	// files are kept at 4 tiers, so the cross-domain dependency check
-	// will look for matching-range commitment files and fail to find
-	// them for ranges [0,256)/[256,384)/[384,448). If the daemon then
-	// drops accounts/storage from visibleFiles, this run will fail at
-	// boot with a different symptom. That's the empirical signal this
-	// "Option 1 sanity check" is designed to surface.
-	fullRange := snap.StepRange{From: ranges[0].From, To: ranges[numRanges-1].To}
+	// Commitment: single [0,1) range. frozenSteps(commitment)=0 so the
+	// daemon's mem-tier writes of KeyCommitmentState at txNum=blockTxNum
+	// (stored as step=0) pass CheckDataAvailable trivially (0 < 0 is
+	// false). See the fullRange doc above for the full rationale.
 	if err := snap.WriteCommitment(ctx, w, fullRange, keyStateValue, branchesStore, nBranches); err != nil {
-		return common.Hash{}, fmt.Errorf("writeSnapshots: WriteCommitment(full): %w", err)
+		return common.Hash{}, fmt.Errorf("writeSnapshots: WriteCommitment: %w", err)
 	}
 
 	if cfg.Verbose {
 		fmt.Printf("client/erigon: wrote snapshots: spec=%d autofill_accounts=%d contracts=%d storage_slots=%d branches=%d workers=%d root=%s\n",
 			len(foundational.Spec), stats.AccountsCreated, stats.ContractsCreated, stats.StorageSlotsCreated, nBranches, N, result.Root.Hex())
-		fmt.Printf("client/erigon: per-range entry counts: accounts=%v storage=%v code=%v\n",
+		fmt.Printf("client/erigon: domain entry counts: accounts=%d storage=%d code=%d\n",
 			counts.accounts, counts.storage, counts.code)
 	}
 
@@ -544,7 +502,7 @@ func autofillEncodeWorker(
 	ctx context.Context,
 	in <-chan entityWork,
 	out *perDomainChans,
-	counts *rangeCounts,
+	counts *domainCounts,
 ) error {
 	for {
 		select {
@@ -573,11 +531,12 @@ func encodeEntity(
 	ctx context.Context,
 	ew entityWork,
 	out *perDomainChans,
-	counts *rangeCounts,
+	counts *domainCounts,
 ) error {
-	addrComposite := make([]byte, 0, 1+20)
-	addrComposite = append(addrComposite, ew.rangeIdx)
-	addrComposite = append(addrComposite, ew.addr[:]...)
+	// Snapshot keys are plain addr (20 bytes) — no rangeIdx prefix in
+	// the single-tier [0,1) layout.
+	addrKey := make([]byte, 20)
+	copy(addrKey, ew.addr[:])
 
 	// Accounts snapshot value: SerialiseV3.
 	acct := account.Account{
@@ -597,30 +556,28 @@ func encodeEntity(
 		h := crypto.Keccak256Hash(ew.entry.Code)
 		copy(acct.CodeHash[:], h[:])
 	}
-	if err := sendDomainWrite(ctx, out.accounts, domainWrite{key: addrComposite, value: account.SerialiseV3(acct)}); err != nil {
+	if err := sendDomainWrite(ctx, out.accounts, domainWrite{key: addrKey, value: account.SerialiseV3(acct)}); err != nil {
 		return err
 	}
-	atomic.AddUint64(&counts.accounts[ew.rangeIdx], 1)
+	atomic.AddUint64(&counts.accounts, 1)
 
 	// Code snapshot value: raw bytecode keyed by addr.
 	if len(ew.entry.Code) > 0 {
-		if err := sendDomainWrite(ctx, out.code, domainWrite{key: addrComposite, value: ew.entry.Code}); err != nil {
+		if err := sendDomainWrite(ctx, out.code, domainWrite{key: addrKey, value: ew.entry.Code}); err != nil {
 			return err
 		}
-		atomic.AddUint64(&counts.code[ew.rangeIdx], 1)
+		atomic.AddUint64(&counts.code, 1)
 	}
 
 	// Inline storage (foundational PreAlloc + contract autofill).
 	for slot, value := range ew.entry.Storage {
-		if err := encodeStorageSlot(ctx, ew.rangeIdx, ew.addr, slot, value, out, counts); err != nil {
+		if err := encodeStorageSlot(ctx, ew.addr, slot, value, out, counts); err != nil {
 			return err
 		}
 	}
 
 	// Commitment input: account-level Update keyed by plain addr.
 	commitBytes := internalcommitment.EncodeAccountUpdate(ew.entry.Nonce, balance, ew.entry.Code)
-	addrKey := make([]byte, 20)
-	copy(addrKey, ew.addr[:])
 	return sendDomainWrite(ctx, out.commitIn, domainWrite{key: addrKey, value: commitBytes})
 }
 
@@ -629,31 +586,27 @@ func encodeEntity(
 // storing zero is wrong).
 func encodeStorageSlot(
 	ctx context.Context,
-	rangeIdx uint8,
 	addr common.Address,
 	slotKey common.Hash,
 	slotValue common.Hash,
 	out *perDomainChans,
-	counts *rangeCounts,
+	counts *domainCounts,
 ) error {
 	trimmed := trimLeadingZeros(slotValue[:])
 	if len(trimmed) == 0 {
 		return nil
 	}
-	// Composite key for snapshot: (rangeIdx || addr || slot) = 53 bytes.
-	composite := make([]byte, 0, 1+20+32)
-	composite = append(composite, rangeIdx)
-	composite = append(composite, addr[:]...)
-	composite = append(composite, slotKey[:]...)
-	if err := sendDomainWrite(ctx, out.storage, domainWrite{key: composite, value: trimmed}); err != nil {
-		return err
-	}
-	atomic.AddUint64(&counts.storage[rangeIdx], 1)
-
-	// Plain key for commitment: addr || slot = 52 bytes (no rangeIdx).
+	// Plain key (addr || slot = 52 bytes) for both snapshot and
+	// commitment-input. No rangeIdx prefix in the single-tier [0,1)
+	// layout — same key shape for both downstream consumers.
 	plainKey := make([]byte, 0, 20+32)
 	plainKey = append(plainKey, addr[:]...)
 	plainKey = append(plainKey, slotKey[:]...)
+	if err := sendDomainWrite(ctx, out.storage, domainWrite{key: plainKey, value: trimmed}); err != nil {
+		return err
+	}
+	atomic.AddUint64(&counts.storage, 1)
+
 	commitBytes := internalcommitment.EncodeStorageUpdate(slotValue[:])
 	return sendDomainWrite(ctx, out.commitIn, domainWrite{key: plainKey, value: commitBytes})
 }
@@ -691,64 +644,6 @@ func domainWriter(
 				return fmt.Errorf("domainWriter[%s]: %w", label, err)
 			}
 		}
-	}
-}
-
-// pickAutofillRange returns the rangeIdx for the next autofill entry.
-// TOP first (rangeIdx=numRanges-1 = L1 fills first; spills DOWNWARD
-// to L2, L3, and finally L4 as each upper range hits its milestone).
-//
-// Per the plan's tiered LSM pyramid (Layout C+): autofill represents
-// "fresh" data that lives in the upper LSM layers (queried first by
-// the daemon's newest→oldest reader walk). Spec data is "cold" —
-// pinned to L4 (rangeIdx=0, deepest), reached only after existence-
-// filter probes miss on L1/L2/L3. Once autofill exceeds the L3
-// milestone (11.5 GiB cumulative across upper tiers), all remaining
-// autofill OVERFLOW also routes to rangeIdx=0 — L4 holds spec PLUS
-// the autofill tail.
-//
-// milestones[i] is the cumulative byte threshold AFTER which range
-// (numRanges-1-i) is considered full and we spill to (numRanges-2-i).
-// totalAuto sums bytesIn[1..numRanges-1] (excluding rangeIdx=0) so
-// spec bytes never count against autofill thresholds, AND the overflow
-// path (return 0) stays sticky once the L3 milestone is exceeded.
-func pickAutofillRange(bytesIn [numRanges]uint64, milestones [numRanges - 1]uint64) uint8 {
-	totalAuto := uint64(0)
-	for i := uint8(1); i < numRanges; i++ {
-		totalAuto += bytesIn[i]
-	}
-	for i := 0; i < numRanges-1; i++ {
-		if totalAuto < milestones[i] {
-			return uint8(numRanges - 1 - i)
-		}
-	}
-	return 0 // overflow past 11.5 GiB — pack into L4 alongside spec
-}
-
-// computeAutofillMilestones returns the absolute cumulative byte
-// thresholds for the tiered LSM pyramid. Values are independent of
-// --target-size: the tier SHAPE must match real-world Erigon's
-// pyramid regardless of how much state the bench instructs us to
-// generate.
-//
-//	milestones[0] =  1.5 GiB — L1 (rangeIdx=3) fills 0    → 1.5  GiB
-//	milestones[1] =  4.5 GiB — L2 (rangeIdx=2) fills 1.5  → 4.5  GiB
-//	milestones[2] = 11.5 GiB — L3 (rangeIdx=1) fills 4.5  → 11.5 GiB
-//	overflow      → L4 (rangeIdx=0) — alongside spec
-//
-// For SPEC_TARGET_GB=1, only L1 fills (1 GB < 1.5 GiB cap) and
-// L2/L3/L4 receive empty placeholder files. For SPEC_TARGET_GB=25,
-// all four tiers fill in the 1.5 / 3 / 7 / 13.5 GiB pattern
-// documented in plans/so-what-we-have-enumerated-lantern.md.
-// The targetSize parameter is preserved for callsite signature
-// stability but is intentionally unused.
-func computeAutofillMilestones(targetSize uint64) [numRanges - 1]uint64 {
-	_ = targetSize
-	const GiB = uint64(1024) * 1024 * 1024
-	return [numRanges - 1]uint64{
-		3 * GiB / 2,  //  1.5 GiB — L1 cap
-		9 * GiB / 2,  //  4.5 GiB — L2 cap
-		23 * GiB / 2, // 11.5 GiB — L3 cap (overflow → L4)
 	}
 }
 
