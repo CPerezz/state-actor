@@ -66,6 +66,18 @@ RUN git clone https://github.com/erigontech/erigon.git /erigon-src \
     && cd /erigon-src \
     && git checkout 14273f79a6
 
+# Apply state-actor's debugging patches to upstream Erigon. Each
+# patch in patches/ is `git apply`'d against /erigon-src in lexical
+# order. Used for transient instrumentation (e.g. fmt.Printf in
+# SharedDomains.GetLatest to pinpoint step=0 origins). Remove the
+# patches dir + this RUN once the underlying bug is fixed upstream
+# or the diagnostic is no longer needed.
+COPY patches /tmp/erigon-patches
+RUN cd /erigon-src && \
+    for p in $(ls /tmp/erigon-patches/*.patch 2>/dev/null | sort); do \
+      echo "applying $p" && git apply --whitespace=nowarn "$p"; \
+    done
+
 COPY go.mod go.sum ./
 # Rewrite the local-dev replace path to the Docker location.
 RUN sed -i 's|/Users/random_anon/dev/clients/erigon|/erigon-src|' go.mod

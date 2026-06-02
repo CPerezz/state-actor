@@ -1,0 +1,74 @@
+diff --git a/db/state/execctx/domain_shared.go b/db/state/execctx/domain_shared.go
+index d8d4a78f5d..1d11cf5c4c 100644
+--- a/db/state/execctx/domain_shared.go
++++ b/db/state/execctx/domain_shared.go
+@@ -685,6 +685,9 @@ func (sd *SharedDomains) GetLatest(domain kv.Domain, tx kv.TemporalTx, k []byte)
+ 		if dbg.KVReadLevelledMetrics {
+ 			sd.metrics.UpdateCacheReads(domain, start)
+ 		}
++		if domain == kv.CommitmentDomain && len(k) == 5 && string(k) == "state" {
++			fmt.Printf("[INST-SA] sd.GetLatest commitment-state -> MEM-HIT step=%d sd=%p\n", step, sd)
++		}
+ 		return v, step, nil
+ 	} else {
+ 		if step > 0 {
+@@ -698,6 +701,9 @@ func (sd *SharedDomains) GetLatest(domain kv.Domain, tx kv.TemporalTx, k []byte)
+ 			if dbg.KVReadLevelledMetrics {
+ 				sd.metrics.UpdateCacheReads(domain, start)
+ 			}
++			if domain == kv.CommitmentDomain && len(k) == 5 && string(k) == "state" {
++				fmt.Printf("[INST-SA] sd.GetLatest commitment-state -> PARENT-MEM-HIT step=%d sd=%p parent=%p\n", step, sd, sd.parent)
++			}
+ 			return v, step, nil
+ 		} else {
+ 			if step > 0 && step < maxStep {
+@@ -729,6 +735,9 @@ func (sd *SharedDomains) GetLatest(domain kv.Domain, tx kv.TemporalTx, k []byte)
+ 						domain, k, v, vDB, sd.txNum))
+ 				}
+ 			}
++			if domain == kv.CommitmentDomain && len(k) == 5 && string(k) == "state" {
++				fmt.Printf("[INST-SA] sd.GetLatest commitment-state -> CACHE-HIT step=0 sd=%p\n", sd)
++			}
+ 			return v, 0, nil
+ 		}
+ 	}
+@@ -747,6 +756,9 @@ func (sd *SharedDomains) GetLatest(domain kv.Domain, tx kv.TemporalTx, k []byte)
+ 		sd.stateCache.Put(domain, k, v)
+ 	}
+ 
++	if domain == kv.CommitmentDomain && len(k) == 5 && string(k) == "state" {
++		fmt.Printf("[INST-SA] sd.GetLatest commitment-state -> AGG-RESULT step=%d sd=%p maxStep=%d\n", step, sd, maxStep)
++	}
+ 	return v, step, nil
+ }
+ 
+diff --git a/execution/builder/exec.go b/execution/builder/exec.go
+index 52530e451b..7176993c83 100644
+--- a/execution/builder/exec.go
++++ b/execution/builder/exec.go
+@@ -109,10 +109,13 @@ func execBlock(ctx context0.Context, sd *execctx.SharedDomains, tx kv.TemporalTx
+ 
+ 	// sd writes accumulate in-memory and are discarded when Build returns.
+ 	// We use sd directly for execution state writes and commitment computation.
++	fmt.Printf("[INST-SA] builder/execBlock about to call sd.SeekCommitment sd=%p\n", sd)
+ 	txNum, _, err := sd.SeekCommitment(ctx, tx)
+ 	if err != nil {
++		fmt.Printf("[INST-SA] builder/execBlock SeekCommitment ERROR: %v\n", err)
+ 		return err
+ 	}
++	fmt.Printf("[INST-SA] builder/execBlock SeekCommitment OK txNum=%d sd=%p\n", txNum, sd)
+ 	sd.SetTxNum(txNum)
+ 	sd.GetCommitmentContext().SetDeferBranchUpdates(false)
+ 
+diff --git a/execution/commitment/commitmentdb/reader.go b/execution/commitment/commitmentdb/reader.go
+index d2950323f5..ebb037cc71 100644
+--- a/execution/commitment/commitmentdb/reader.go
++++ b/execution/commitment/commitmentdb/reader.go
+@@ -29,6 +29,7 @@ func (r *LatestStateReader) WithHistory() bool {
+ func (r *LatestStateReader) CheckDataAvailable(d kv.Domain, step kv.Step) error {
+ 	// we're processing the latest state - in which case it needs to be writable
+ 	if frozenSteps := r.getter.StepsInFiles(d); step < frozenSteps {
++		fmt.Printf("[INST-SA] CheckDataAvailable FAIL domain=%v step=%d frozenSteps=%d (will return error)\n", d, step, frozenSteps)
+ 		return fmt.Errorf("%q state out of date: step %d, expected step %d", d, step, frozenSteps)
+ 	}
+ 	return nil
