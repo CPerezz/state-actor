@@ -1,8 +1,8 @@
 diff --git a/execution/commitment/commitmentdb/commitment_context.go b/execution/commitment/commitmentdb/commitment_context.go
-index 36836bd009..77f1917a28 100644
+index 36836bd009..746df06730 100644
 --- a/execution/commitment/commitmentdb/commitment_context.go
 +++ b/execution/commitment/commitmentdb/commitment_context.go
-@@ -303,6 +303,32 @@ func (sdc *SharedDomainsCommitmentContext) ComputeCommitment(ctx context.Context
+@@ -303,6 +303,33 @@ func (sdc *SharedDomainsCommitmentContext) ComputeCommitment(ctx context.Context
  	if sdc.pendingUpdate != nil {
  		panic("sdCtx.ComputeCommitment called directly with non-nil pendingUpdate; use SharedDomains.ComputeCommitment wrapper instead")
  	}
@@ -15,27 +15,28 @@ index 36836bd009..77f1917a28 100644
 +			"preProcessRoot", hex.EncodeToString(preRoot), "preProcessRootErr", preErr,
 +			"justRestored", sdc.justRestored.Load(),
 +			"sd", fmt.Sprintf("%p", sdc.sharedDomains))
-+		// Log first 10 plain keys to compare what direct vs update each see
-+		plainKeys := sdc.updates.PlainKeys()
-+		nLog := len(plainKeys)
-+		if nLog > 10 {
-+			nLog = 10
-+		}
-+		for i := 0; i < nLog; i++ {
-+			pk := plainKeys[i]
-+			pkHex := hex.EncodeToString(pk)
-+			if len(pkHex) > 80 {
-+				pkHex = pkHex[:80] + "..."
++		// PlainKeys() returns map[string]struct{} for ModeDirect, nil for ModeUpdate.
++		// We log up to 10 keys for ModeDirect; ModeUpdate keys are visible via Branch READ instrumentation.
++		if pk := sdc.updates.PlainKeys(); pk != nil {
++			i := 0
++			for k := range pk {
++				if i >= 10 {
++					break
++				}
++				kHex := hex.EncodeToString([]byte(k))
++				if len(kHex) > 80 {
++					kHex = kHex[:80] + "..."
++				}
++				log.Warn("[INST-B3] ComputeCommitment KEY(direct-mode)",
++					"block", blockNum, "txNum", txNum, "i", i, "len", len(k), "key", kHex)
++				i++
 +			}
-+			log.Warn("[INST-B3] ComputeCommitment KEY",
-+				"block", blockNum, "txNum", txNum, "mode", sdc.updates.Mode(),
-+				"i", i, "len", len(pk), "key", pkHex)
 +		}
 +	}
  	if dbg.KVReadLevelledMetrics {
  		mxCommitmentRunning.Inc()
  		defer mxCommitmentRunning.Dec()
-@@ -318,6 +344,11 @@ func (sdc *SharedDomainsCommitmentContext) ComputeCommitment(ctx context.Context
+@@ -318,6 +345,11 @@ func (sdc *SharedDomainsCommitmentContext) ComputeCommitment(ctx context.Context
  			keysPerSec = uint64(float64(updateCount) / took.Seconds())
  		}
  		log.Debug("[commitment] processed", "block", blockNum, "txNum", txNum, "keys", common.PrettyCounter(updateCount), "keys/s", common.PrettyCounter(keysPerSec), "mode", sdc.updates.Mode(), "spent", took, "rootHash", hex.EncodeToString(rootHash))
@@ -47,7 +48,7 @@ index 36836bd009..77f1917a28 100644
  	}()
  	if updateCount == 0 {
  		rootHash, err = sdc.patriciaTrie.RootHash()
-@@ -637,11 +668,19 @@ func (sdc *SharedDomainsCommitmentContext) SeekCommitment(ctx context.Context, t
+@@ -637,11 +669,19 @@ func (sdc *SharedDomainsCommitmentContext) SeekCommitment(ctx context.Context, t
  	trieContext := sdc.trieContext(tx, 0, 0) // blockNum/txNum not yet known; trieContext only used for reading here
  
  	_, _, state, err := sdc.LatestCommitmentState(trieContext)
@@ -67,7 +68,7 @@ index 36836bd009..77f1917a28 100644
  		if err != nil {
  			return 0, 0, err
  		}
-@@ -650,8 +689,12 @@ func (sdc *SharedDomainsCommitmentContext) SeekCommitment(ctx context.Context, t
+@@ -650,8 +690,12 @@ func (sdc *SharedDomainsCommitmentContext) SeekCommitment(ctx context.Context, t
  		}
  		return txNum, blockNum, nil
  	}
@@ -80,7 +81,7 @@ index 36836bd009..77f1917a28 100644
  	if err != nil {
  		return 0, 0, err
  	}
-@@ -736,6 +779,9 @@ func (sdc *SharedDomainsCommitmentContext) encodeCommitmentState(blockNum, txNum
+@@ -736,6 +780,9 @@ func (sdc *SharedDomainsCommitmentContext) encodeCommitmentState(blockNum, txNum
  // After commitment state is retored, method .Reset() should NOT be called until new updates.
  // Otherwise state should be restorePatriciaState()d again.
  func (sdc *SharedDomainsCommitmentContext) restorePatriciaState(value []byte) (uint64, uint64, error) {
@@ -90,7 +91,7 @@ index 36836bd009..77f1917a28 100644
  	cs := new(commitmentState)
  	if err := cs.Decode(value); err != nil {
  		if len(value) > 0 {
-@@ -767,6 +813,11 @@ func (sdc *SharedDomainsCommitmentContext) restorePatriciaState(value []byte) (u
+@@ -767,6 +814,11 @@ func (sdc *SharedDomainsCommitmentContext) restorePatriciaState(value []byte) (u
  	if err := hext.SetState(cs.trieState); err != nil {
  		return 0, 0, fmt.Errorf("failed restore state : %w", err)
  	}
