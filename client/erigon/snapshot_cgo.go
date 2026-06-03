@@ -424,22 +424,22 @@ func writeSnapshots(
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("writeSnapshots: ComputeGenesisRoot: %w", err)
 	}
-	// KeyCommitmentState encodes (txNum=1, blockNum=0) to match Erigon's
-	// genesis MaxTxNum[0]=1 invariant (genesis_write.go:313 writes
-	// `TxNums.Append(tx, 0, len(txs)+1)` → blockNum=0, txNum=1 for an
-	// empty genesis). Failing this round-trip is what produced the
-	// "step 0, expected step 448" bench failure: encoding txNum=0 made
-	// ExecV3's SeekCommitment return inputTxNum=0, restoreTxNum saw
-	// lastTxNum=1 ≠ inputTxNum=0 → didn't early-return → re-executed
-	// block 0 → ComputeCommitment(saveStateAfter=true, txNum=1) wrote
-	// KeyCommitmentState into sd.mem with txNum=1. The Builder's child
-	// SD then read it via parent.mem.GetLatest (domain_shared.go:697)
-	// which returned step = txNum/stepSize = 1/390625 = 0, tripping
-	// CheckDataAvailable (commitmentdb/reader.go:31). Encoding txNum=1
-	// here makes restoreTxNum's `lastTxNum == inputTxNum` check pass at
-	// exec3.go:67 → ExecV3 short-circuits → no re-execution → parent.mem
-	// stays empty → builder's GetLatest falls through to files → step=449.
-	keyStateValue, err := internalcommitment.EncodeKeyCommitmentStateValue(1, 0, result.HPHState)
+	// KeyCommitmentState encodes (txNum=0, blockNum=0): the pre-block
+	// baseline that the daemon's BUILDER reads via SeekCommitment
+	// (builder/exec.go:113) and passes through unchanged to
+	// ComputeCommitment(blockHeight, txNum) at line 241. With txNum=0,
+	// the BUILDER's block-N first-commitment baseline equals the
+	// VALIDATOR's post-block compute starting point, so block 2's
+	// mode=direct (BUILDER) and mode=update (VALIDATOR via
+	// committer.go::computeWithBlockAccumulator) converge instead of
+	// diverging. Verified by host instrumentation 2026-06-03
+	// ([INST-B2] markers on stateless-bloatnet-benchmarks).
+	//
+	// The prior (1, 0) encoding defended against a step=0
+	// CheckDataAvailable hazard (reader.go:31) that is obsolete since
+	// the single-tier [0,1) snapshot collapse (frozenSteps=0 makes
+	// `step < frozenSteps` unreachable).
+	keyStateValue, err := internalcommitment.EncodeKeyCommitmentStateValue(0, 0, result.HPHState)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("writeSnapshots: encode KeyCommitmentState: %w", err)
 	}
