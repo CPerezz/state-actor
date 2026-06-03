@@ -78,7 +78,7 @@ index 6c1031bd67..ce2c7672a6 100644
  func (cc *commitmentCalculator) computeWithBlockAccumulator(ctx context.Context, br *blockResult) ([]byte, error) {
 +	if br.BlockNum >= 1 && br.BlockNum <= 3 {
 +		log.Warn("[INST-B2] BUILDER-WRAP computeWithBlockAccumulator START (has accumulator-lock)",
-+			"block", br.BlockNum, "blockHash", br.BlockHash, "firstTxNum", br.firstTxNum, "lastTxNum", br.lastTxNum)
++			"block", br.BlockNum, "blockHash", br.BlockHash, "lastTxNum", br.lastTxNum)
 +	}
  	defer func() {
  		// Stamp the pending update (if any was set during ComputeCommitment)
