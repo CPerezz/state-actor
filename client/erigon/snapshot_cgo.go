@@ -271,6 +271,19 @@ func writeSnapshots(
 			if acc.StateAccount.Balance != nil {
 				entry.Balance = acc.StateAccount.Balance.ToBig()
 			}
+			// EIP-7702 delegation marker: ~30% of EOAs from
+			// internal/autofill/eoa_flavor.go have HasDelegation set,
+			// which puts a 23-byte 0xef0100||target20 in acc.Code with
+			// CodeHash = keccak256(code). The geth writer honors this
+			// at state_writer.go:127-130; we MUST mirror it here or
+			// the resulting CodeHash diverges from MPT for ~30% of
+			// EOAs → wrong genesis state root vs cross-client peers.
+			// Bug surfaced by cross-client bench on 2026-06-03:
+			// geth+reth 0x7fa5f44... vs erigon 0xcbab49... at SEED=42.
+			if len(acc.Code) > 0 {
+				entry.Code = acc.Code
+				stats.CodeBytes += uint64(len(acc.Code))
+			}
 			if err := sendEntity(entityWork{addr: acc.Address, entry: entry}); err != nil {
 				pipelineErr = err
 				break
@@ -311,6 +324,51 @@ func writeSnapshots(
 	// Close entityCh → workers drain remaining items then exit.
 	close(entityCh)
 	encodeWg.Wait()
+
+	// -- Step 3c: drain spec-PreAlloc Storage iters into storage +
+	// commitment-input streamsorts.
+	//
+	// cfg.PreAlloc entries with Storage iter.Seq2 (e.g., bloatnet's
+	// `template: erc20` contracts) are NOT drained by materializePreAlloc
+	// (generator/config.go:130-165 comment "Storage is NOT drained — it
+	// stays as iter.Seq2 on c.PreAlloc"). The geth and reth writers each
+	// run a Phase 0 that drains the iter (client/geth/state_writer.go:554
+	// runPhase0 + client/reth/spec_storage_streaming_cgo.go:81
+	// streamSpecStorage). state-actor's erigon writer previously dropped
+	// these slots (~7M at SPEC_TARGET_GB=1) → genesis state root diverged
+	// from cross-client peers (geth/reth 0x7fa5f44... vs erigon 0xcbab49...
+	// on 2026-06-03).
+	//
+	// We run after encodeWg.Wait() so the worker pool is fully drained
+	// and the only writers to chans.storage / chans.commitIn are this
+	// goroutine — no cross-goroutine ordering concerns. The chans still
+	// have their per-domain writer goroutines reading (they exit on
+	// close(chans.*) below).
+	if pipelineErr == nil {
+		for i := range cfg.PreAlloc {
+			pe := &cfg.PreAlloc[i]
+			if pe.Storage == nil {
+				continue
+			}
+			pe.Storage(func(slot, value common.Hash) bool {
+				if err := encodeStorageSlot(pipelineCtx, pe.Address, slot, value, chans, &counts); err != nil {
+					pipelineErr = err
+					return false
+				}
+				// trimLeadingZeros may filter zero values; conservatively
+				// count by the unfiltered slot. Storage byte tally for
+				// stats includes raw 32-byte value capacity (matching
+				// geth's accounting in state_writer.go runPhase0).
+				stats.StorageSlotsCreated++
+				stats.StorageBytes += 64
+				return true
+			})
+			if pipelineErr != nil {
+				break
+			}
+		}
+		stats.TotalBytes = stats.StorageBytes + stats.CodeBytes
+	}
 
 	// Close per-domain channels → writers drain then exit.
 	close(chans.accounts)
