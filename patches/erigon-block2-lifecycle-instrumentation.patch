@@ -13,8 +13,39 @@ index 388b8f96b4..801ab0d327 100644
  	if parentSD != nil {
  		if overlay := parentSD.BlockOverlay(); overlay != nil {
  			compositeTx = overlay.NewReadView(tx)
+diff --git a/execution/engineapi/engine_server.go b/execution/engineapi/engine_server.go
+index 7bda514025..19c5ac79ac 100644
+--- a/execution/engineapi/engine_server.go
++++ b/execution/engineapi/engine_server.go
+@@ -740,7 +740,25 @@ func (s *EngineServer) forkchoiceUpdated(ctx context.Context, forkchoiceState *e
+ 	}
+ 
+ 	s.logger.Debug("[ForkChoiceUpdated] processing new request", newReqLogInfoArgs...)
+-	status, err := s.getQuickPayloadStatusIfPossible(ctx, forkchoiceState.HeadHash, 0, common.Hash{}, forkchoiceState, false)
++	// [INST-B8] STATE-ACTOR PATCH: skip the quick-FCU optimization when
++	// payloadAttributes != nil. The quick path returns ValidStatus without
++	// calling HandleForkChoice → updateForkChoice → dispatchNotifications →
++	// PublishOverlay(sd). The BUILDER (called via payloadAttributes) then
++	// has sdProvider() returning nil, sd.parent unset, and SeekCommitment
++	// falls through to state-actor's snapshot genesis. With this skip,
++	// HandleForkChoice runs, PublishOverlay(sd) fires, and the BUILDER's
++	// next sdProvider() call returns the post-block-N SD.
++	log.Warn("[INST-B8] forkchoiceUpdated ENTRY",
++		"head", forkchoiceState.HeadHash.Hex(),
++		"hasAttrs", payloadAttributes != nil)
++	var status *engine_types.PayloadStatus
++	var err error
++	if payloadAttributes == nil {
++		status, err = s.getQuickPayloadStatusIfPossible(ctx, forkchoiceState.HeadHash, 0, common.Hash{}, forkchoiceState, false)
++	} else {
++		log.Warn("[INST-B8] BYPASSED getQuickPayloadStatusIfPossible (has attrs)",
++			"head", forkchoiceState.HeadHash.Hex())
++	}
+ 	if err != nil {
+ 		return nil, err
+ 	}
 diff --git a/execution/execmodule/forkchoice.go b/execution/execmodule/forkchoice.go
-index 84347622b1..364cffa7b9 100644
+index 84347622b1..75f427a3e6 100644
 --- a/execution/execmodule/forkchoice.go
 +++ b/execution/execmodule/forkchoice.go
 @@ -155,6 +155,9 @@ func writeForkChoiceHashes(tx kv.RwTx, blockHash, safeHash, finalizedHash common
@@ -27,47 +58,7 @@ index 84347622b1..364cffa7b9 100644
  	if !e.semaphore.TryAcquire(1) {
  		e.logger.Trace("ethereumExecutionModule.updateForkChoice: ExecutionStatus_Busy")
  		sendForkchoiceResultWithoutWaiting(outcomeCh, ForkChoiceResult{
-@@ -320,25 +323,20 @@ func (e *ExecModule) updateForkChoice(ctx context.Context, originalBlockHash, sa
- 		// we short circuit reorgs if:
- 		//   1. the head is an ancestor of the last finalised block
- 		//   2. the head is a duplicate FCU (e.g. CLs sending the same FCU repeatedly)
--		if canonicalHash == blockHash &&
--			(fcuHeader.Number.Uint64() < finalisedBlockNum || fcuHeader.Number.Uint64() == finishProgressBefore) {
--			writeForkChoiceHashes(tx, blockHash, safeHash, finalizedHash)
--			valid, err := e.verifyForkchoiceHashes(ctx, tx, blockHash, finalizedHash, safeHash)
--			if err != nil {
--				return sendForkchoiceErrorWithoutWaiting(e.logger, outcomeCh, err, false)
--			}
--			if !valid {
--				return sendForkchoiceResultWithoutWaiting(outcomeCh, ForkChoiceResult{
--					LatestValidHash: common.Hash{},
--					Status:          ExecutionStatusInvalidForkchoice,
--				}, false)
--			}
--			sendForkchoiceResultWithoutWaiting(outcomeCh, ForkChoiceResult{
--				LatestValidHash: blockHash,
--				Status:          ExecutionStatusSuccess,
--			}, false)
--			return err
--		}
-+		// [INST-B6] STATE-ACTOR PATCH: BYPASS the duplicate-FCU short-circuit.
-+		// The short-circuit returned success WITHOUT calling
-+		// dispatchNotificationsFromOverlay, so PublishOverlay(sd) never fired,
-+		// the BUILDER's sdProvider() always returned nil, and the BUILDER
-+		// built the next block on top of state-actor's genesis snapshot
-+		// instead of the actual post-block-N state.
-+		log.Warn("[INST-B6] forkchoice short-circuit BYPASSED (state-actor patch)",
-+			"canonicalHash", canonicalHash.Hex(),
-+			"blockHash", blockHash.Hex(),
-+			"fcuHeaderNum", fcuHeader.Number.Uint64(),
-+			"finishProgressBefore", finishProgressBefore,
-+			"finalisedBlockNum", finalisedBlockNum,
-+			"wouldShortCircuit", canonicalHash == blockHash &&
-+				(fcuHeader.Number.Uint64() < finalisedBlockNum || fcuHeader.Number.Uint64() == finishProgressBefore))
- 
- 		currentParentHash := fcuHeader.ParentHash
- 		currentParentNumber := fcuHeader.Number.Uint64() - 1
-@@ -763,13 +761,19 @@ func (e *ExecModule) runPostForkchoice(sd *execctx.SharedDomains, bgRoTx kv.Temp
+@@ -763,13 +766,19 @@ func (e *ExecModule) runPostForkchoice(sd *execctx.SharedDomains, bgRoTx kv.Temp
  // Called inline (under semaphore) so consumers have the data before the next
  // FCU can start.
  func (e *ExecModule) dispatchNotificationsFromOverlay(sd *execctx.SharedDomains, finishProgressBefore uint64) error {
@@ -87,7 +78,7 @@ index 84347622b1..364cffa7b9 100644
  		e.logger.Debug("[dispatchNotifications] skipped: overlay nil")
  		return nil
  	}
-@@ -781,6 +785,8 @@ func (e *ExecModule) dispatchNotificationsFromOverlay(sd *execctx.SharedDomains,
+@@ -781,6 +790,8 @@ func (e *ExecModule) dispatchNotificationsFromOverlay(sd *execctx.SharedDomains,
  	// the BlockListener (overlay-aware shutter) sees the overlay as active
  	// before any StateChangeBatch arrives, so it can buffer events properly.
  	e.logger.Debug("[dispatchNotifications] publishing SD")
