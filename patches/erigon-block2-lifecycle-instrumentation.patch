@@ -38,7 +38,7 @@ index 7bda514025..5f950aa2fc 100644
  		return nil, err
  	}
 diff --git a/execution/execmodule/forkchoice.go b/execution/execmodule/forkchoice.go
-index 84347622b1..c7da65137c 100644
+index 84347622b1..992f3487e8 100644
 --- a/execution/execmodule/forkchoice.go
 +++ b/execution/execmodule/forkchoice.go
 @@ -155,7 +155,13 @@ func writeForkChoiceHashes(tx kv.RwTx, blockHash, safeHash, finalizedHash common
@@ -105,7 +105,7 @@ index 84347622b1..c7da65137c 100644
  
  	e.hook.LastNewBlockSeen(fcuHeader.Number.Uint64()) // used by eth_syncing
  
-@@ -295,26 +311,38 @@ func (e *ExecModule) updateForkChoice(ctx context.Context, originalBlockHash, sa
+@@ -295,50 +311,50 @@ func (e *ExecModule) updateForkChoice(ctx context.Context, originalBlockHash, sa
  		e.logger.Info("[sync] limited big jump", "from", finishProgressBefore, "to", fcuHeader.Number.Uint64(), "amount", uint64(e.syncCfg.LoopBlockLimit), "padding", limitedBigJumpPadding)
  	}
  
@@ -136,6 +136,25 @@ index 84347622b1..c7da65137c 100644
 -					LatestValidHash: common.Hash{},
 -					Status:          ExecutionStatusInvalidForkchoice,
 -				}, false)
+-			}
+-			finalisedBlockNum = *bn
+-		}
+-		// as per https://github.com/ethereum/execution-apis/pull/786
+-		// we short circuit reorgs if:
+-		//   1. the head is an ancestor of the last finalised block
+-		//   2. the head is a duplicate FCU (e.g. CLs sending the same FCU repeatedly)
+-		if canonicalHash == blockHash &&
+-			(fcuHeader.Number.Uint64() < finalisedBlockNum || fcuHeader.Number.Uint64() == finishProgressBefore) {
+-			writeForkChoiceHashes(tx, blockHash, safeHash, finalizedHash)
+-			valid, err := e.verifyForkchoiceHashes(ctx, tx, blockHash, finalizedHash, safeHash)
+-			if err != nil {
+-				return sendForkchoiceErrorWithoutWaiting(e.logger, outcomeCh, err, false)
+-			}
+-			if !valid {
+-				return sendForkchoiceResultWithoutWaiting(outcomeCh, ForkChoiceResult{
+-					LatestValidHash: common.Hash{},
+-					Status:          ExecutionStatusInvalidForkchoice,
+-				}, false)
 +				log.Warn("[INST-B7R] STATE-ACTOR PATCH: bn==nil for finalised hash → treating as finalisedBlockNum=0 instead of InvalidForkchoice",
 +					"finalisedHash", lastKnownFinalisedHash.Hex())
 +				// Original: return InvalidForkchoice. State-actor patch:
@@ -145,11 +164,27 @@ index 84347622b1..c7da65137c 100644
 +				log.Warn("[INST-B7S] HeaderNumber OK", "bn", *bn)
 +				finalisedBlockNum = *bn
  			}
--			finalisedBlockNum = *bn
+-			sendForkchoiceResultWithoutWaiting(outcomeCh, ForkChoiceResult{
+-				LatestValidHash: blockHash,
+-				Status:          ExecutionStatusSuccess,
+-			}, false)
+-			return err
  		}
- 		// as per https://github.com/ethereum/execution-apis/pull/786
- 		// we short circuit reorgs if:
-@@ -763,13 +791,19 @@ func (e *ExecModule) runPostForkchoice(sd *execctx.SharedDomains, bgRoTx kv.Temp
++		// [INST-B6] STATE-ACTOR PATCH: BYPASS duplicate-FCU short-circuit
++		// (it would return Success without calling dispatchNotificationsFromOverlay,
++		// so PublishOverlay(sd) never fires and BUILDER.sdProvider() returns nil).
++		log.Warn("[INST-B6] forkchoice short-circuit BYPASSED",
++			"canonicalHash", canonicalHash.Hex(),
++			"blockHash", blockHash.Hex(),
++			"fcuHeaderNum", fcuHeader.Number.Uint64(),
++			"finishProgressBefore", finishProgressBefore,
++			"finalisedBlockNum", finalisedBlockNum,
++			"wouldShortCircuit", canonicalHash == blockHash &&
++				(fcuHeader.Number.Uint64() < finalisedBlockNum || fcuHeader.Number.Uint64() == finishProgressBefore))
+ 
+ 		currentParentHash := fcuHeader.ParentHash
+ 		currentParentNumber := fcuHeader.Number.Uint64() - 1
+@@ -763,13 +779,19 @@ func (e *ExecModule) runPostForkchoice(sd *execctx.SharedDomains, bgRoTx kv.Temp
  // Called inline (under semaphore) so consumers have the data before the next
  // FCU can start.
  func (e *ExecModule) dispatchNotificationsFromOverlay(sd *execctx.SharedDomains, finishProgressBefore uint64) error {
@@ -169,7 +204,7 @@ index 84347622b1..c7da65137c 100644
  		e.logger.Debug("[dispatchNotifications] skipped: overlay nil")
  		return nil
  	}
-@@ -781,6 +815,8 @@ func (e *ExecModule) dispatchNotificationsFromOverlay(sd *execctx.SharedDomains,
+@@ -781,6 +803,8 @@ func (e *ExecModule) dispatchNotificationsFromOverlay(sd *execctx.SharedDomains,
  	// the BlockListener (overlay-aware shutter) sees the overlay as active
  	// before any StateChangeBatch arrives, so it can buffer events properly.
  	e.logger.Debug("[dispatchNotifications] publishing SD")
