@@ -1,81 +1,48 @@
-diff --git a/db/state/execctx/domain_shared.go b/db/state/execctx/domain_shared.go
-index d8d4a78f5d..426d00d294 100644
---- a/db/state/execctx/domain_shared.go
-+++ b/db/state/execctx/domain_shared.go
-@@ -521,6 +521,10 @@ func (sd *SharedDomains) InMemHistoryReads() bool          { return sd.mem.InMem
- // falling through to the underlying tx/aggregator.
- func (sd *SharedDomains) SetParent(parent *SharedDomains) { sd.parent = parent }
- 
-+// HasParent returns whether SetParent was called with a non-nil parent.
-+// Instrumentation helper.
-+func (sd *SharedDomains) HasParent() bool { return sd.parent != nil }
-+
- // BlockOverlay returns the in-memory overlay for block-level metadata (headers, bodies,
- // canonical hashes, TD, stage progress, forkchoice markers). Callers can use this
- // as a kv.RwTx to route rawdb writes through the overlay instead of a real RwTx.
 diff --git a/execution/builder/builder.go b/execution/builder/builder.go
-index 388b8f96b4..5176e4662c 100644
+index 388b8f96b4..801ab0d327 100644
 --- a/execution/builder/builder.go
 +++ b/execution/builder/builder.go
-@@ -139,6 +139,11 @@ func (b *Builder) Build(param *Parameters, interrupt *atomic.Bool) (result *type
+@@ -139,6 +139,10 @@ func (b *Builder) Build(param *Parameters, interrupt *atomic.Bool) (result *type
  	if b.sdProvider != nil {
  		parentSD = b.sdProvider()
  	}
-+	log.Warn("[INST-B4] Builder.Build sdProvider check",
++	log.Warn("[INST-B5] Builder.Build RIGHT AFTER sdProvider call",
 +		"sdProviderNil", b.sdProvider == nil,
 +		"parentSDNil", parentSD == nil,
-+		"payloadId", param.PayloadId,
-+		"parentHash", param.ParentHash.Hex())
++		"payloadId", param.PayloadId)
  	if parentSD != nil {
  		if overlay := parentSD.BlockOverlay(); overlay != nil {
  			compositeTx = overlay.NewReadView(tx)
-@@ -153,6 +158,14 @@ func (b *Builder) Build(param *Parameters, interrupt *atomic.Bool) (result *type
- 
- 	if parentSD != nil {
- 		sd.SetParent(parentSD)
-+		log.Warn("[INST-B4] Builder.Build sd.SetParent CALLED",
-+			"payloadId", param.PayloadId,
-+			"parentSD", fmt.Sprintf("%p", parentSD),
-+			"childSD", fmt.Sprintf("%p", sd))
-+	} else {
-+		log.Warn("[INST-B4] Builder.Build NO PARENT — child SD has no parent",
-+			"payloadId", param.PayloadId,
-+			"childSD", fmt.Sprintf("%p", sd))
- 	}
- 
- 	executionAt, err := stages.GetStageProgress(compositeTx, stages.Execution)
-diff --git a/execution/builder/exec.go b/execution/builder/exec.go
-index 52530e451b..4bb3ee56a5 100644
---- a/execution/builder/exec.go
-+++ b/execution/builder/exec.go
-@@ -109,7 +109,11 @@ func execBlock(ctx context0.Context, sd *execctx.SharedDomains, tx kv.TemporalTx
- 
- 	// sd writes accumulate in-memory and are discarded when Build returns.
- 	// We use sd directly for execution state writes and commitment computation.
-+	log.Warn("[INST-B4] execBlock pre-SeekCommitment",
-+		"sd", fmt.Sprintf("%p", sd), "hasParent", sd.HasParent())
- 	txNum, _, err := sd.SeekCommitment(ctx, tx)
-+	log.Warn("[INST-B4] execBlock post-SeekCommitment",
-+		"sd", fmt.Sprintf("%p", sd), "txNum", txNum, "err", err)
- 	if err != nil {
- 		return err
- 	}
 diff --git a/execution/execmodule/forkchoice.go b/execution/execmodule/forkchoice.go
-index 84347622b1..ae2d99eb89 100644
+index 84347622b1..47e621451d 100644
 --- a/execution/execmodule/forkchoice.go
 +++ b/execution/execmodule/forkchoice.go
-@@ -231,9 +231,14 @@ func (e *ExecModule) updateForkChoice(ctx context.Context, originalBlockHash, sa
- 			// readers (e.g. a second FCU calling GetHeaderByHash) don't access
- 			// a closed SharedDomains via Events.LatestSD().
- 			if dispatcher := e.pipelineExecutor.Dispatcher(); dispatcher != nil {
-+				log.Warn("[INST-B4] forkchoice DEFER PublishOverlay(nil) FIRING",
-+					"sd", fmt.Sprintf("%p", currentContext),
-+					"headBlockHash", originalBlockHash.Hex())
- 				dispatcher.PublishOverlay(nil)
- 			}
- 			currentContext.Close()
-+			log.Warn("[INST-B4] forkchoice DEFER currentContext.Close() DONE",
-+				"sd", fmt.Sprintf("%p", currentContext))
- 		}
- 	}()
+@@ -763,13 +763,19 @@ func (e *ExecModule) runPostForkchoice(sd *execctx.SharedDomains, bgRoTx kv.Temp
+ // Called inline (under semaphore) so consumers have the data before the next
+ // FCU can start.
+ func (e *ExecModule) dispatchNotificationsFromOverlay(sd *execctx.SharedDomains, finishProgressBefore uint64) error {
++	log.Warn("[INST-B5] dispatchNotificationsFromOverlay ENTRY",
++		"sd", fmt.Sprintf("%p", sd))
+ 	dispatcher := e.pipelineExecutor.Dispatcher()
+ 	if dispatcher == nil || e.accum == nil {
++		log.Warn("[INST-B5] dispatchNotifications SKIPPED dispatcher/accum nil",
++			"dispatcherNil", dispatcher == nil, "accumNil", e.accum == nil)
+ 		e.logger.Debug("[dispatchNotifications] skipped: dispatcher or accum nil", "dispatcherNil", dispatcher == nil, "accumNil", e.accum == nil)
+ 		return nil
+ 	}
+ 	overlay := sd.BlockOverlay()
+ 	if overlay == nil {
++		log.Warn("[INST-B5] dispatchNotifications SKIPPED overlay nil",
++			"sd", fmt.Sprintf("%p", sd))
+ 		e.logger.Debug("[dispatchNotifications] skipped: overlay nil")
+ 		return nil
+ 	}
+@@ -781,6 +787,8 @@ func (e *ExecModule) dispatchNotificationsFromOverlay(sd *execctx.SharedDomains,
+ 	// the BlockListener (overlay-aware shutter) sees the overlay as active
+ 	// before any StateChangeBatch arrives, so it can buffer events properly.
+ 	e.logger.Debug("[dispatchNotifications] publishing SD")
++	log.Warn("[INST-B5] dispatchNotifications PUBLISHING SD (non-nil)",
++		"sd", fmt.Sprintf("%p", sd))
+ 	dispatcher.PublishOverlay(sd)
  
+ 	e.logger.Debug("[dispatchNotifications] dispatching", "finishBefore", finishProgressBefore, "finishAfter", finishProgressAfter)
