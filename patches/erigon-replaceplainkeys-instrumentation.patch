@@ -1,0 +1,45 @@
+diff --git a/db/state/domain_committed.go b/db/state/domain_committed.go
+index c8c3e5c995..1c7f0e88e1 100644
+--- a/db/state/domain_committed.go
++++ b/db/state/domain_committed.go
+@@ -49,10 +49,29 @@ func (at *AggregatorRoTx) replaceShortenedKeysInBranch(prefix []byte, branch com
+ 	logger := log.Root()
+ 	aggTx := at
+ 
++	logger.Warn("[INST-RPK] entry",
++		"prefix", hex.EncodeToString(prefix),
++		"fStartTxNum", fStartTxNum, "fEndTxNum", fEndTxNum,
++		"len(branch)", len(branch),
++		"isKeyCommitmentState", bytes.Equal(prefix, commitmentdb.KeyCommitmentState))
++
+ 	commitmentUseReferencedBranches := at.a.Cfg(kv.CommitmentDomain).ReplaceKeysInValues
+ 	if !commitmentUseReferencedBranches || len(branch) == 0 || bytes.Equal(prefix, commitmentdb.KeyCommitmentState) ||
+ 		aggTx.TxNumsInFiles(kv.StateDomains...) == 0 || !ValuesPlainKeyReferencingThresholdReached(at.StepSize(), fStartTxNum, fEndTxNum) {
+ 
++		var ratio uint64
++		if at.StepSize() > 0 {
++			ratio = (fEndTxNum - fStartTxNum) / at.StepSize()
++		}
++		logger.Warn("[INST-RPK] short-circuit",
++			"useRefBranches", commitmentUseReferencedBranches,
++			"zeroLen", len(branch) == 0,
++			"isState", bytes.Equal(prefix, commitmentdb.KeyCommitmentState),
++			"noTxFiles", aggTx.TxNumsInFiles(kv.StateDomains...) == 0,
++			"belowThreshold", !ValuesPlainKeyReferencingThresholdReached(at.StepSize(), fStartTxNum, fEndTxNum),
++			"stepSize", at.StepSize(),
++			"computedRatio", ratio,
++			"minStepsForReferencing", minStepsForReferencing)
+ 		return branch, nil // do not transform, return as is
+ 	}
+ 
+@@ -119,6 +138,10 @@ func (at *AggregatorRoTx) replaceShortenedKeysInBranch(prefix []byte, branch com
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	logger.Warn("[INST-RPK] transform",
++		"prefix", hex.EncodeToString(prefix),
++		"in", hex.EncodeToString(branch),
++		"out", hex.EncodeToString(result))
+ 	return result, nil
+ }
+ 
