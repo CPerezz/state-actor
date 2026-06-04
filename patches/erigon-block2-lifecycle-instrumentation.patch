@@ -1,4 +1,5 @@
 diff --git a/execution/builder/builder.go b/execution/builder/builder.go
+index 388b8f96b4..801ab0d327 100644
 --- a/execution/builder/builder.go
 +++ b/execution/builder/builder.go
 @@ -139,6 +139,10 @@ func (b *Builder) Build(param *Parameters, interrupt *atomic.Bool) (result *type
@@ -13,10 +14,10 @@ diff --git a/execution/builder/builder.go b/execution/builder/builder.go
  		if overlay := parentSD.BlockOverlay(); overlay != nil {
  			compositeTx = overlay.NewReadView(tx)
 diff --git a/execution/execmodule/forkchoice.go b/execution/execmodule/forkchoice.go
+index 84347622b1..2f8d237850 100644
 --- a/execution/execmodule/forkchoice.go
 +++ b/execution/execmodule/forkchoice.go
-@@ -319,27 +319,18 @@ func (e *ExecModule) updateForkChoice(ctx context.Context, originalBlockHash, sa
- 		// as per https://github.com/ethereum/execution-apis/pull/786
+@@ -320,25 +320,18 @@ func (e *ExecModule) updateForkChoice(ctx context.Context, originalBlockHash, sa
  		// we short circuit reorgs if:
  		//   1. the head is an ancestor of the last finalised block
  		//   2. the head is a duplicate FCU (e.g. CLs sending the same FCU repeatedly)
@@ -51,10 +52,10 @@ diff --git a/execution/execmodule/forkchoice.go b/execution/execmodule/forkchoic
 +			"fcuHeaderNum", fcuHeader.Number.Uint64(),
 +			"finishProgressBefore", finishProgressBefore,
 +			"finalisedBlockNum", finalisedBlockNum)
-
+ 
  		currentParentHash := fcuHeader.ParentHash
  		currentParentNumber := fcuHeader.Number.Uint64() - 1
-@@ -763,13 +754,19 @@ func (e *ExecModule) runPostForkchoice(sd *execctx.SharedDomains, bgRoTx kv.Temp
+@@ -763,13 +756,19 @@ func (e *ExecModule) runPostForkchoice(sd *execctx.SharedDomains, bgRoTx kv.Temp
  // Called inline (under semaphore) so consumers have the data before the next
  // FCU can start.
  func (e *ExecModule) dispatchNotificationsFromOverlay(sd *execctx.SharedDomains, finishProgressBefore uint64) error {
@@ -74,12 +75,12 @@ diff --git a/execution/execmodule/forkchoice.go b/execution/execmodule/forkchoic
  		e.logger.Debug("[dispatchNotifications] skipped: overlay nil")
  		return nil
  	}
-@@ -781,6 +778,8 @@ func (e *ExecModule) dispatchNotificationsFromOverlay(sd *execctx.SharedDomains,
+@@ -781,6 +780,8 @@ func (e *ExecModule) dispatchNotificationsFromOverlay(sd *execctx.SharedDomains,
  	// the BlockListener (overlay-aware shutter) sees the overlay as active
  	// before any StateChangeBatch arrives, so it can buffer events properly.
  	e.logger.Debug("[dispatchNotifications] publishing SD")
 +	log.Warn("[INST-B5] dispatchNotifications PUBLISHING SD (non-nil)",
 +		"sd", fmt.Sprintf("%p", sd))
  	dispatcher.PublishOverlay(sd)
-
+ 
  	e.logger.Debug("[dispatchNotifications] dispatching", "finishBefore", finishProgressBefore, "finishAfter", finishProgressAfter)
