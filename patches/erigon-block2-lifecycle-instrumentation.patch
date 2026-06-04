@@ -14,22 +14,15 @@ index 388b8f96b4..801ab0d327 100644
  		if overlay := parentSD.BlockOverlay(); overlay != nil {
  			compositeTx = overlay.NewReadView(tx)
 diff --git a/execution/engineapi/engine_server.go b/execution/engineapi/engine_server.go
-index 7bda514025..19c5ac79ac 100644
+index 7bda514025..5f950aa2fc 100644
 --- a/execution/engineapi/engine_server.go
 +++ b/execution/engineapi/engine_server.go
-@@ -740,7 +740,25 @@ func (s *EngineServer) forkchoiceUpdated(ctx context.Context, forkchoiceState *e
+@@ -740,7 +740,18 @@ func (s *EngineServer) forkchoiceUpdated(ctx context.Context, forkchoiceState *e
  	}
  
  	s.logger.Debug("[ForkChoiceUpdated] processing new request", newReqLogInfoArgs...)
 -	status, err := s.getQuickPayloadStatusIfPossible(ctx, forkchoiceState.HeadHash, 0, common.Hash{}, forkchoiceState, false)
-+	// [INST-B8] STATE-ACTOR PATCH: skip the quick-FCU optimization when
-+	// payloadAttributes != nil. The quick path returns ValidStatus without
-+	// calling HandleForkChoice → updateForkChoice → dispatchNotifications →
-+	// PublishOverlay(sd). The BUILDER (called via payloadAttributes) then
-+	// has sdProvider() returning nil, sd.parent unset, and SeekCommitment
-+	// falls through to state-actor's snapshot genesis. With this skip,
-+	// HandleForkChoice runs, PublishOverlay(sd) fires, and the BUILDER's
-+	// next sdProvider() call returns the post-block-N SD.
++	// [INST-B8] STATE-ACTOR PATCH: skip quick-FCU when payloadAttributes != nil.
 +	log.Warn("[INST-B8] forkchoiceUpdated ENTRY",
 +		"head", forkchoiceState.HeadHash.Hex(),
 +		"hasAttrs", payloadAttributes != nil)
@@ -45,20 +38,93 @@ index 7bda514025..19c5ac79ac 100644
  		return nil, err
  	}
 diff --git a/execution/execmodule/forkchoice.go b/execution/execmodule/forkchoice.go
-index 84347622b1..75f427a3e6 100644
+index 84347622b1..e346dbcd4b 100644
 --- a/execution/execmodule/forkchoice.go
 +++ b/execution/execmodule/forkchoice.go
-@@ -155,6 +155,9 @@ func writeForkChoiceHashes(tx kv.RwTx, blockHash, safeHash, finalizedHash common
+@@ -155,7 +155,13 @@ func writeForkChoiceHashes(tx kv.RwTx, blockHash, safeHash, finalizedHash common
  }
  
  func (e *ExecModule) updateForkChoice(ctx context.Context, originalBlockHash, safeHash, finalizedHash common.Hash, outcomeCh chan forkchoiceOutcome) (err error) {
 +	log.Warn("[INST-B7] updateForkChoice ENTRY",
-+		"originalBlockHash", originalBlockHash.Hex(),
-+		"safeHash", safeHash.Hex(), "finalizedHash", finalizedHash.Hex())
++		"originalBlockHash", originalBlockHash.Hex())
++	defer func() {
++		log.Warn("[INST-B7-EXIT] updateForkChoice returning", "err", err)
++	}()
  	if !e.semaphore.TryAcquire(1) {
++		log.Warn("[INST-B7A] semaphore TryAcquire FAILED → Busy")
  		e.logger.Trace("ethereumExecutionModule.updateForkChoice: ExecutionStatus_Busy")
  		sendForkchoiceResultWithoutWaiting(outcomeCh, ForkChoiceResult{
-@@ -763,13 +766,19 @@ func (e *ExecModule) runPostForkchoice(sd *execctx.SharedDomains, bgRoTx kv.Temp
+ 			LatestValidHash: common.Hash{},
+@@ -183,6 +189,7 @@ func (e *ExecModule) updateForkChoice(ctx context.Context, originalBlockHash, sa
+ 		hash   common.Hash
+ 		number uint64
+ 	}
++	log.Warn("[INST-B7B] about to BeginTemporalRo")
+ 
+ 	// Open a RO tx as the base for all reads. Writes accumulate in the block
+ 	// overlay (MemoryMutation) which implements kv.TemporalRwTx. No MDBX write
+@@ -190,8 +197,10 @@ func (e *ExecModule) updateForkChoice(ctx context.Context, originalBlockHash, sa
+ 	// commit time to flush everything atomically.
+ 	roTx, err := e.db.BeginTemporalRo(ctx) //nolint:gocritic // deferred via closure below (bg-commit path sets roTx=nil after ownership transfer)
+ 	if err != nil {
++		log.Warn("[INST-B7C] BeginTemporalRo FAILED", "err", err)
+ 		return sendForkchoiceErrorWithoutWaiting(e.logger, outcomeCh, err, false)
+ 	}
++	log.Warn("[INST-B7D] BeginTemporalRo OK")
+ 	defer func() {
+ 		if roTx != nil {
+ 			roTx.Rollback()
+@@ -241,9 +250,12 @@ func (e *ExecModule) updateForkChoice(ctx context.Context, originalBlockHash, sa
+ 	// hashes, stage progress, forkchoice markers, TxNums, etc.). All
+ 	// pipeline reads cascade through the overlay to the RO tx; writes
+ 	// stay in memory until commit.
++	log.Warn("[INST-B7E] about to InitBlockOverlay")
+ 	if err := currentContext.InitBlockOverlay(roTx, roTx.Debug().Dirs().Tmp); err != nil {
++		log.Warn("[INST-B7F] InitBlockOverlay FAILED", "err", err)
+ 		return sendForkchoiceErrorWithoutWaiting(e.logger, outcomeCh, fmt.Errorf("updateForkChoice: init block overlay: %w", err), false)
+ 	}
++	log.Warn("[INST-B7G] InitBlockOverlay OK")
+ 	var tx kv.TemporalRwTx = currentContext.BlockOverlay()
+ 
+ 	// If InsertBlocks wrote block data, flush it into the block overlay
+@@ -258,13 +270,17 @@ func (e *ExecModule) updateForkChoice(ctx context.Context, originalBlockHash, sa
+ 	blockHash := originalBlockHash
+ 
+ 	// Step one, find reconnection point, and mark all of those headers as canonical.
++	log.Warn("[INST-B7H] about to HeaderByHash", "originalBlockHash", originalBlockHash.Hex())
+ 	fcuHeader, err := e.blockReader.HeaderByHash(ctx, tx, originalBlockHash)
+ 	if err != nil {
++		log.Warn("[INST-B7I] HeaderByHash FAILED", "err", err)
+ 		return sendForkchoiceErrorWithoutWaiting(e.logger, outcomeCh, err, false)
+ 	}
+ 	if fcuHeader == nil {
++		log.Warn("[INST-B7J] fcuHeader nil → not found", "hash", blockHash.Hex())
+ 		return sendForkchoiceErrorWithoutWaiting(e.logger, outcomeCh, fmt.Errorf("forkchoice: block %x not found or was marked invalid", blockHash), false)
+ 	}
++	log.Warn("[INST-B7K] fcuHeader OK", "num", fcuHeader.Number.Uint64())
+ 
+ 	e.hook.LastNewBlockSeen(fcuHeader.Number.Uint64()) // used by eth_syncing
+ 
+@@ -295,12 +311,18 @@ func (e *ExecModule) updateForkChoice(ctx context.Context, originalBlockHash, sa
+ 		e.logger.Info("[sync] limited big jump", "from", finishProgressBefore, "to", fcuHeader.Number.Uint64(), "amount", uint64(e.syncCfg.LoopBlockLimit), "padding", limitedBigJumpPadding)
+ 	}
+ 
++	log.Warn("[INST-B7L] about to canonicalHash", "num", fcuHeader.Number.Uint64(), "finishProgressBefore", finishProgressBefore, "isSynced", isSynced)
+ 	canonicalHash, err := e.canonicalHash(ctx, tx, fcuHeader.Number.Uint64())
+ 	if err != nil {
++		log.Warn("[INST-B7M] canonicalHash FAILED", "err", err)
+ 		return sendForkchoiceErrorWithoutWaiting(e.logger, outcomeCh, err, false)
+ 	}
++	log.Warn("[INST-B7N] canonicalHash OK", "canonicalHash", canonicalHash.Hex(),
++		"blockHashEq", canonicalHash == originalBlockHash,
++		"fcuHeaderNumSign", fcuHeader.Number.Sign())
+ 
+ 	if fcuHeader.Number.Sign() > 0 {
++		log.Warn("[INST-B7O] entered fcuHeader.Number.Sign() > 0 block")
+ 		var finalisedBlockNum uint64
+ 		lastKnownFinalisedHash := rawdb.ReadForkchoiceFinalized(tx)
+ 		if lastKnownFinalisedHash != (common.Hash{}) {
+@@ -763,13 +785,19 @@ func (e *ExecModule) runPostForkchoice(sd *execctx.SharedDomains, bgRoTx kv.Temp
  // Called inline (under semaphore) so consumers have the data before the next
  // FCU can start.
  func (e *ExecModule) dispatchNotificationsFromOverlay(sd *execctx.SharedDomains, finishProgressBefore uint64) error {
@@ -78,7 +144,7 @@ index 84347622b1..75f427a3e6 100644
  		e.logger.Debug("[dispatchNotifications] skipped: overlay nil")
  		return nil
  	}
-@@ -781,6 +790,8 @@ func (e *ExecModule) dispatchNotificationsFromOverlay(sd *execctx.SharedDomains,
+@@ -781,6 +809,8 @@ func (e *ExecModule) dispatchNotificationsFromOverlay(sd *execctx.SharedDomains,
  	// the BlockListener (overlay-aware shutter) sees the overlay as active
  	// before any StateChangeBatch arrives, so it can buffer events properly.
  	e.logger.Debug("[dispatchNotifications] publishing SD")
