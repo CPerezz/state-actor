@@ -14,10 +14,20 @@ index 388b8f96b4..801ab0d327 100644
  		if overlay := parentSD.BlockOverlay(); overlay != nil {
  			compositeTx = overlay.NewReadView(tx)
 diff --git a/execution/execmodule/forkchoice.go b/execution/execmodule/forkchoice.go
-index 84347622b1..2f8d237850 100644
+index 84347622b1..364cffa7b9 100644
 --- a/execution/execmodule/forkchoice.go
 +++ b/execution/execmodule/forkchoice.go
-@@ -320,25 +320,18 @@ func (e *ExecModule) updateForkChoice(ctx context.Context, originalBlockHash, sa
+@@ -155,6 +155,9 @@ func writeForkChoiceHashes(tx kv.RwTx, blockHash, safeHash, finalizedHash common
+ }
+ 
+ func (e *ExecModule) updateForkChoice(ctx context.Context, originalBlockHash, safeHash, finalizedHash common.Hash, outcomeCh chan forkchoiceOutcome) (err error) {
++	log.Warn("[INST-B7] updateForkChoice ENTRY",
++		"originalBlockHash", originalBlockHash.Hex(),
++		"safeHash", safeHash.Hex(), "finalizedHash", finalizedHash.Hex())
+ 	if !e.semaphore.TryAcquire(1) {
+ 		e.logger.Trace("ethereumExecutionModule.updateForkChoice: ExecutionStatus_Busy")
+ 		sendForkchoiceResultWithoutWaiting(outcomeCh, ForkChoiceResult{
+@@ -320,25 +323,20 @@ func (e *ExecModule) updateForkChoice(ctx context.Context, originalBlockHash, sa
  		// we short circuit reorgs if:
  		//   1. the head is an ancestor of the last finalised block
  		//   2. the head is a duplicate FCU (e.g. CLs sending the same FCU repeatedly)
@@ -51,11 +61,13 @@ index 84347622b1..2f8d237850 100644
 +			"blockHash", blockHash.Hex(),
 +			"fcuHeaderNum", fcuHeader.Number.Uint64(),
 +			"finishProgressBefore", finishProgressBefore,
-+			"finalisedBlockNum", finalisedBlockNum)
++			"finalisedBlockNum", finalisedBlockNum,
++			"wouldShortCircuit", canonicalHash == blockHash &&
++				(fcuHeader.Number.Uint64() < finalisedBlockNum || fcuHeader.Number.Uint64() == finishProgressBefore))
  
  		currentParentHash := fcuHeader.ParentHash
  		currentParentNumber := fcuHeader.Number.Uint64() - 1
-@@ -763,13 +756,19 @@ func (e *ExecModule) runPostForkchoice(sd *execctx.SharedDomains, bgRoTx kv.Temp
+@@ -763,13 +761,19 @@ func (e *ExecModule) runPostForkchoice(sd *execctx.SharedDomains, bgRoTx kv.Temp
  // Called inline (under semaphore) so consumers have the data before the next
  // FCU can start.
  func (e *ExecModule) dispatchNotificationsFromOverlay(sd *execctx.SharedDomains, finishProgressBefore uint64) error {
@@ -75,7 +87,7 @@ index 84347622b1..2f8d237850 100644
  		e.logger.Debug("[dispatchNotifications] skipped: overlay nil")
  		return nil
  	}
-@@ -781,6 +780,8 @@ func (e *ExecModule) dispatchNotificationsFromOverlay(sd *execctx.SharedDomains,
+@@ -781,6 +785,8 @@ func (e *ExecModule) dispatchNotificationsFromOverlay(sd *execctx.SharedDomains,
  	// the BlockListener (overlay-aware shutter) sees the overlay as active
  	// before any StateChangeBatch arrives, so it can buffer events properly.
  	e.logger.Debug("[dispatchNotifications] publishing SD")
