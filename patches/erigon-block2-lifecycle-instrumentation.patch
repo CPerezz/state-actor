@@ -14,10 +14,10 @@ index d8d4a78f5d..426d00d294 100644
  // canonical hashes, TD, stage progress, forkchoice markers). Callers can use this
  // as a kv.RwTx to route rawdb writes through the overlay instead of a real RwTx.
 diff --git a/execution/builder/builder.go b/execution/builder/builder.go
-index 388b8f96b4..045f9a225f 100644
+index 388b8f96b4..5176e4662c 100644
 --- a/execution/builder/builder.go
 +++ b/execution/builder/builder.go
-@@ -139,6 +139,10 @@ func (b *Builder) Build(param *Parameters, interrupt *atomic.Bool) (result *type
+@@ -139,6 +139,11 @@ func (b *Builder) Build(param *Parameters, interrupt *atomic.Bool) (result *type
  	if b.sdProvider != nil {
  		parentSD = b.sdProvider()
  	}
@@ -29,7 +29,7 @@ index 388b8f96b4..045f9a225f 100644
  	if parentSD != nil {
  		if overlay := parentSD.BlockOverlay(); overlay != nil {
  			compositeTx = overlay.NewReadView(tx)
-@@ -153,6 +157,14 @@ func (b *Builder) Build(param *Parameters, interrupt *atomic.Bool) (result *type
+@@ -153,6 +158,14 @@ func (b *Builder) Build(param *Parameters, interrupt *atomic.Bool) (result *type
  
  	if parentSD != nil {
  		sd.SetParent(parentSD)
