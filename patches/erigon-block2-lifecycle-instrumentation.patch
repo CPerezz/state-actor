@@ -24,7 +24,8 @@ index 388b8f96b4..045f9a225f 100644
 +	log.Warn("[INST-B4] Builder.Build sdProvider check",
 +		"sdProviderNil", b.sdProvider == nil,
 +		"parentSDNil", parentSD == nil,
-+		"buildingBlockNum", param.ParentNumber+1)
++		"payloadId", param.PayloadId,
++		"parentHash", param.ParentHash.Hex())
  	if parentSD != nil {
  		if overlay := parentSD.BlockOverlay(); overlay != nil {
  			compositeTx = overlay.NewReadView(tx)
@@ -33,12 +34,12 @@ index 388b8f96b4..045f9a225f 100644
  	if parentSD != nil {
  		sd.SetParent(parentSD)
 +		log.Warn("[INST-B4] Builder.Build sd.SetParent CALLED",
-+			"buildingBlockNum", param.ParentNumber+1,
++			"payloadId", param.PayloadId,
 +			"parentSD", fmt.Sprintf("%p", parentSD),
 +			"childSD", fmt.Sprintf("%p", sd))
 +	} else {
 +		log.Warn("[INST-B4] Builder.Build NO PARENT — child SD has no parent",
-+			"buildingBlockNum", param.ParentNumber+1,
++			"payloadId", param.PayloadId,
 +			"childSD", fmt.Sprintf("%p", sd))
  	}
  
