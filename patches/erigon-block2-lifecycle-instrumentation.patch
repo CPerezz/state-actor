@@ -38,7 +38,7 @@ index 7bda514025..5f950aa2fc 100644
  		return nil, err
  	}
 diff --git a/execution/execmodule/forkchoice.go b/execution/execmodule/forkchoice.go
-index 84347622b1..e346dbcd4b 100644
+index 84347622b1..c7da65137c 100644
 --- a/execution/execmodule/forkchoice.go
 +++ b/execution/execmodule/forkchoice.go
 @@ -155,7 +155,13 @@ func writeForkChoiceHashes(tx kv.RwTx, blockHash, safeHash, finalizedHash common
@@ -105,7 +105,7 @@ index 84347622b1..e346dbcd4b 100644
  
  	e.hook.LastNewBlockSeen(fcuHeader.Number.Uint64()) // used by eth_syncing
  
-@@ -295,12 +311,18 @@ func (e *ExecModule) updateForkChoice(ctx context.Context, originalBlockHash, sa
+@@ -295,26 +311,38 @@ func (e *ExecModule) updateForkChoice(ctx context.Context, originalBlockHash, sa
  		e.logger.Info("[sync] limited big jump", "from", finishProgressBefore, "to", fcuHeader.Number.Uint64(), "amount", uint64(e.syncCfg.LoopBlockLimit), "padding", limitedBigJumpPadding)
  	}
  
@@ -123,8 +123,33 @@ index 84347622b1..e346dbcd4b 100644
 +		log.Warn("[INST-B7O] entered fcuHeader.Number.Sign() > 0 block")
  		var finalisedBlockNum uint64
  		lastKnownFinalisedHash := rawdb.ReadForkchoiceFinalized(tx)
++		log.Warn("[INST-B7P] read forkchoice finalised", "hash", lastKnownFinalisedHash.Hex(),
++			"isZero", lastKnownFinalisedHash == (common.Hash{}))
  		if lastKnownFinalisedHash != (common.Hash{}) {
-@@ -763,13 +785,19 @@ func (e *ExecModule) runPostForkchoice(sd *execctx.SharedDomains, bgRoTx kv.Temp
+ 			bn, err := e.blockReader.HeaderNumber(ctx, tx, lastKnownFinalisedHash)
+ 			if err != nil {
++				log.Warn("[INST-B7Q] HeaderNumber FAILED", "err", err)
+ 				return sendForkchoiceErrorWithoutWaiting(e.logger, outcomeCh, err, false)
+ 			}
+ 			if bn == nil {
+-				return sendForkchoiceResultWithoutWaiting(outcomeCh, ForkChoiceResult{
+-					LatestValidHash: common.Hash{},
+-					Status:          ExecutionStatusInvalidForkchoice,
+-				}, false)
++				log.Warn("[INST-B7R] STATE-ACTOR PATCH: bn==nil for finalised hash → treating as finalisedBlockNum=0 instead of InvalidForkchoice",
++					"finalisedHash", lastKnownFinalisedHash.Hex())
++				// Original: return InvalidForkchoice. State-actor patch:
++				// preserved-data finalised hash may point to a block whose
++				// HeaderNumber lookup returns nil; treat as "no finalisation".
++			} else {
++				log.Warn("[INST-B7S] HeaderNumber OK", "bn", *bn)
++				finalisedBlockNum = *bn
+ 			}
+-			finalisedBlockNum = *bn
+ 		}
+ 		// as per https://github.com/ethereum/execution-apis/pull/786
+ 		// we short circuit reorgs if:
+@@ -763,13 +791,19 @@ func (e *ExecModule) runPostForkchoice(sd *execctx.SharedDomains, bgRoTx kv.Temp
  // Called inline (under semaphore) so consumers have the data before the next
  // FCU can start.
  func (e *ExecModule) dispatchNotificationsFromOverlay(sd *execctx.SharedDomains, finishProgressBefore uint64) error {
@@ -144,7 +169,7 @@ index 84347622b1..e346dbcd4b 100644
  		e.logger.Debug("[dispatchNotifications] skipped: overlay nil")
  		return nil
  	}
-@@ -781,6 +809,8 @@ func (e *ExecModule) dispatchNotificationsFromOverlay(sd *execctx.SharedDomains,
+@@ -781,6 +815,8 @@ func (e *ExecModule) dispatchNotificationsFromOverlay(sd *execctx.SharedDomains,
  	// the BlockListener (overlay-aware shutter) sees the overlay as active
  	// before any StateChangeBatch arrives, so it can buffer events properly.
  	e.logger.Debug("[dispatchNotifications] publishing SD")
