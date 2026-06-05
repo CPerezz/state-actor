@@ -1,0 +1,73 @@
+diff --git a/execution/commitment/hex_patricia_hashed.go b/execution/commitment/hex_patricia_hashed.go
+index 887e9fb823..88674608af 100644
+--- a/execution/commitment/hex_patricia_hashed.go
++++ b/execution/commitment/hex_patricia_hashed.go
+@@ -3027,13 +3027,22 @@ func (hph *HexPatriciaHashed) accountFromCacheOrDB(plainKey []byte) (*Update, er
+ 			if hph.metrics != nil {
+ 				hph.metrics.cacheAccount.Add(1)
+ 			}
++			log.Warn("[INST-MD-ACCT]", "src", "cache", "key", hex.EncodeToString(plainKey),
++				"flags", uint8(update.Flags), "nonce", update.Nonce,
++				"balance", update.Balance.Hex(), "codeHash", hex.EncodeToString(update.CodeHash[:]))
+ 			return update, nil
+ 		}
+ 		if hph.metrics != nil {
+ 			hph.metrics.missAccount.Add(1)
+ 		}
+ 	}
+-	return hph.ctx.Account(plainKey)
++	res, err := hph.ctx.Account(plainKey)
++	if res != nil && err == nil {
++		log.Warn("[INST-MD-ACCT]", "src", "db", "key", hex.EncodeToString(plainKey),
++			"flags", uint8(res.Flags), "nonce", res.Nonce,
++			"balance", res.Balance.Hex(), "codeHash", hex.EncodeToString(res.CodeHash[:]))
++	}
++	return res, err
+ }
+ 
+ // storageFromCacheOrDB reads storage data from cache if available, otherwise from DB.
+@@ -3043,13 +3052,20 @@ func (hph *HexPatriciaHashed) storageFromCacheOrDB(plainKey []byte) (*Update, er
+ 			if hph.metrics != nil {
+ 				hph.metrics.cacheStorage.Add(1)
+ 			}
++			log.Warn("[INST-MD-STOR]", "src", "cache", "key", hex.EncodeToString(plainKey),
++				"flags", uint8(update.Flags), "storage", hex.EncodeToString(update.Storage[:update.StorageLen]))
+ 			return update, nil
+ 		}
+ 		if hph.metrics != nil {
+ 			hph.metrics.missStorage.Add(1)
+ 		}
+ 	}
+-	return hph.ctx.Storage(plainKey)
++	res, err := hph.ctx.Storage(plainKey)
++	if res != nil && err == nil {
++		log.Warn("[INST-MD-STOR]", "src", "db", "key", hex.EncodeToString(plainKey),
++			"flags", uint8(res.Flags), "storage", hex.EncodeToString(res.Storage[:res.StorageLen]))
++	}
++	return res, err
+ }
+ 
+ type stateRootFlag int8
+diff --git a/execution/stagedsync/committer.go b/execution/stagedsync/committer.go
+index 6c1031bd67..a62ffc49d6 100644
+--- a/execution/stagedsync/committer.go
++++ b/execution/stagedsync/committer.go
+@@ -3,6 +3,7 @@ package stagedsync
+ import (
+ 	"bytes"
+ 	"context"
++	"encoding/hex"
+ 	"fmt"
+ 	"sync"
+ 
+@@ -563,6 +564,10 @@ func (r *asOfStateReader) Read(d kv.Domain, plainKey []byte, stepSize uint64) (e
+ 			step = kv.Step(r.txNum / stepSize)
+ 		}
+ 	}
++	if d == kv.AccountsDomain || d == kv.StorageDomain {
++		log.Warn("[INST-MU]", "domain", d.String(), "key", hex.EncodeToString(plainKey),
++			"txNum", r.txNum, "encLen", len(enc), "enc", hex.EncodeToString(enc))
++	}
+ 	return enc, step, err
+ }
+ 
