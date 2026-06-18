@@ -9,7 +9,7 @@ package erigon
 import (
 	"context"
 
-	"github.com/nerolation/state-actor/generator"
+	"github.com/ethereum/state-actor/generator"
 )
 
 func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generator.Stats, error) {

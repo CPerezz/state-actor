@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/nerolation/state-actor/internal/streamsort"
+	"github.com/ethereum/state-actor/internal/streamsort"
 )
 
 // KeyCommitmentState is the on-disk key whose value carries the HPH

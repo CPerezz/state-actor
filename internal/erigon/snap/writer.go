@@ -9,11 +9,11 @@ import (
 
 	"github.com/spaolacci/murmur3"
 
-	"github.com/nerolation/state-actor/internal/erigon"
-	"github.com/nerolation/state-actor/internal/erigon/btindex"
-	"github.com/nerolation/state-actor/internal/erigon/existence"
-	"github.com/nerolation/state-actor/internal/erigon/recsplit"
-	"github.com/nerolation/state-actor/internal/erigon/seg"
+	"github.com/ethereum/state-actor/internal/erigon"
+	"github.com/ethereum/state-actor/internal/erigon/btindex"
+	"github.com/ethereum/state-actor/internal/erigon/existence"
+	"github.com/ethereum/state-actor/internal/erigon/recsplit"
+	"github.com/ethereum/state-actor/internal/erigon/seg"
 )
 
 // Writer composes seg + btindex + existence into Erigon's per-domain

@@ -28,7 +28,7 @@ import (
 	"syscall"
 	"time"
 
-	engineapi "github.com/nerolation/state-actor/internal/engineapi"
+	engineapi "github.com/ethereum/state-actor/internal/engineapi"
 )
 
 func main() {

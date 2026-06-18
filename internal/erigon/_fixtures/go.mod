@@ -15,7 +15,7 @@
 // Build subcommands with `-tags erigon_gen`. Untagged builds produce no
 // Go output (every cmd/*/main.go has the build tag at the top).
 
-module github.com/nerolation/state-actor/internal/erigon/_fixtures
+module github.com/ethereum/state-actor/internal/erigon/_fixtures
 
 go 1.25.7
 

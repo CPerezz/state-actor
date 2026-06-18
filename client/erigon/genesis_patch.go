@@ -10,7 +10,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/rlp"
-	internalerigon "github.com/nerolation/state-actor/internal/erigon"
+	internalerigon "github.com/ethereum/state-actor/internal/erigon"
 )
 
 // MDBX env geometry — mirrors Erigon's kv_mdbx.go defaults so the

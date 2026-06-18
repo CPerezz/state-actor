@@ -1,7 +1,7 @@
 package snap
 
 import (
-	"github.com/nerolation/state-actor/internal/streamsort"
+	"github.com/ethereum/state-actor/internal/streamsort"
 )
 
 // FromStreamsort adapts a *streamsort.Store into the push-style entry

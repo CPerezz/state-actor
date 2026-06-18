@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/nerolation/state-actor/internal/erigon/eliasfano"
+	"github.com/ethereum/state-actor/internal/erigon/eliasfano"
 )
 
 // DefaultBtreeM mirrors Erigon's `DefaultBtreeM` at btree_index.go:52.

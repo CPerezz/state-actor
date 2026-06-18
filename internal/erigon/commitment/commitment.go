@@ -17,7 +17,7 @@ import (
 	erigonkv "github.com/erigontech/erigon/db/kv"
 	erigoncommitment "github.com/erigontech/erigon/execution/commitment"
 
-	"github.com/nerolation/state-actor/internal/streamsort"
+	"github.com/ethereum/state-actor/internal/streamsort"
 )
 
 // erigonHash converts a geth-style 32-byte hash to Erigon's equivalent
