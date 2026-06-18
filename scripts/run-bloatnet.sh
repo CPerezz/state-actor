@@ -13,7 +13,10 @@ export PATH=$HOME/.foundry/bin:/usr/local/go/bin:$PATH
 
 WORK=${WORK:-$HOME/work/bloatnet}
 REPO=${STATE_ACTOR_REPO:-$HOME/state-actor}
-CLIENTS=${CLIENTS:-geth reth nethermind besu erigon}
+CLIENTS=${CLIENTS:-geth reth nethermind besu erigon ethrex}
+# ethrex image must include --skip-genesis-validation (lambdaclass/ethrex#6783).
+# Pin to a digest once a release ships it; :main is the post-merge interim tag.
+ETHREX_IMAGE=${ETHREX_IMAGE:-ghcr.io/lambdaclass/ethrex:main}
 SPEC_TARGET_GB=${SPEC_TARGET_GB:-25}
 SPEC=$WORK/spec-bloatnet-${SPEC_TARGET_GB}gb.yaml
 SEED=${SEED:-42}
@@ -304,6 +307,32 @@ NETH_CFG
                 --http.api=eth,net,web3,txpool,debug \
                 --nodiscover
             ;;
+        ethrex)
+            # ethrex has no self-mining dev mode usable here, so it is
+            # engine-driven like besu/nethermind — but it REQUIRES JWT on
+            # authrpc (it cannot disable it), so the engine-driver must sign
+            # (see start_engine_driver_if_needed). --skip-genesis-validation
+            # makes ethrex trust the state-actor-written stateRoot instead of
+            # recomputing from the empty-alloc sidecar (lambdaclass/ethrex#6783);
+            # $ETHREX_IMAGE must include that flag. --syncmode full is required:
+            # in the default snap mode ethrex returns SYNCING + null payloadId for
+            # every engine forkchoiceUpdated, so the driver can never build.
+            # $JWT_HEX is generated once at script start (openssl rand, see top
+            # of file); RUNBOOK.md documents the engine-API JWT requirement.
+            cp "$JWT_HEX" "$data/jwt.hex"
+            docker run -d --name $ct \
+                --network host \
+                -v $data:/data \
+                $ETHREX_IMAGE \
+                --network /data/ethrex-genesis.json \
+                --datadir /data \
+                --skip-genesis-validation \
+                --syncmode full \
+                --http.addr 127.0.0.1 --http.port 8545 \
+                --http.api eth,net,web3 \
+                --authrpc.addr 127.0.0.1 --authrpc.port 8551 \
+                --authrpc.jwtsecret /data/jwt.hex
+            ;;
         *)
             echo "unknown client: $client" >&2; return 1 ;;
     esac
@@ -318,15 +347,15 @@ NETH_CFG
 start_engine_driver_if_needed() {
     local client=$1 logdir=$2
     case $client in
-        besu|nethermind|erigon) ;;
+        besu|nethermind|erigon|ethrex) ;;
         *) return 0 ;;
     esac
     echo "=== starting engine-driver for $client ==="
-    # erigon has no --engine-jwt-disabled flag; it requires JWT.
-    # besu / nethermind boot with --engine-jwt-disabled and ignore
-    # the -jwt arg (empty = no auth header).
+    # erigon and ethrex both enforce JWT on authrpc (besu/nethermind run with
+    # it disabled and ignore the -jwt arg). The driver signs engine calls with
+    # the same secret the container reads at /data/jwt.hex.
     local jwt_arg=""
-    case $client in erigon) jwt_arg="-jwt $JWT_HEX" ;; esac
+    case $client in erigon|ethrex) jwt_arg="-jwt $JWT_HEX" ;; esac
     nohup $ENGINE_DRIVER \
         -engine http://127.0.0.1:8551 \
         -eth http://127.0.0.1:8545 \

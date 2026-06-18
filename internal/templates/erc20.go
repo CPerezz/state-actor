@@ -27,6 +27,14 @@ const (
 	erc20SlotSymbol      = 4 // string (short-string layout when ≤31 bytes)
 )
 
+// erc20MetadataSlots is the maximum number of non-holder storage slots the
+// template writes: _totalSupply (slot 2), _name (slot 3), _symbol (slot 4).
+// _name and _symbol are always written; _totalSupply only when supply > 0 (see
+// the !totalSupply.IsZero() guard in Expand). The approximate_size_bytes
+// fallback reserves this many slots from the budget. Keep in sync with the
+// metadata writes in Expand.
+const erc20MetadataSlots = 3
+
 // erc20FixedDecimals is the only accepted value for the `decimals`
 // parameter. OZ v5's `decimals()` is a pure function returning 18;
 // planting a different value in storage has no effect at the RPC. Users
@@ -38,8 +46,21 @@ const erc20FixedDecimals = 18
 // from explicit + random balances; users cannot override it.
 type erc20Template struct{}
 
-func (erc20Template) Name() string      { return "erc20" }
+// TemplateNameERC20 is the registry key for this template.
+const TemplateNameERC20 = "erc20"
+
+func (erc20Template) Name() string      { return TemplateNameERC20 }
 func (erc20Template) UserVisible() bool { return true }
+
+func (erc20Template) HonoredEntityFields() EntityFieldSet {
+	h := EntityFieldSupport{Honored: true}
+	return EntityFieldSet{
+		Balance:              h,
+		Nonce:                h,                    // floored to 1 in Expand
+		Code:                 EntityFieldSupport{}, // the template owns the runtime; spec.Validate already forbids template+code
+		ApproximateSizeBytes: h,                    // fallback sizing when neither total_owners nor total_allowances is set
+	}
+}
 
 func (erc20Template) ValidateParameters(params map[string]any) error {
 	required := []string{"symbol", "name", "decimals"}
@@ -163,6 +184,31 @@ func (erc20Template) Expand(ctx Context, e spec.Entity) ([]PreAllocEntity, error
 		}
 		totalAllowances = n
 	}
+
+	// Fallback sizing via approximate_size_bytes. Honors the universal
+	// storage-sizing knob (docs/SPEC.md) only when neither total_owners
+	// nor total_allowances is set; explicit sizing always wins. The slot
+	// budget translates to additional random owners (one slot per holder),
+	// minus the metadata slots the contract also occupies (up to
+	// erc20MetadataSlots — _name/_symbol always, _totalSupply when supply > 0)
+	// so the resulting on-disk footprint stays within the requested budget.
+	if e.ApproximateSizeBytes > 0 {
+		_, hasTotalOwners := e.Parameters["total_owners"]
+		_, hasTotalAllowances := e.Parameters["total_allowances"]
+		if !hasTotalOwners && !hasTotalAllowances {
+			slotsBudget := ctx.Sizer.SlotsForBytes(ctx.ClientName, e.ApproximateSizeBytes)
+			derived := slotsBudget - erc20MetadataSlots
+			// max(), not assignment: a budget-derived count must never shrink
+			// an explicit owners floor (totalOwners starts at len(owners)). A
+			// sub-metadata budget makes derived <= 0, which this guard
+			// harmlessly ignores (SlotsForBytes returns a signed int, so no
+			// unsigned underflow).
+			if derived > totalOwners {
+				totalOwners = derived
+			}
+		}
+	}
+
 	randomOwnerCount := totalOwners - len(owners)
 	randomAllowanceCount := totalAllowances - len(allowances)
 
