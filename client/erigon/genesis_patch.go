@@ -10,15 +10,16 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/rlp"
+	internalerigon "github.com/nerolation/state-actor/internal/erigon"
 )
 
 // MDBX env geometry — mirrors Erigon's kv_mdbx.go defaults so the
 // daemon's compatibility check passes when it later reopens chaindata.
 const (
-	headerPatchPageSize    = 4096
-	headerPatchMapSize     = 4 * 1024 * 1024 * 1024 * 1024
-	headerPatchGrowthStep  = 4 * 1024 * 1024 * 1024
-	headerPatchMaxDBs uint = 200
+	headerPatchPageSize        = 4096
+	headerPatchMapSize         = 4 * 1024 * 1024 * 1024 * 1024
+	headerPatchGrowthStep      = 4 * 1024 * 1024 * 1024
+	headerPatchMaxDBs     uint = 200
 )
 
 // Bucket names — verbatim from upstream Erigon's kv.* constants
@@ -35,6 +36,7 @@ const (
 	bucketLastBlock       = "LastBlock"
 	bucketLastHeader      = "LastHeader"
 	bucketConfig          = "Config"
+	bucketMaxTxNum        = "MaxTxNum"
 )
 
 // openChaindataEnv opens the chaindata MDBX env at <dbPath>/chaindata
@@ -87,17 +89,19 @@ func strictGet(txn *mdbx.Txn, dbi mdbx.DBI, key []byte, label string) ([]byte, e
 //
 // 8 tables are mutated, all atomically in a single MDBX env.Update():
 //
-//	1. CanonicalHeader  [BE(0)]            value: oldHash       -> newHash
-//	2. Header           [BE(0) || hash]    REKEY old->new + new RLP value
-//	3. HeaderNumber     [hash]             REKEY old->new (value BE(0) preserved)
-//	4. HeadersTotalDifficulty [BE(0) || hash] REKEY old->new (RLP TD preserved)
-//	5. BlockBody        [BE(0) || hash]    REKEY old->new (RLP body preserved)
-//	6. LastBlock        ["LastBlock"]      value: oldHash       -> newHash
-//	7. LastHeader       ["LastHeader"]     value: oldHash       -> newHash
-//	8. Config           [hash]             REKEY old->new (JSON chain.Config preserved)
+//  1. CanonicalHeader  [BE(0)]            value: oldHash       -> newHash
+//  2. Header           [BE(0) || hash]    REKEY old->new + new RLP value
+//  3. HeaderNumber     [hash]             REKEY old->new (value BE(0) preserved)
+//  4. HeadersTotalDifficulty [BE(0) || hash] REKEY old->new (RLP TD preserved)
+//  5. BlockBody        [BE(0) || hash]    REKEY old->new (RLP body preserved)
+//  6. LastBlock        ["LastBlock"]      value: oldHash       -> newHash
+//  7. LastHeader       ["LastHeader"]     value: oldHash       -> newHash
+//  8. Config           [hash]             REKEY old->new (JSON chain.Config preserved)
 //
-// MaxTxNum is NOT re-keyed because its key is BE(blockNum) alone with
-// no hash component — patching the Root doesn't invalidate it.
+// MaxTxNum's keys are BE(blockNum) alone (no hash component), so the
+// Root patch doesn't invalidate them. We DO, however, overwrite
+// MaxTxNum[0] from 1 to StepSize-1 ("fat genesis", step 9 below) — see
+// the rationale on the step-9 write.
 //
 // Required because `erigon init` writes block 0 with whatever Root its
 // empty genesis alloc produced. State-actor's snapshot writer then
@@ -262,6 +266,34 @@ func patchGenesisHeaderStateRoot(dbPath string, root common.Hash) error {
 		}
 		if err := txn.Put(configDBI, newHash[:], cfgVal, 0); err != nil {
 			return fmt.Errorf("Put(%s, newHash): %w", bucketConfig, err)
+		}
+
+		// 9. MaxTxNum[0] — "fat genesis". erigon init wrote MaxTxNum[0]=1
+		// (genesis occupies txNums [0,1]). We overwrite it to StepSize-1
+		// so genesis occupies the ENTIRE frozen step 0 ([0, StepSize)).
+		// Combined with the commitment anchor txNum=StepSize-1
+		// (snapshot_cgo.go), this makes the daemon resume the first live
+		// block (block 1) at txNum=StepSize — STEP 1, one step above the
+		// frozen [0,1) commitment file. Block 1's commitment then writes
+		// to the MDBX hot tier at step 1, which WINS the getLatestFromDb
+		// EndTxNum gate (domain.go:1582: an MDBX step-S write beats the
+		// frozen file iff lastTxNumOfStep(S) >= files.EndTxNum()=StepSize,
+		// i.e. S>=1) instead of being shadowed. This is the no-patch fix
+		// for the block-2 "wrong trie root" stall: keep the bloat in flat
+		// files, keep only the advancing commitment in MDBX. The genesis
+		// block body still has 0 real txs; only the txNum bookkeeping is
+		// inflated, which the daemon reads from MaxTxNum (MDBX) directly
+		// (block_reader.go:1523 tries MDBX before the snapshot body).
+		// Survives daemon boot: WriteGenesisBlock's already-written branch
+		// (genesis_write.go:173-242) does NOT re-append TxNums.
+		maxTxNumDBI, err := txn.OpenDBI(bucketMaxTxNum, 0, nil, nil)
+		if err != nil {
+			return fmt.Errorf("OpenDBI(%s): %w", bucketMaxTxNum, err)
+		}
+		fatGenesisMaxTxNum := make([]byte, 8)
+		binary.BigEndian.PutUint64(fatGenesisMaxTxNum, internalerigon.StepSize-1)
+		if err := txn.Put(maxTxNumDBI, blockNumKey, fatGenesisMaxTxNum, 0); err != nil {
+			return fmt.Errorf("Put(%s, BE(0)=StepSize-1): %w", bucketMaxTxNum, err)
 		}
 
 		return nil

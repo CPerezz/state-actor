@@ -23,27 +23,38 @@ import (
 )
 
 // fullRange is the SINGLE [0, 1) step-range we emit for every domain
-// (accounts/storage/code/commitment). Per the 7-agent investigation
-// (T10): a multi-tier LSM pyramid with frozenSteps > 0 trips upstream
-// Erigon's commitment-state mem-write invariant — runtime writes
-// KeyCommitmentState at txNum=blockTxNum (~1-3 for early blocks),
-// stored as step=0, which fails CheckDataAvailable when frozenSteps>0
-// (commitmentdb/reader.go:31). A single [0, 1) range across all 4
-// domains makes frozenSteps=0, so the mem-write step (also 0) passes
-// the check (0 < 0 is false). All other upstream guards also pass:
+// (accounts/storage/code/commitment). The [0, 1) range is REQUIRED by
+// Erigon's DependencyIntegrityChecker (state_schema.go:69-70 +
+// entity_integrity_check.go:133-155): the frozen accounts.0-1 /
+// storage.0-1 files are only made visible if a commitment file with
+// the EXACT same range exists, so all 4 domains MUST share [0, 1).
 //
-//	- exec3.go:557-561 alignment guard: maxStateStep=0 == cmtStep=0 → OK
-//	- DependencyIntegrityChecker (state_schema.go:69-70 + entity_integrity_check.go:133-155):
-//	  accounts.0-1 finds commitment.0-1 by exact-range match → OK
-//	- replaceShortenedKeysInBranch (domain_committed.go:54): shardSize<2
-//	  returns branches as-is, no plain-key lookup needed → OK
+// Continuability is solved by the "fat genesis" construction (see
+// genesis_patch.go step 9 + the commitment anchor below), NOT by the
+// file range. We write MaxTxNum[0]=StepSize-1 so genesis OCCUPIES the
+// entire frozen step 0, and anchor KeyCommitmentState at
+// txNum=StepSize-1. On boot, SeekCommitment resumes the first live
+// block (block 1) at txNum=StepSize — i.e. STEP 1, one step ABOVE the
+// frozen [0, 1) range. Block 1's commitment then writes to the MDBX hot
+// tier at step 1, which WINS the getLatestFromDb EndTxNum gate
+// (domain.go:1582: an MDBX step-S write beats the frozen file iff
+// lastTxNumOfStep(S) >= files.EndTxNum()=StepSize, i.e. S>=1) instead
+// of being shadowed. This is the no-patch fix for the block-2 "wrong
+// trie root" stall — keep the bloat in flat files, keep only the
+// advancing commitment in MDBX (proven on STOCK erigon 2026-06-18:
+// chain advanced past block 70, erigon==geth==reth root).
 //
-// Upstream tests confirm this layout works (domain_test.go:1419
-// TestScanStaticFilesD; integrity_checker_test.go:152). The cross-client
-// genesis-state-root invariance is preserved because the HPH root is
-// content-addressed over the alloc, independent of file partitioning
+// CheckDataAvailable (commitmentdb/reader.go:31) still passes:
+// frozenSteps([0,1))=0, and the live step (1) is not < 0. The
+// replaceShortenedKeysInBranch shard-size short-circuit
+// (domain_committed.go:54, shardSize<2) also still holds.
+//
+// Cross-client genesis-state-root invariance is preserved because the
+// HPH root is content-addressed over the alloc, independent of file
+// partitioning AND of the txNum bookkeeping
 // (internal/erigon/commitment/commitment.go::ComputeGenesisRoot has no
-// file-layout parameter).
+// file-layout parameter; the fat-genesis txNum changes are pure
+// bookkeeping that never touch state values).
 //
 // State-actor's bench launches the daemon with `--snap.state.stop`
 // which sets ProduceE3=false (aggregator.go:1999-2027 early-returns
@@ -133,10 +144,10 @@ type domainCounts struct {
 //     invariance.
 //  4. Run HPH commitment over the commitmentInputStore (disk-backed
 //     ctx.Account/Storage callbacks via streamsort.Get).
-//  5a. Marshal branches map into branchesStore (sequential — small).
-//  5b. Multi-range write loop — 4 ranges × 3 domains FAN OUT into
-//      goroutines (semaphore-bounded at NumCPU). Commitment phase
-//      stays serial (small + shared branchesStore).
+//     5a. Marshal branches map into branchesStore (sequential — small).
+//     5b. Multi-range write loop — 4 ranges × 3 domains FAN OUT into
+//     goroutines (semaphore-bounded at NumCPU). Commitment phase
+//     stays serial (small + shared branchesStore).
 //
 // Returns the HPH root; runImpl patches it into block-0 header.stateRoot.
 func writeSnapshots(
@@ -424,22 +435,26 @@ func writeSnapshots(
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("writeSnapshots: ComputeGenesisRoot: %w", err)
 	}
-	// KeyCommitmentState encodes (txNum=0, blockNum=0): the pre-block
-	// baseline that the daemon's BUILDER reads via SeekCommitment
-	// (builder/exec.go:113) and passes through unchanged to
-	// ComputeCommitment(blockHeight, txNum) at line 241. With txNum=0,
-	// the BUILDER's block-N first-commitment baseline equals the
-	// VALIDATOR's post-block compute starting point, so block 2's
-	// mode=direct (BUILDER) and mode=update (VALIDATOR via
-	// committer.go::computeWithBlockAccumulator) converge instead of
-	// diverging. Verified by host instrumentation 2026-06-03
-	// ([INST-B2] markers on stateless-bloatnet-benchmarks).
+	// KeyCommitmentState encodes (txNum=StepSize-1, blockNum=0): the
+	// "fat genesis" anchor. Genesis is made to OCCUPY the entire frozen
+	// step 0 by writing MaxTxNum[0]=StepSize-1 (see genesis_patch.go), so
+	// the commitment domain's last-committed txNum is StepSize-1 (still
+	// step 0, inside the frozen [0,1) file). On boot, SeekCommitment reads
+	// this anchor and restoreTxNum seeds the FIRST live block (block 1) at
+	// txNum=StepSize — i.e. STEP 1, one step ABOVE the frozen range.
 	//
-	// The prior (1, 0) encoding defended against a step=0
-	// CheckDataAvailable hazard (reader.go:31) that is obsolete since
-	// the single-tier [0,1) snapshot collapse (frozenSteps=0 makes
-	// `step < frozenSteps` unreachable).
-	keyStateValue, err := internalcommitment.EncodeKeyCommitmentStateValue(0, 0, result.HPHState)
+	// This is the load-bearing fix for the block-2 "wrong trie root"
+	// stall. The prior (0,0)/(1,0) anchors left block 1 at txNum 2-3
+	// (step 0), so its commitment writes to MDBX were SHADOWED by the
+	// frozen commitment.0-1.kv via the getLatestFromDb EndTxNum gate
+	// (domain.go:1582: an MDBX write at step S wins only when
+	// lastTxNumOfStep(S) >= files.EndTxNum()=StepSize, i.e. S>=1). With
+	// block 1 at step 1, lastTxNumOfStep(1)=2*StepSize-1 >= StepSize, so
+	// the live commitment WINS the gate → not shadowed → continuable.
+	// CheckDataAvailable still passes: frozenSteps([0,1))=0, and step 1
+	// is not < 0. This mirrors how a snap-synced node resumes with the
+	// chain tip past the frozen steps.
+	keyStateValue, err := internalcommitment.EncodeKeyCommitmentStateValue(internalerigon.StepSize-1, 0, result.HPHState)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("writeSnapshots: encode KeyCommitmentState: %w", err)
 	}
