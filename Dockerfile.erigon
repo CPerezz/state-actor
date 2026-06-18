@@ -66,17 +66,11 @@ RUN git clone https://github.com/erigontech/erigon.git /erigon-src \
     && cd /erigon-src \
     && git checkout 14273f79a6
 
-# Apply state-actor's debugging patches to upstream Erigon. Each
-# patch in patches/ is `git apply`'d against /erigon-src in lexical
-# order. Used for transient instrumentation (e.g. fmt.Printf in
-# SharedDomains.GetLatest to pinpoint step=0 origins). Remove the
-# patches dir + this RUN once the underlying bug is fixed upstream
-# or the diagnostic is no longer needed.
-COPY patches /tmp/erigon-patches
-RUN cd /erigon-src && \
-    for p in $(ls /tmp/erigon-patches/*.patch 2>/dev/null | sort); do \
-      echo "applying $p" && git apply --whitespace=nowarn "$p"; \
-    done
+# No patches applied — the daemon runs STOCK upstream Erigon. The
+# block-2 "wrong trie root" stall is fixed entirely state-actor-side
+# (the "fat genesis" MaxTxNum[0]=StepSize-1 + commitment anchor; see
+# client/erigon/genesis_patch.go + snapshot_cgo.go), so the earlier
+# debugging-instrumentation patches have been removed.
 
 COPY go.mod go.sum ./
 # Rewrite the local-dev replace path to the Docker location.
@@ -110,12 +104,11 @@ RUN go mod tidy -e
 # transitive would re-trigger "updates to go.mod needed".
 RUN mkdir -p /out && go build -mod=mod -tags "cgo_erigon cgo_erigon_commitment gofuzz" -ldflags "-s -w" -o /out/state-actor ./
 
-# Also build erigon binary from /erigon-src (with our patches applied
-# above). The daemon launched by scripts/run-bloatnet.sh will use THIS
-# binary, not the upstream image — so any patches/*.patch we apply
-# above are exercised at daemon runtime, not just during state-actor's
-# generation phase. Transient: revert once the underlying step=0 bug
-# is resolved and we no longer need the instrumented daemon.
+# Also build the erigon binary from /erigon-src (stock upstream, no
+# patches). The daemon launched by scripts/run-bloatnet.sh uses THIS
+# binary, not the upstream image — building it here keeps the daemon
+# pinned to the exact commit (14273f79a6) state-actor's commitment
+# vendor depends on.
 #
 # `unset GOFLAGS` is critical: the state-actor build above sets
 # GOFLAGS=-tags=cgo_erigon,cgo_erigon_commitment,gofuzz which is
@@ -129,8 +122,7 @@ RUN cd /erigon-src && \
 
 # ---------- Stage 2: extract erigon binary (pinned digest, fallback) ----------
 # Kept for documentation / fallback parity. The runtime stage below
-# uses the locally-built /out/erigon, not this one, while the
-# instrumentation patch is active.
+# uses the locally-built /out/erigon (stock, pinned commit), not this one.
 FROM erigontech/erigon@sha256:bac6b266367ec59f82576cd8cef047171601fce3f0bbbef36e3e4db24727ff6e AS erigon-bin
 
 # ---------- Stage 3: minimal runtime image ----------
@@ -144,11 +136,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # state-actor binary (cgo_erigon-tagged).
 COPY --from=builder /out/state-actor /usr/local/bin/state-actor
 
-# erigon binary built from /erigon-src (patched). The state-actor
-# generation phase and the bench daemon BOTH exec this binary, so the
-# instrumentation patches under patches/ are exercised at daemon
-# runtime. PATH inheritance from the debian-slim base includes
-# /usr/local/bin so name-only lookup finds it.
+# erigon binary built from /erigon-src (stock upstream, pinned commit
+# 14273f79a6). The state-actor generation phase and the bench daemon
+# BOTH exec this binary. PATH inheritance from the debian-slim base
+# includes /usr/local/bin so name-only lookup finds it.
 COPY --from=builder /out/erigon /usr/local/bin/erigon
 
 ENTRYPOINT ["/usr/local/bin/state-actor"]

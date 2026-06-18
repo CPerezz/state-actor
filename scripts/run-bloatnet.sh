@@ -280,12 +280,11 @@ NETH_CFG
             # as head. Discovered via bench attempt 14:
             #   "[rpc] download of segments not complete yet. please
             #   wait StageSnapshots to finish"
-            # Daemon uses state-actor-erigon image's locally-built erigon
-            # binary so that any patches/*.patch we applied to /erigon-src
-            # are exercised at daemon runtime (state-actor commit 09fed37
-            # / Dockerfile.erigon onwards). Override the image's default
-            # entrypoint to /usr/local/bin/erigon since state-actor-erigon
-            # is a multi-purpose image (state-actor binary + erigon binary).
+            # Daemon uses the state-actor-erigon image's locally-built
+            # erigon binary (stock upstream, pinned commit 14273f79a6 — no
+            # patches). Override the image's default entrypoint to
+            # /usr/local/bin/erigon since state-actor-erigon is a
+            # multi-purpose image (state-actor binary + erigon binary).
             docker run -d --name $ct \
                 --network host \
                 -v $data:/data \
