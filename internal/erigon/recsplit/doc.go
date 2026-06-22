@@ -13,8 +13,8 @@
 //
 // Mirrors `db/recsplit/recsplit.go` + `db/recsplit/golomb_rice.go` +
 // `db/recsplit/eliasfano16/elias_fano.go` from Erigon v3.4.2 (see
-// `internal/erigon/constants.go PinnedErigonCommit`). The file at
-// `/Users/random_anon/dev/clients/erigon/db/recsplit/recsplit.go` is the
+// `internal/erigon/constants.go PinnedErigonRelease`). The file at
+// `erigontech/erigon/db/recsplit/recsplit.go` is the
 // spec reference; citations like `recsplit.go:NNN` in this package's
 // comments point at that file. Functions are line-by-line ports with the
 // `unsafe.Pointer` slice-cast in `GolombRice.Write` (Erigon line 191) and

@@ -12,7 +12,7 @@ const (
 )
 
 // Tag returns the on-disk filename tag for d. Verified against
-// /Users/random_anon/dev/clients/erigon/db/state/domain.go:1719,1750
+// erigontech/erigon/db/state/domain.go:1719,1750
 // (Domain.FilenameBase switch) and aggregator_test.go:474,484
 // (test fixtures emit "commitment"). DomainCommitment's tag is
 // "commitment" (singular) — earlier "commitments" plural was wrong
@@ -106,7 +106,7 @@ type Settings struct {
 
 // DefaultAccessorMask returns the production accessor mix for d per
 // the v3.4.2 schema at
-// /Users/random_anon/dev/clients/erigon/db/state/statecfg/version_schema_gen.go.
+// erigontech/erigon/db/state/statecfg/version_schema_gen.go.
 func DefaultAccessorMask(d Domain) AccessorMask {
 	switch d {
 	case DomainAccounts, DomainStorage, DomainCode:

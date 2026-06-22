@@ -14,7 +14,7 @@ import (
 //	├── idx/        ← .efi (inverted-index history accessors; v2)
 //	└── accessor/   ← (Erigon's catch-all for cross-domain accessors)
 //
-// Per /Users/random_anon/dev/clients/erigon/db/state/aggregator.go (search
+// Per erigontech/erigon/db/state/aggregator.go (search
 // `Dirs` setup) and erigon's `datadir.New` directory layout.
 const (
 	subDirSnapshots = "snapshots"

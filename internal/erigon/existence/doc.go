@@ -7,9 +7,9 @@
 // # Spec source
 //
 // Mirrors `db/datastruct/existence/existence_filter.go` from Erigon
-// v3.4.2 (see `internal/erigon/constants.go PinnedErigonCommit`). The
+// v3.4.2 (see `internal/erigon/constants.go PinnedErigonRelease`). The
 // reference file lives at
-// `/Users/random_anon/dev/clients/erigon/db/datastruct/existence/existence_filter.go`;
+// `erigontech/erigon/db/datastruct/existence/existence_filter.go`;
 // the lines cited in this package's comments refer to that path.
 //
 // # Library pin

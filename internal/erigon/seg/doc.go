@@ -7,7 +7,7 @@
 // # Spec source
 //
 // Mirrors three Erigon files at v3.4.2 (see
-// `internal/erigon/constants.go PinnedErigonCommit`):
+// `internal/erigon/constants.go PinnedErigonRelease`):
 //
 //   - `db/seg/compress.go` (Compressor + dictionary + RawWordsFile)
 //   - `db/seg/parallel_compress.go` (Huffman build + bitstream encoding)
@@ -16,7 +16,7 @@
 //
 // Citations of the form `compress.go:NNN` in this package's comments
 // refer to those files under
-// `/Users/random_anon/dev/clients/erigon/db/seg/`.
+// `erigontech/erigon/db/seg/`.
 //
 // # Wire format (V1, no-pattern fast path)
 //

@@ -6,7 +6,7 @@ import (
 )
 
 // E3 file-naming template per
-// /Users/random_anon/dev/clients/erigon/db/state/snap_schema.go:441,467.
+// erigontech/erigon/db/state/snap_schema.go:441,467.
 // Steps are NOT zero-padded; version is a PREFIX.
 //
 //	"<version>-<tag>.<from>-<to><ext>"

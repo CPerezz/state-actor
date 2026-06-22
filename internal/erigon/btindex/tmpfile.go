@@ -8,7 +8,7 @@ import (
 
 // createTempFile creates a temp file next to the final destination and
 // returns its (path, *File). Mirrors `dir.CreateTemp(file)` at
-// /Users/random_anon/dev/clients/erigon/common/dir/rw_dir.go:230-233,
+// erigontech/erigon/common/dir/rw_dir.go:230-233,
 // which itself wraps `os.CreateTemp(dir, "<basename>.*.tmp")`.
 //
 // The random infix is irrelevant to the wire format — the file is

@@ -14,11 +14,11 @@ import (
 // fails immediately at PR time.
 //
 // Source of truth: upstream
-//   - /Users/random_anon/dev/clients/erigon/db/state/domain.go:1719,1750
+//   - erigontech/erigon/db/state/domain.go:1719,1750
 //     (case "commitment": ...)
-//   - /Users/random_anon/dev/clients/erigon/db/state/aggregator_test.go:474,484
+//   - erigontech/erigon/db/state/aggregator_test.go:474,484
 //     (Data(SnapHistory, "commitment", ...))
-//   - /Users/random_anon/dev/clients/erigon/db/state/merge.go:546
+//   - erigontech/erigon/db/state/merge.go:546
 //     (FilenameBase == "commitment")
 //
 // When PinnedErigonDigest changes, re-verify these strings against the
@@ -42,7 +42,7 @@ func TestDomainTagUpstreamParity(t *testing.T) {
 // TestFilenameBuilderUpstreamParity pins the filename pattern
 // (Build{Data,BTree,HashMap,Existence}Filename) to match upstream's
 // `<version>-<tag>.<from>-<to><ext>` template. Source of truth:
-// /Users/random_anon/dev/clients/erigon/db/state/snap_schema.go:441,467
+// erigontech/erigon/db/state/snap_schema.go:441,467
 // (Sprintf with the same format string).
 //
 // Catches drift in:
@@ -88,7 +88,7 @@ func TestFilenameBuilderUpstreamParity(t *testing.T) {
 
 // TestAccessorMaskUpstreamParity pins DefaultAccessorMask to the
 // upstream per-domain accessor selection. Source of truth:
-//   - /Users/random_anon/dev/clients/erigon/db/state/statecfg/state_schema.go:197
+//   - erigontech/erigon/db/state/statecfg/state_schema.go:197
 //     AccountsDomain.Accessors  = AccessorBTree | AccessorExistence
 //   - state_schema.go:218 StorageDomain — same
 //   - state_schema.go:239 CodeDomain — same

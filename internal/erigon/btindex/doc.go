@@ -10,10 +10,10 @@
 //
 // Mirrors `db/datastruct/btindex/btree_index.go` (writer) +
 // `db/datastruct/btindex/bps_tree.go` (Node encode/decode) from Erigon
-// v3.4.2 (see `internal/erigon/constants.go PinnedErigonCommit`). The
+// v3.4.2 (see `internal/erigon/constants.go PinnedErigonRelease`). The
 // reference files at
-//   - /Users/random_anon/dev/clients/erigon/db/datastruct/btindex/btree_index.go
-//   - /Users/random_anon/dev/clients/erigon/db/datastruct/btindex/bps_tree.go
+//   - erigontech/erigon/db/datastruct/btindex/btree_index.go
+//   - erigontech/erigon/db/datastruct/btindex/bps_tree.go
 //
 // are the spec; line citations `btree_index.go:NNN` / `bps_tree.go:NNN`
 // in this package's comments point at those files.

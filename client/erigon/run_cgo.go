@@ -198,8 +198,7 @@ type FoundationalAlloc struct {
 // the spec map. AutoFill processing (the 30 M+ EOA / 512 K contract
 // draw loop) is NOT done here — it streams directly into the
 // snapshot streamsorts from writeSnapshots (snapshot_cgo.go) to keep
-// memory bounded. See the streaming-writer plan at
-// /Users/random_anon/.claude/plans/so-what-we-have-enumerated-lantern.md.
+// memory bounded.
 //
 // Returns:
 //   - foundational — spec map (small; retained for genesisAddrs +

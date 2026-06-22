@@ -8,8 +8,8 @@
 // # Spec source
 //
 // Mirrors `db/recsplit/eliasfano32/elias_fano.go` from Erigon v3.4.2 (see
-// `internal/erigon/constants.go PinnedErigonCommit`). The file at
-// `/Users/random_anon/dev/clients/erigon/db/recsplit/eliasfano32/elias_fano.go`
+// `internal/erigon/constants.go PinnedErigonRelease`). The file at
+// `erigontech/erigon/db/recsplit/eliasfano32/elias_fano.go`
 // is the spec reference; the citation `elias_fano.go:NNN` in this package's
 // comments points at that file. Functions in this package are line-by-line
 // ports of the corresponding Erigon code, with the `unsafe.Pointer` slice

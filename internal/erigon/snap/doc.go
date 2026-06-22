@@ -3,7 +3,7 @@
 // per-domain snapshot file set ({domain}.{from}-{to}.{kv,bt,kvi,kvei}).
 //
 // File-naming follows the E3 template at
-// /Users/random_anon/dev/clients/erigon/db/state/snap_schema.go:441,467:
+// erigontech/erigon/db/state/snap_schema.go:441,467:
 //
 //	"<version>-<tag>.<from>-<to><ext>"
 //
@@ -26,6 +26,6 @@
 //
 // Architect B invariant: this package does NOT import
 // github.com/erigontech/erigon. All schema constants are mirrored from
-// the pinned Erigon source under /Users/random_anon/dev/clients/erigon/
+// the pinned Erigon source under erigontech/erigon/
 // (see internal/erigon/constants.go for the pinning policy).
 package snap

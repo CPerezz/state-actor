@@ -20,5 +20,4 @@
 //	  --client=erigon --db=/data --target-size=500MB --seed=42
 //
 // Pinned upstream image: see internal/erigon/constants.go.
-// Refactor plan: /Users/random_anon/.claude/plans/so-what-we-have-enumerated-lantern.md
 package erigon

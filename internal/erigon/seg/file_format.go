@@ -1,7 +1,7 @@
 package seg
 
 // File-format constants and helpers shared by Compressor and Decompressor.
-// Citations refer to `/Users/random_anon/dev/clients/erigon/db/seg/`.
+// Citations refer to `erigontech/erigon/db/seg/`.
 
 // FileCompression mirrors `db/seg/seg_interface.go:19-25`. Bits indicate
 // which words (keys, values, neither, or both) are subject to the
