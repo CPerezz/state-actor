@@ -69,7 +69,6 @@ require (
 	github.com/crate-crypto/go-eth-kzg v1.5.0 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0 // indirect
 	github.com/emicklei/dot v1.6.2 // indirect
-	github.com/erigontech/erigon v0.0.0-00010101000000-000000000000
 	github.com/ethereum/c-kzg-4844/v2 v2.1.6 // indirect
 	github.com/ferranbt/fastssz v0.1.4 // indirect
 	github.com/getsentry/sentry-go v0.27.0 // indirect
@@ -104,5 +103,3 @@ require (
 )
 
 replace github.com/holiman/bloomfilter/v2 => github.com/AskAlexSharov/bloomfilter/v2 v2.0.9
-
-replace github.com/erigontech/erigon => ./erigon-src

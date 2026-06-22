@@ -57,12 +57,12 @@ WORKDIR /app
 # adds forward-fix coverage on top while staying byte-identical to the
 # prior pin for every encoder state-actor's snap writer mirrors
 # (SerialiseV3, raw address keys, addr||slot storage, uint256.Bytes()
-# storage values, raw bytecode). state-actor's committed go.mod pins
-# erigon via `replace github.com/erigontech/erigon => ./erigon-src` (a
-# repo-relative convention, not a machine-specific path); this stage
-# clones the exact source tree to /erigon-src and re-points the replace
-# there (below), giving the commitment vendor its dependency without
-# poisoning the Go module proxy with pseudo-versions.
+# storage values, raw bytecode). The committed go.mod is Erigon-FREE so
+# every other client's build (none import erigontech/erigon) resolves
+# without it — only this stage needs it. We clone the exact source tree to
+# /erigon-src and inject the require + a local replace pointing there
+# (below), giving the commitment vendor its dependency without poisoning
+# the Go module proxy with pseudo-versions.
 RUN git clone https://github.com/erigontech/erigon.git /erigon-src \
     && cd /erigon-src \
     && git checkout 14273f79a6
@@ -74,17 +74,18 @@ RUN git clone https://github.com/erigontech/erigon.git /erigon-src \
 # debugging-instrumentation patches have been removed.
 
 COPY go.mod go.sum ./
-# Re-point the repo-relative replace at the cloned source for the build.
-RUN go mod edit -replace github.com/erigontech/erigon=/erigon-src
+# Inject the erigon require + a local replace at the cloned source (the
+# committed go.mod is Erigon-free; only this image needs the dependency).
+RUN go mod edit -require=github.com/erigontech/erigon@v0.0.0-00010101000000-000000000000 -replace=github.com/erigontech/erigon=/erigon-src
 RUN go mod download
 
 COPY . .
 
-# COPY . . overwrote the edited go.mod with the committed (./erigon-src)
-# version. Re-point it at the clone so the commitment package's import of
-# github.com/erigontech/erigon (load-bearing under cgo_erigon_commitment)
-# resolves to the v3.4.2 source.
-RUN go mod edit -replace github.com/erigontech/erigon=/erigon-src
+# COPY . . overwrote the edited go.mod with the committed (Erigon-free)
+# version. Re-inject the require + replace so the commitment package's
+# import of github.com/erigontech/erigon (load-bearing under
+# cgo_erigon_commitment) resolves to the cloned source.
+RUN go mod edit -require=github.com/erigontech/erigon@v0.0.0-00010101000000-000000000000 -replace=github.com/erigontech/erigon=/erigon-src
 
 # `go mod tidy -e` against /erigon-src so the build picks up v3.4.2's
 # transitive-dep graph. Local dev (./erigon-src) may point at a different

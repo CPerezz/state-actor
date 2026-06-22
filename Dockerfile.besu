@@ -39,7 +39,7 @@ ARG ROCKSDB_VERSION=10.10.1
 # Both the RocksDB shared library and the state-actor binary are built in
 # this stage to avoid header/lib path drift between separate stages. Stage
 # 2 (runtime) carries only the .so + state-actor binary, not the toolchain.
-FROM golang:1.24-bookworm AS builder
+FROM golang:1.25-bookworm AS builder
 
 ARG ROCKSDB_VERSION
 
