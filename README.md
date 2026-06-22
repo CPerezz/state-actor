@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <strong>Generate client-ready Ethereum databases for geth, reth, besu, nethermind, and ethrex &mdash; without going through each client's <code>init</code> path.</strong>
+  <strong>Generate client-ready Ethereum databases for geth, reth, besu, nethermind, ethrex, and erigon &mdash; without going through each client's <code>init</code> path.</strong>
 </p>
 
 <p align="center">
@@ -29,7 +29,7 @@
 
 ## Why
 
-You want a pre-populated Ethereum database that a client can boot against directly &mdash; for cross-client determinism tests, devnet bootstrapping, EIP-7702 / ERC-20 fixtures, or state-bloat experiments. The alternative (run the client's `init` against a genesis with millions of `alloc` entries) is slow and client-specific. State Actor writes each client's on-disk format directly: Pebble for geth, MDBX + RocksDB + nippy-jar for reth, single RocksDB + 8 Bonsai column families for besu, seven RocksDB instances for nethermind, single RocksDB + 20 column families for ethrex.
+You want a pre-populated Ethereum database that a client can boot against directly &mdash; for cross-client determinism tests, devnet bootstrapping, EIP-7702 / ERC-20 fixtures, or state-bloat experiments. The alternative (run the client's `init` against a genesis with millions of `alloc` entries) is slow and client-specific. State Actor writes each client's on-disk format directly: Pebble for geth, MDBX + RocksDB + nippy-jar for reth, single RocksDB + 8 Bonsai column families for besu, seven RocksDB instances for nethermind, single RocksDB + 20 column families for ethrex, Erigon v3 flat snapshot `.kv` files + a minimal MDBX for erigon.
 
 Three flags carry most of the weight: `--client` (which client's format to write), `--spec` (concrete entities to include, declared in YAML), `--target-size` (the DB-size budget; auto-fills mainnet-shaped 20 % / 10 % / 70 % across account-trie / bytecode / storage up to the cap). One of `--spec` or `--target-size` is required; everything else has a sane default.
 
@@ -58,11 +58,11 @@ git clone https://github.com/ethereum/state-actor.git
 cd state-actor
 go build -o state-actor .            # geth client only (pure Go)
 
-# cgo clients (besu / nethermind / reth / ethrex) ship as prebuilt images:
+# cgo clients (besu / nethermind / reth / ethrex / erigon) ship as prebuilt images:
 docker pull ghcr.io/ethereum/state-actor-reth:main
 ```
 
-`besu`, `nethermind`, `reth`, and `ethrex` need cgo bindings (RocksDB / MDBX). The published `ghcr.io/ethereum/state-actor-<client>:main` images carry those bindings; pull the one you need (`state-actor-besu`, `state-actor-nethermind`, `state-actor-reth`, `state-actor-ethrex`). To build locally instead, the per-client `Dockerfile.<client>` files ship in this repo.
+`besu`, `nethermind`, `reth`, `ethrex`, and `erigon` need cgo bindings (RocksDB / MDBX). The published `ghcr.io/ethereum/state-actor-<client>:main` images carry those bindings; pull the one you need (`state-actor-besu`, `state-actor-nethermind`, `state-actor-reth`, `state-actor-ethrex`, `state-actor-erigon`). To build locally instead, the per-client `Dockerfile.<client>` files ship in this repo.
 
 ### Building the Docker images locally (development)
 
@@ -74,6 +74,7 @@ docker build -f Dockerfile.besu       -t state-actor-besu:dev .        # cgo
 docker build -f Dockerfile.nethermind -t state-actor-nethermind:dev .  # cgo
 docker build -f Dockerfile.reth       -t state-actor-reth:dev .        # cgo
 docker build -f Dockerfile.ethrex     -t state-actor-ethrex:dev .      # cgo
+docker build -f Dockerfile.erigon     -t state-actor-erigon:dev .      # cgo
 docker build -f Dockerfile.geth       -t state-actor-geth:dev .        # pure Go
 ```
 
@@ -81,7 +82,7 @@ Then run your locally-built tag in place of the `ghcr.io/...:main` image in any 
 
 ## Usage
 
-Every client runs the same way: mount an output directory at `/data` and run its `ghcr.io/ethereum/state-actor-<client>:main` image. Substitute `geth` / `reth` / `besu` / `nethermind` / `ethrex` for the client and the matching image.
+Every client runs the same way: mount an output directory at `/data` and run its `ghcr.io/ethereum/state-actor-<client>:main` image. Substitute `geth` / `reth` / `besu` / `nethermind` / `ethrex` / `erigon` for the client and the matching image.
 
 ### Generate a database
 
@@ -148,6 +149,7 @@ The boot command differs per client. The full recipes &mdash; verbatim from each
 | besu | [docs/RUNBOOK.md#besu](docs/RUNBOOK.md#besu) |
 | nethermind | [docs/RUNBOOK.md#nethermind](docs/RUNBOOK.md#nethermind) |
 | ethrex | [docs/RUNBOOK.md#ethrex](docs/RUNBOOK.md#ethrex) |
+| erigon | [docs/RUNBOOK.md#erigon](docs/RUNBOOK.md#erigon) |
 
 ## Spec system at a glance
 
@@ -173,7 +175,7 @@ Full schema: [`docs/SPEC.md`](docs/SPEC.md). Curated examples: [`examples/README
 | Flag | Type | Default | Purpose |
 |---|---|---|---|
 | `--db` | string | (required) | Path to the database directory |
-| `--client` | string | `geth` | Target client: `geth`, `nethermind`, `besu`, `reth`, `ethrex` |
+| `--client` | string | `geth` | Target client: `geth`, `nethermind`, `besu`, `reth`, `ethrex`, `erigon` |
 | `--spec` | string | (none) | Path to a YAML state-spec file; see `docs/SPEC.md`. Required if `--target-size` is unset. |
 | `--target-size` | string | (none) | Upper bound on the whole DB (`5GB`, `500MB`, …). Required if `--spec` is unset. With `--spec`, auto-fill fills the headroom after the spec; without `--spec`, drives the whole DB. Auto-fill emits a fixed 20 % / 10 % / 70 % split across account-trie / bytecode / storage. |
 | `--seed` | int | 1 | Random seed; `--seed=0` randomises (footgun) |

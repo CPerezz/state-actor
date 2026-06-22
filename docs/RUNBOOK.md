@@ -1,6 +1,6 @@
 # Runbook: booting each client against a state-actor database
 
-state-actor writes a client-native database. The boot command for that database differs by client. This file lists the five CI-verified recipes — one per client — extracted from `client/<c>/e2e_test.go` (and `client/reth/oracle_test.go`).
+state-actor writes a client-native database. The boot command for that database differs by client. This file lists the six CI-verified recipes — one per client — extracted from `client/<c>/e2e_test.go` (and `client/reth/oracle_test.go`).
 
 Every section here is size-agnostic. `--target-size=10MB` and `--target-size=1TB` invoke the same code path, and the boot commands are the same in both cases.
 
@@ -309,11 +309,42 @@ docker run --rm \
 cast chain-id --rpc-url http://<container-ip>:8545   # → 0x539
 ```
 
+## Erigon
+
+Reference: `client/erigon/e2e_test.go` (`TestE2ESuite`).
+
+**Generate.** erigon uses cgo (mdbx-go + a vendored commitment lib) — build via Docker.
+
+```bash
+docker build -f Dockerfile.erigon -t state-actor-erigon .
+docker run --rm \
+  -v /tmp/sa-erigon:/data \
+  state-actor-erigon \
+  ./state-actor \
+  --client=erigon --db=/data \
+  --target-size=100MB \
+  --seed=42
+```
+
+**On-disk layout:**
+
+- `/data/snapshots/` — Erigon v3 flat snapshot `.kv` files (accounts / storage / code / commitment) plus their accessors (`.bt` / `.kvi` / `.kvei`); the state bloat lives here
+- `/data/chaindata/` — a minimal MDBX (genesis header with a patched `stateRoot` + chain config); it stays minimal, the bloat does not live here
+- state-actor runs stock upstream erigon as a CLI (`erigon init`, then the daemon) — no upstream patch
+
+**Boot path.** Commitment continuability across genesis → first-live-block uses the "fat genesis" construction (`MaxTxNum[0]=StepSize-1` + a commitment anchor, see `client/erigon/genesis_patch.go` + `snapshot_cgo.go`) so the chain advances past block 2. erigon mandates an authrpc JWT (it has no `--authrpc.jwt-disabled` flag). Required boot flags (validated by the e2e suite): `--externalcl` (drive blocks via the engine API — v3.4.2's `--chain dev` is broken), `--snap.stop` + `--snap.state.stop` (don't gate boot on the snapshot stages), and `--authrpc.jwtsecret <file>`. The pattern follows the besu/nethermind Engine API approach: boot the node, then drive blocks via `engine_forkchoiceUpdated` (the driver signs the authrpc JWT).
+
+**Verify.**
+
+```bash
+cast chain-id --rpc-url http://<container-ip>:8545   # → 0x539
+```
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `missing librocksdb` at build | cgo client built without the system RocksDB | Build via the per-client `Dockerfile.<client>` (see [Besu](#besu) / [Nethermind](#nethermind) / [Reth](#reth) / [Ethrex](#ethrex)) |
+| `missing librocksdb` at build | cgo client built without the system RocksDB | Build via the per-client `Dockerfile.<client>` (see [Besu](#besu) / [Nethermind](#nethermind) / [Reth](#reth) / [Ethrex](#ethrex) / [Erigon](#erigon)) |
 | Reth: `mmap: cannot allocate memory` | `vm.max_map_count` too low | `sudo sysctl -w vm.max_map_count=1048576` (see [Reth](#reth) operational hygiene) |
 | Besu / Neth: empty `eth_blockNumber` indefinitely | No consensus layer driving the Engine API | Run a mock CL (see `internal/engineapi/`) or use `internal/e2e_testing.StartEngineDriver` ([Besu engine-API note](#besu), [Nethermind engine-API note](#nethermind)) |
 | `eth_getCode` returns `0x` for a name-derived spec entity | Auto-fill collided with the derived address | Re-run without `--target-size` (no auto-fill) or with a smaller `--target-size` |
