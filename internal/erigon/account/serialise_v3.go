@@ -8,9 +8,9 @@ import (
 
 // SerialiseV3 encodes a for the Erigon E3 snapshot Accounts domain
 // (`v1.0-accounts.<from>-<to>.kv` value bytes). Mirrors upstream
-// `execution/types/accounts/account.go::SerialiseV3` — the encoder
-// distinct from EncodeForStorage (which targets MDBX `PlainState` /
-// `HashedAccount` and uses a fieldset bitmask).
+// `execution/types/accounts/account.go::SerialiseV3` — the E3 snapshot
+// encoder (distinct from Erigon's older MDBX PlainState codec, which
+// uses a fieldset bitmask instead of fixed length-prefixed fields).
 //
 // On-disk layout: ALWAYS four length-prefixed fields in fixed order
 // (nonce, balance, codeHash, incarnation). Each field is one length
@@ -27,9 +27,9 @@ import (
 // Minimum length = 4 bytes (all-zero account).
 // Maximum length = 4 + 8 + 32 + 32 + 8 = 84 bytes.
 //
-// The MSB-first variable-length loop for nonce/incarnation matches
-// EncodeForStorage's pattern at account.go:89-93,109-113 — kept inline
-// here to avoid a helper-fn allocation in the hot path.
+// The MSB-first variable-length loop for nonce/incarnation is kept
+// inline here (rather than via a helper) to avoid an allocation in the
+// hot path.
 func SerialiseV3(a Account) []byte {
 	// Pre-compute total length.
 	nonceLen := 0
@@ -176,8 +176,7 @@ func DeserialiseV3(buf []byte) (Account, error) {
 }
 
 // bytesToUint64BE parses up to 8 big-endian bytes (any length 0..8)
-// into a uint64. Distinct from bytesToUint64 in account.go which uses
-// a slightly different padding strategy.
+// into a uint64.
 func bytesToUint64BE(b []byte) uint64 {
 	if len(b) == 0 {
 		return 0

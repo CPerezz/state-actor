@@ -1,44 +1,28 @@
-// Package account is a pure-Go port of Erigon's Account.EncodeForStorage
-// codec — the binary format Erigon uses for value bytes in the Accounts
-// domain (`.kv` snapshot files + `TblAccountVals` in MDBX).
+// Package account is a pure-Go port of Erigon's account value codec for
+// the E3 Accounts domain — the binary format Erigon uses for value bytes
+// in the `v1.0-accounts.<from>-<to>.kv` snapshot files.
 //
 // # Spec source
 //
-// Mirrors `execution/types/accounts/account.go` from Erigon v3.4.2 (see
-// `internal/erigon/constants.go PinnedErigonCommit`). The lines cited in
-// this package's comments refer to
-// `/Users/random_anon/dev/clients/erigon/execution/types/accounts/account.go`.
+// Mirrors `execution/types/accounts/account.go::SerialiseV3` from Erigon
+// v3.4.2 (the exact upstream commit is pinned in Dockerfile.erigon).
 //
-// # Wire format
+// # Wire format (SerialiseV3)
 //
-// EncodeForStorage produces a variable-length binary record:
+// Always four length-prefixed fields, in fixed order:
 //
-//	byte 0:        fieldSet bitmask
-//	               bit 0: nonce present
-//	               bit 1: balance present
-//	               bit 2: incarnation present
-//	               bit 3: codeHash present (== EmptyCodeHash means absent)
-//	per present field:
-//	  byte:        N (length in bytes of the field value)
-//	  bytes 1..N:  field value, big-endian
+//	nonce       1 length byte + N big-endian bytes (0 if Nonce==0)
+//	balance     1 length byte + N big-endian bytes (0 if Balance==0)
+//	codeHash    1 length byte + 32 bytes           (0 if EmptyCodeHash)
+//	incarnation 1 length byte + N big-endian bytes (0 if Incarnation==0)
 //
-// Encoding is variable-length to keep account records small on disk:
-// a fresh EOA with nonce=0, balance=0, no code is just `[0x00]` (1 byte).
-// A 1-wei EOA is `[0x02, 0x01, 0x01]` (3 bytes — fieldSet=2 for balance,
-// 1-byte length, 0x01 value).
+// A length byte of 0 means the field is absent and no data bytes follow.
+// Minimum length is 4 bytes (all-zero account); maximum is 84.
 //
 // # Differences from go-ethereum's StateAccount
 //
-// NOT an RLP encoding. NOT the same bytes geth/reth use for MPT
-// leaves. The MPT-leaf form (used by state-actor's HashBuilder when
-// computing the cross-client state root) is the standard
-// `rlp.EncodeToBytes(StateAccount{Nonce, Balance, Root, CodeHash})`. Erigon
-// stores domain values in this fieldset format and recomputes the MPT
-// root separately via its HexPatriciaHashed commitment tree.
-//
-// The orchestrator (`client/erigon/run_cgo.go`, Phase C of the plan) will
-// emit TWO sorted streams of accounts: one with EncodeForStorage values
-// for the snapshot writer, one with RLP for the MPT root computation.
-// See § Critical Verifier Corrections > Correction 4 in
-// `/Users/random_anon/.claude/plans/so-i-have-a-declarative-owl.md`.
+// NOT an RLP encoding, and NOT the bytes geth/reth use for MPT leaves.
+// Erigon stores domain values in this format and recomputes the MPT
+// (state) root separately via its HexPatriciaHashed commitment tree
+// (see internal/erigon/commitment).
 package account
