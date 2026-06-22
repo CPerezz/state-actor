@@ -6,7 +6,7 @@
 //	store, _ := New(dir)
 //	defer store.Close()              // safe in any state
 //	for ... { store.Put(k, v) }      // WRITING — single-goroutine writer
-//	store.Finalize()                 // transition; flushes the pending batch
+//	store.Finalize()                 // flushes the batch (optional: a read auto-finalizes)
 //	store.Get(k) / store.Iterate(...) // FINALIZED — concurrent-safe readers
 //
 // Concurrency contract:
@@ -14,7 +14,9 @@
 //     concurrent Puts are serialized under putMu but the package contract
 //     expects callers to keep Put on a single goroutine.
 //   - Put after Finalize returns an error (does not panic).
-//   - Get and Iterate before Finalize return an error.
+//   - Get and Iterate auto-finalize on first read when Finalize was not
+//     called explicitly: a single-phase caller (fill, then read) can skip
+//     it. Concurrent producers MUST Finalize before any reader starts.
 //   - After Finalize, Get and Iterate are safe from any number of
 //     concurrent goroutines. The pre-read batch flush happens exactly
 //     once inside Finalize; subsequent reads go straight to
@@ -242,15 +244,18 @@ func (s *Store) Finalize() error {
 //
 // Errors:
 //   - "streamsort: Get after Close" if the store is closed.
-//   - "streamsort: Get before Finalize" if Finalize has not been called.
 //
-// After Finalize, safe for any number of concurrent callers.
+// Auto-finalizes on first read if Finalize was not called explicitly.
+// After finalization, safe for any number of concurrent callers.
 func (s *Store) Get(key []byte) ([]byte, error) {
 	if s.closed.Load() {
 		return nil, fmt.Errorf("streamsort: Get after Close")
 	}
+	// Auto-finalize on first read (see Iterate for the concurrency note).
 	if !s.finalized.Load() {
-		return nil, fmt.Errorf("streamsort: Get before Finalize")
+		if err := s.Finalize(); err != nil {
+			return nil, err
+		}
 	}
 	s.readers.Add(1)
 	defer s.readers.Done()
@@ -278,16 +283,24 @@ func (s *Store) Get(key []byte) ([]byte, error) {
 //
 // Errors:
 //   - "streamsort: Iterate after Close" if the store is closed.
-//   - "streamsort: Iterate before Finalize" if Finalize has not been called.
 //   - any non-nil error returned by yield short-circuits and is returned.
 //
-// After Finalize, safe for any number of concurrent callers.
+// Auto-finalizes on first read if Finalize was not called explicitly.
+// After finalization, safe for any number of concurrent callers.
 func (s *Store) Iterate(yield func(key, value []byte) error) error {
 	if s.closed.Load() {
 		return fmt.Errorf("streamsort: Iterate after Close")
 	}
+	// Auto-finalize on first read. A single-phase caller (fill the store,
+	// then read it back) need not call Finalize explicitly. Concurrent
+	// producers MUST still Finalize explicitly before any reader starts —
+	// otherwise a read could seal the store mid-production. erigon's
+	// parallel-HPH path does exactly that. Finalize is idempotent and
+	// goroutine-safe, so this is a no-op when already finalized.
 	if !s.finalized.Load() {
-		return fmt.Errorf("streamsort: Iterate before Finalize")
+		if err := s.Finalize(); err != nil {
+			return err
+		}
 	}
 	s.readers.Add(1)
 	defer s.readers.Done()

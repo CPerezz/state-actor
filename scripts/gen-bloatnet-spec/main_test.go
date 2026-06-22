@@ -35,9 +35,16 @@ func TestGeneratedSpecParsesAndValidates(t *testing.T) {
 		t.Fatalf("Validate: %v", err)
 	}
 
-	// Expected counts: 1 spamoor + 5 bloated + 7 erc20 showcase + 2 raw
-	// + 12 demo + 15000 bulk EOAs + 200000 bulk contracts = 215027.
-	const want = 1 + 5 + 7 + 2 + 12 + 15_000 + 200_000
+	// Expected counts. The bloated set and bulk counts are target-gb
+	// dependent; the test uses the generator's default target (100 GB).
+	// At target=100, bloatedSpecForTarget emits 4 of the 5 bloated
+	// entities (bloat-30gb-named exceeds the ~30%-of-target budget), and
+	// scaledBulkCounts returns the full 15000 EOAs + 200000 contracts.
+	// The showcase counts (1 spamoor + 7 erc20 + 2 raw + 12 demo = 22)
+	// are fixed. Compute from the generator's own functions so size/
+	// target tuning can't silently desync this golden (= 215026 today).
+	eoas, contracts := scaledBulkCounts(100)
+	want := 1 + len(bloatedSpecForTarget(100)) + 7 + 2 + 12 + eoas + contracts
 	if got := len(doc.Entities); got != want {
 		t.Errorf("entity count = %d, want %d", got, want)
 	}

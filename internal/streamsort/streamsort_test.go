@@ -311,9 +311,9 @@ func TestPutAfterFinalizeErrors(t *testing.T) {
 	}
 }
 
-// TestGetBeforeFinalizeErrors: Get before Finalize must error so
-// callers can't accidentally read a half-flushed batch.
-func TestGetBeforeFinalizeErrors(t *testing.T) {
+// TestGetBeforeFinalizeAutoFinalizes: Get without an explicit Finalize
+// auto-finalizes and returns the value (single-phase caller convenience).
+func TestGetBeforeFinalizeAutoFinalizes(t *testing.T) {
 	s, err := New(t.TempDir())
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -323,17 +323,18 @@ func TestGetBeforeFinalizeErrors(t *testing.T) {
 	if err := s.Put([]byte("k"), []byte("v")); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	_, err = s.Get([]byte("k"))
-	if err == nil {
-		t.Fatal("Get before Finalize: expected error, got nil")
+	got, err := s.Get([]byte("k"))
+	if err != nil {
+		t.Fatalf("Get before Finalize: unexpected error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "Finalize") {
-		t.Errorf("Get error should mention Finalize; got %v", err)
+	if string(got) != "v" {
+		t.Errorf("Get = %q, want %q", got, "v")
 	}
 }
 
-// TestIterateBeforeFinalizeErrors: same gate for Iterate.
-func TestIterateBeforeFinalizeErrors(t *testing.T) {
+// TestIterateBeforeFinalizeAutoFinalizes: Iterate without an explicit
+// Finalize auto-finalizes and yields the entries.
+func TestIterateBeforeFinalizeAutoFinalizes(t *testing.T) {
 	s, err := New(t.TempDir())
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -343,12 +344,19 @@ func TestIterateBeforeFinalizeErrors(t *testing.T) {
 	if err := s.Put([]byte("k"), []byte("v")); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	err = s.Iterate(func(_, _ []byte) error { return nil })
-	if err == nil {
-		t.Fatal("Iterate before Finalize: expected error, got nil")
+	n := 0
+	err = s.Iterate(func(k, v []byte) error {
+		n++
+		if string(k) != "k" || string(v) != "v" {
+			t.Errorf("entry = (%q,%q), want (k,v)", k, v)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Iterate before Finalize: unexpected error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "Finalize") {
-		t.Errorf("Iterate error should mention Finalize; got %v", err)
+	if n != 1 {
+		t.Errorf("Iterate yielded %d entries, want 1", n)
 	}
 }
 

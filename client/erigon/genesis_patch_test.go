@@ -13,18 +13,23 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/rlp"
+
+	internalerigon "github.com/ethereum/state-actor/internal/erigon"
 )
 
 // TestPatchGenesisHeaderStateRoot_ReKeysAllTables is the regression
 // gate for the bug fix: after mutating Header.Root, every one of the
 // 8 hash-dependent MDBX tables must reference the NEW block hash.
 // Without this all-tables-rekey, the chaindata is internally
-// inconsistent and Erigon's daemon hangs in SYNCING.
+// inconsistent and Erigon's daemon hangs in SYNCING. It also asserts
+// step 9 — the "fat genesis" MaxTxNum[0]=StepSize-1 overwrite that lets
+// the chain advance past block 2 (see genesis_patch.go).
 //
-// Setup: build a synthetic block-0 header, populate the 8 buckets
-// with oldHash references. Action: call patchGenesisHeaderStateRoot.
-// Verify: in a fresh read txn, every table references the newHash
-// (and old-hash entries are gone where they should be gone).
+// Setup: build a synthetic block-0 header, populate the 8 buckets with
+// oldHash references plus MaxTxNum[0]=1 (as erigon init does). Action:
+// call patchGenesisHeaderStateRoot. Verify: in a fresh read txn, every
+// table references the newHash (old-hash entries gone) and MaxTxNum[0]
+// == StepSize-1.
 func TestPatchGenesisHeaderStateRoot_ReKeysAllTables(t *testing.T) {
 	dbPath := t.TempDir()
 
@@ -51,8 +56,13 @@ func TestPatchGenesisHeaderStateRoot_ReKeysAllTables(t *testing.T) {
 	fakeTD := mustRLP(t, new(big.Int).SetUint64(0))
 	fakeBody := []byte("fake-body-rlp")
 	fakeConfig := []byte(`{"chainId":1337}`)
+	// erigon init writes MaxTxNum[BE(0)]=1; step 9 of the patch overwrites
+	// it to StepSize-1 ("fat genesis"). Seed the init value so the table
+	// exists for the rekey txn to open and overwrite.
+	initMaxTxNum := make([]byte, 8)
+	binary.BigEndian.PutUint64(initMaxTxNum, 1)
 
-	// Setup: populate ALL 8 buckets with oldHash references.
+	// Setup: populate ALL 8 hash buckets + MaxTxNum with oldHash refs.
 	mustSetup(t, dbPath, func(txn *mdbx.Txn) error {
 		return setupFixtures(txn, []bucketRow{
 			{bucketHeaderCanonical, blockNumKey, oldHash[:]},
@@ -63,6 +73,7 @@ func TestPatchGenesisHeaderStateRoot_ReKeysAllTables(t *testing.T) {
 			{bucketLastBlock, []byte(bucketLastBlock), oldHash[:]},
 			{bucketLastHeader, []byte(bucketLastHeader), oldHash[:]},
 			{bucketConfig, oldHash[:], fakeConfig},
+			{bucketMaxTxNum, blockNumKey, initMaxTxNum},
 		})
 	})
 
@@ -114,6 +125,11 @@ func TestPatchGenesisHeaderStateRoot_ReKeysAllTables(t *testing.T) {
 		// 8. Config: rekeyed, value preserved.
 		assertAbsent(t, txn, bucketConfig, oldHash[:])
 		assertEqual(t, txn, bucketConfig, newHash[:], fakeConfig)
+
+		// 9. MaxTxNum[BE(0)] overwritten to StepSize-1 ("fat genesis").
+		expectedMaxTxNum := make([]byte, 8)
+		binary.BigEndian.PutUint64(expectedMaxTxNum, internalerigon.StepSize-1)
+		assertEqual(t, txn, bucketMaxTxNum, blockNumKey, expectedMaxTxNum)
 	})
 }
 
