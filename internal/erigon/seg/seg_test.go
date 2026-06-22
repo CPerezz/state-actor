@@ -319,7 +319,7 @@ func TestCloseAfterCompress(t *testing.T) {
 }
 
 // fixture mirrors the schema produced by
-// internal/erigon/_fixtures/cmd/seg/main.go.
+// upstream Erigon's reference seg encoder.
 type fixture struct {
 	Label         string     `json:"label"`
 	Words         [][]string `json:"words"` // list of (key_hex, value_hex) pairs
@@ -328,23 +328,20 @@ type fixture struct {
 
 // TestGoldenAgainstErigon is the load-bearing byte-equality test:
 // for every fixture captured by running Erigon's seg.Compressor (see
-// internal/erigon/_fixtures/cmd/seg/main.go), our pure-Go Compressor
+// upstream Erigon's reference seg encoder), our pure-Go Compressor
 // must produce byte-identical output. If the golden file is missing
 // (oracle host not provisioned yet), the test is skipped with a
 // regeneration hint instead of failing — matching the eliasfano /
 // account pattern.
 //
-// Regenerate via:
-//
-//	cd internal/erigon/_fixtures
-//	go run -tags erigon_gen ./cmd/seg \
-//	    --out=../../seg/testdata/erigon_golden.json
+// The golden fixtures are committed under testdata/; they were captured
+// from upstream Erigon v3.4.2's reference seg compressor.
 func TestGoldenAgainstErigon(t *testing.T) {
 	path := filepath.Join("testdata", "erigon_golden.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			t.Skip("seg/testdata/erigon_golden.json missing; regenerate via _fixtures/cmd/seg")
+			t.Skip("seg/testdata/erigon_golden.json missing; golden is committed under testdata/")
 		}
 		t.Fatalf("read %s: %v", path, err)
 	}

@@ -13,7 +13,7 @@ import (
 )
 
 // fixture mirrors the JSON schema produced by
-// internal/erigon/_fixtures/cmd/existence/main.go. The BloomKeys field
+// upstream Erigon's reference existence encoder. The BloomKeys field
 // captures the three random uint64 keys Erigon's bloom filter chose at
 // fixture-generation time; the test reconstructs an identical filter
 // via newFilterBuilderWithKeys so byte-equality can be asserted.
@@ -30,26 +30,20 @@ type fixture struct {
 
 // TestGoldenAgainstErigon is the load-bearing byte-equality test: for
 // every fixture captured by running Erigon's reference
-// existence.Filter (see internal/erigon/_fixtures/cmd/existence/main.go),
+// existence.Filter (see upstream Erigon's reference existence encoder),
 // our pure-Go FilterBuilder must produce byte-identical output.
 //
 // This is the cross-verify check Architect B's "own the format" design
 // hinges on — if any byte diverges, our writer will produce
 // Erigon-unreadable .kvei files at runtime.
 //
-// Regenerate fixtures by running:
-//
-//	cd internal/erigon/_fixtures
-//	go run -tags erigon_gen ./cmd/existence \
-//	    --out=../../existence/testdata/erigon_golden.json
-//
-// Bumping internal/erigon/constants.go PinnedErigonCommit triggers a
-// regen via `make regen-erigon-fixtures`.
+// The golden fixtures are committed under testdata/; they were captured
+// from upstream Erigon v3.4.2's reference existence.Filter.
 func TestGoldenAgainstErigon(t *testing.T) {
 	path := filepath.Join("testdata", "erigon_golden.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read %s: %v (regenerate via _fixtures/cmd/existence)", path, err)
+		t.Fatalf("read %s: %v (golden is committed under testdata/)", path, err)
 	}
 	var fixtures []fixture
 	if err := json.Unmarshal(data, &fixtures); err != nil {

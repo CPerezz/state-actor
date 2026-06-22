@@ -11,7 +11,7 @@ import (
 )
 
 // fixtureEntry mirrors the JSON schema written by
-// internal/erigon/_fixtures/cmd/recsplit/main.go.
+// upstream Erigon's reference recsplit encoder.
 type fixtureEntry struct {
 	KeyHex string `json:"key_hex"`
 	Offset uint64 `json:"offset"`
@@ -33,13 +33,8 @@ type fixture struct {
 // spike: produce a .kvi from a fixture and assert byte-identical output
 // against Erigon's reference writer.
 //
-// Regenerate fixtures by running:
-//
-//	cd internal/erigon/_fixtures
-//	go run -tags erigon_gen ./cmd/recsplit \
-//	    --out=../../recsplit/testdata/spike_100.json --count=100
-//	go run -tags erigon_gen ./cmd/recsplit \
-//	    --out=../../recsplit/testdata/spike_1000.json --count=1000
+// The golden fixtures are committed under testdata/; they were captured
+// from upstream Erigon v3.4.2's reference RecSplit writer.
 //
 // This test is the GATE for the spike: if it fails, the recommended
 // fallback is plan Task 33 (vendor github.com/erigontech/erigon/db/recsplit).
@@ -66,7 +61,7 @@ func runSpikeFixture(t *testing.T, path string) {
 	t.Helper()
 	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read %s: %v (regenerate via _fixtures/cmd/recsplit)", path, err)
+		t.Fatalf("read %s: %v (golden is committed under testdata/)", path, err)
 	}
 	var f fixture
 	if err := json.Unmarshal(data, &f); err != nil {

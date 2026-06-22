@@ -10,7 +10,7 @@ import (
 )
 
 // fixture mirrors the JSON schema produced by
-// internal/erigon/_fixtures/cmd/eliasfano/main.go.
+// upstream Erigon's reference eliasfano encoder.
 type fixture struct {
 	Label       string   `json:"label"`
 	Inputs      []uint64 `json:"inputs"`
@@ -19,27 +19,20 @@ type fixture struct {
 
 // TestGoldenAgainstErigon is the load-bearing byte-equality test:
 // for every fixture captured by running Erigon's eliasfano32 writer
-// (see internal/erigon/_fixtures/cmd/eliasfano/main.go), our pure-Go
+// (see upstream Erigon's reference eliasfano encoder), our pure-Go
 // Builder must produce byte-identical output.
 //
 // This is the cross-verify check Architect B's "own the format" design
 // hinges on — if any byte diverges, our writer will produce
 // Erigon-unreadable .ef / embedded-EF-in-.kvi files at runtime.
 //
-// Regenerate fixtures by running:
-//
-//	cd internal/erigon/_fixtures
-//	go run -tags erigon_gen ./cmd/eliasfano \
-//	    --out=../../eliasfano/testdata/erigon_golden.json
-//
-// Bumping internal/erigon/constants.go PinnedErigonCommit triggers a
-// regen via `make regen-erigon-fixtures` (or its eventual moral
-// equivalent — Makefile target wiring is Day 14 in the plan).
+// The golden fixtures are committed under testdata/; they were captured
+// from upstream Erigon v3.4.2's reference Elias-Fano encoder.
 func TestGoldenAgainstErigon(t *testing.T) {
 	path := filepath.Join("testdata", "erigon_golden.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read %s: %v (regenerate via _fixtures/cmd/eliasfano)", path, err)
+		t.Fatalf("read %s: %v (golden is committed under testdata/)", path, err)
 	}
 	var fixtures []fixture
 	if err := json.Unmarshal(data, &fixtures); err != nil {

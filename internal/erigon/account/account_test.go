@@ -13,7 +13,7 @@ import (
 )
 
 // fixture mirrors the JSON schema from
-// internal/erigon/_fixtures/cmd/account/main.go.
+// upstream Erigon's reference account encoder.
 type fixture struct {
 	Label       string `json:"label"`
 	Nonce       uint64 `json:"nonce"`
@@ -25,23 +25,20 @@ type fixture struct {
 
 // TestEncodeForStorageAgainstErigon is the byte-equality test: for every
 // fixture captured by running Erigon's reference Account.EncodeForStorage
-// (see internal/erigon/_fixtures/cmd/account/main.go), our pure-Go
+// (see upstream Erigon's reference account encoder), our pure-Go
 // EncodeForStorage must produce byte-identical output.
 //
 // This is the cross-verify check Architect B's "own the format" design
 // hinges on for the accounts domain — if any byte diverges, our writer
 // will produce Erigon-unreadable Tbl*Vals records / .kv snapshot entries.
 //
-// Regenerate fixtures by running:
-//
-//	cd internal/erigon/_fixtures
-//	go run -tags erigon_gen ./cmd/account \
-//	    --out=../../account/testdata/erigon_golden.json
+// The golden fixtures are committed under testdata/; they were captured
+// from upstream Erigon v3.4.2's reference Account.EncodeForStorage.
 func TestEncodeForStorageAgainstErigon(t *testing.T) {
 	path := filepath.Join("testdata", "erigon_golden.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read %s: %v (regenerate via _fixtures/cmd/account)", path, err)
+		t.Fatalf("read %s: %v (golden is committed under testdata/)", path, err)
 	}
 	var fixtures []fixture
 	if err := json.Unmarshal(data, &fixtures); err != nil {

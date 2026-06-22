@@ -113,10 +113,9 @@
 //
 // # Pure-Go constraint
 //
-// No cgo (the main state-actor module forbids importing
-// `github.com/erigontech/erigon`). The fixture-generation submodule at
-// `internal/erigon/_fixtures/cmd/seg` does import Erigon, but is built
-// under the `erigon_gen` build tag so untagged `go build ./...` skips it.
+// No cgo: the seg package is a pure-Go port and does not import
+// `github.com/erigontech/erigon`. Its golden fixtures under testdata/
+// were captured from upstream Erigon v3.4.2 out-of-band.
 //
 // # Concurrency
 //

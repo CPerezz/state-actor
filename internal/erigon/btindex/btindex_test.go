@@ -12,7 +12,7 @@ import (
 )
 
 // fixture mirrors the JSON schema produced by
-// internal/erigon/_fixtures/cmd/btindex/main.go.
+// upstream Erigon's reference btindex encoder.
 type fixture struct {
 	Label       string   `json:"label"`
 	M           uint16   `json:"m"`
@@ -27,19 +27,16 @@ type kvPair struct {
 
 // TestGoldenAgainstErigon is the load-bearing byte-equality test:
 // for every fixture captured by running Erigon's BtIndexWriter (see
-// internal/erigon/_fixtures/cmd/btindex/main.go), our pure-Go Writer
+// upstream Erigon's reference btindex encoder), our pure-Go Writer
 // must produce a byte-identical `.bt` file.
 //
-// Regenerate fixtures via:
-//
-//	cd internal/erigon/_fixtures
-//	go run -tags erigon_gen ./cmd/btindex \
-//	    --out=../../btindex/testdata/erigon_golden.json
+// The golden fixtures are committed under testdata/; they were captured
+// from upstream Erigon v3.4.2's reference .bt writer.
 func TestGoldenAgainstErigon(t *testing.T) {
 	path := filepath.Join("testdata", "erigon_golden.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read %s: %v (regenerate via _fixtures/cmd/btindex)", path, err)
+		t.Fatalf("read %s: %v (golden is committed under testdata/)", path, err)
 	}
 	var fixtures []fixture
 	if err := json.Unmarshal(data, &fixtures); err != nil {
