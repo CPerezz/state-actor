@@ -2,7 +2,7 @@
 // driving the pinned `erigon init` CLI against a synthetic genesis.json
 // and then writing bulk state (accounts, storage slots, contract code,
 // commitment) into Erigon's snapshot flat-file tier via the streaming
-// snapshot orchestrator (plan PART 5 — landing in stages).
+// snapshot orchestrator.
 //
 // The MDBX touchpoint shrinks to ONE write: block 0's header.stateRoot
 // is patched via the inline-mdbx `patchGenesisHeaderStateRoot` helper

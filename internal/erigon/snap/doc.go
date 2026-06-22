@@ -10,8 +10,7 @@
 // e.g. "v1.0-accounts.0-256.kv". Steps are NOT zero-padded; version
 // prefix is required.
 //
-// WriteDomain is two-pass per Verifier B's correction (see plan's
-// Critical Verifier Corrections > Correction 2):
+// WriteDomain is two-pass:
 //
 //  1. Stream entries through seg.Compressor, calling Compress()+Close().
 //  2. Re-open the .kv via seg.Decompressor.Iterate() to recover the
@@ -20,11 +19,11 @@
 //     recsplit.Writer + existence.FilterBuilder for the commitment
 //     domain).
 //
-// Accessors are per-domain (Verifier B's correction):
+// Accessors are per-domain:
 //   - DomainAccounts/Storage/Code → AccessorBTree | AccessorExistence
 //   - DomainCommitment            → AccessorHashMap | AccessorExistence
 //
-// Architect B invariant: this package does NOT import
+// Invariant: this package does NOT import
 // github.com/erigontech/erigon. All schema constants are mirrored from
 // the pinned Erigon source under erigontech/erigon/
 // (see internal/erigon/constants.go for the pinning policy).

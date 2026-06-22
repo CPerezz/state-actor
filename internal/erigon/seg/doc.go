@@ -1,6 +1,6 @@
 // Package seg is a pure-Go port of Erigon's `db/seg` package — the
 // Huffman-coded body writer/reader for `.kv`, `.v`, and `.ef` snapshot
-// files. State-actor's Erigon support is "Architect B: own the format",
+// files. State-actor reimplements Erigon's on-disk formats in pure Go,
 // so this package emits byte-identical output to Erigon's seg.Compressor
 // (verified by the `cross-verify-erigon` CI job).
 //
@@ -46,7 +46,7 @@
 //	      flush (byte-align)
 //	      raw L bytes of w
 //
-// # Two-pass writer pattern (Verifier Correction 2)
+// # Two-pass writer pattern
 //
 // `Compressor.AddWord` cannot return the final `.kv` byte offset because
 // Huffman + dictionary encoding happens in `Compress()` AFTER all words
