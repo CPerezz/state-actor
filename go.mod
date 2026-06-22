@@ -105,4 +105,4 @@ require (
 
 replace github.com/holiman/bloomfilter/v2 => github.com/AskAlexSharov/bloomfilter/v2 v2.0.9
 
-replace github.com/erigontech/erigon => /Users/random_anon/dev/clients/erigon
+replace github.com/erigontech/erigon => ./erigon-src

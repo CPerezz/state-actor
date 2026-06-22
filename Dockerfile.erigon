@@ -57,11 +57,12 @@ WORKDIR /app
 # adds forward-fix coverage on top while staying byte-identical to the
 # prior pin for every encoder state-actor's snap writer mirrors
 # (SerialiseV3, raw address keys, addr||slot storage, uint256.Bytes()
-# storage values, raw bytecode). state-actor's go.mod has a `replace
-# github.com/erigontech/erigon => /erigon-src` directive (rewritten
-# below for Docker) — this gives us the exact source tree state-actor's
-# commitment vendor depends on without poisoning the Go module proxy
-# with pseudo-versions.
+# storage values, raw bytecode). state-actor's committed go.mod pins
+# erigon via `replace github.com/erigontech/erigon => ./erigon-src` (a
+# repo-relative convention, not a machine-specific path); this stage
+# clones the exact source tree to /erigon-src and re-points the replace
+# there (below), giving the commitment vendor its dependency without
+# poisoning the Go module proxy with pseudo-versions.
 RUN git clone https://github.com/erigontech/erigon.git /erigon-src \
     && cd /erigon-src \
     && git checkout 14273f79a6
@@ -73,22 +74,21 @@ RUN git clone https://github.com/erigontech/erigon.git /erigon-src \
 # debugging-instrumentation patches have been removed.
 
 COPY go.mod go.sum ./
-# Rewrite the local-dev replace path to the Docker location.
-RUN sed -i 's|/Users/random_anon/dev/clients/erigon|/erigon-src|' go.mod
+# Re-point the repo-relative replace at the cloned source for the build.
+RUN go mod edit -replace github.com/erigontech/erigon=/erigon-src
 RUN go mod download
 
 COPY . .
 
-# COPY . . overwrote the sed'd go.mod with the original local-path
-# version. Re-apply so the build uses /erigon-src (the v3.4.2 clone).
-# Was previously a no-op (cgo_erigon alone didn't need the import); the
-# commitment package's import of github.com/erigontech/erigon now makes
-# the replace load-bearing.
-RUN sed -i 's|/Users/random_anon/dev/clients/erigon|/erigon-src|' go.mod
+# COPY . . overwrote the edited go.mod with the committed (./erigon-src)
+# version. Re-point it at the clone so the commitment package's import of
+# github.com/erigontech/erigon (load-bearing under cgo_erigon_commitment)
+# resolves to the v3.4.2 source.
+RUN go mod edit -replace github.com/erigontech/erigon=/erigon-src
 
 # `go mod tidy -e` against /erigon-src so the build picks up v3.4.2's
-# transitive-dep graph. Local dev (Users/.../clients/erigon) is
-# typically at erigon master with different deps. The `-e` flag is
+# transitive-dep graph. Local dev (./erigon-src) may point at a different
+# erigon revision with different deps. The `-e` flag is
 # needed because v3.4.2's execution/rlp test-deps reach an ambiguous
 # google.golang.org/genproto/googleapis/rpc/status import (split
 # between the legacy `genproto` module and the newer
