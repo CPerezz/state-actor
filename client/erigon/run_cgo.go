@@ -1,15 +1,15 @@
 //go:build cgo_erigon
 
-// runImpl writes a bootable Erigon v3 chaindata directory. Today, it
-// only drives `erigon init` against a synthetic genesis.json: the bloat
-// data path (account / storage / code into snapshot files) is being
-// rebuilt under the snapshot-tier refactor described in
-// `/Users/random_anon/.claude/plans/so-what-we-have-enumerated-lantern.md`.
-// The streaming snapshot orchestrator will land in PART 5 of that plan.
+// runImpl writes a bootable Erigon v3 chaindata directory in two tiers:
+// `erigon init` lays down a minimal MDBX (genesis header + chain
+// config), then writeSnapshots streams the bloat state (accounts /
+// storage / code / commitment) into Erigon's flat snapshot .kv files and
+// patches block 0's stateRoot to the snapshot-tier root.
 //
-// state-actor's main module does NOT import github.com/erigontech/erigon;
-// erigon is invoked as a CLI from the Docker image built by
-// Dockerfile.erigon.
+// The cgo_erigon build imports github.com/erigontech/erigon only for the
+// commitment-root computation (internal/erigon/commitment, behind
+// cgo_erigon_commitment); the erigon daemon itself is invoked as a CLI
+// from the Docker image built by Dockerfile.erigon.
 
 package erigon
 
@@ -128,8 +128,8 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 	// AllSegmentsDownloadComplete gate clears (>0 OtterSync). Without
 	// this, engine_forkchoiceUpdated returns SYNCING forever and no
 	// blocks are produced. See sync_stages_cgo.go for the mechanism.
-	// TODO(plan PART 7): once snapshot-tier presence alone satisfies
-	// the gate, this call may become unnecessary.
+	// (If snapshot-tier presence alone ever satisfies the gate, this
+	// call could become unnecessary.)
 	if err := writeSyncStageMarkers(cfg.DBPath); err != nil {
 		return nil, fmt.Errorf("client/erigon: writeSyncStageMarkers: %w", err)
 	}
@@ -142,32 +142,25 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 	// is safe in this test-only flow because the datadir lives in a bind
 	// mount the user controls.
 	if err := chmodRecursive(cfg.DBPath, 0o777); err != nil {
-		// Non-fatal: surface a warning via the error path but don't
-		// fail the run.
-		_ = err
+		// Non-fatal, but log it: a silent chmod failure resurfaces later
+		// as an opaque "permission denied" when the non-root erigon
+		// daemon container reads the datadir.
+		fmt.Fprintf(os.Stderr, "client/erigon: warning: chmod datadir %q: %v\n", cfg.DBPath, err)
 	}
 
-	// 7. Streaming snapshot orchestrator.
-	//
-	// Writes accounts/storage/code/commitment .kv snapshot files + the
-	// FS preconditions (salt-state.txt, erigondb.toml), computes the
-	// HPH commitment root over the post-bloat state, and patches
-	// block 0's header.stateRoot so the daemon's first FCU validates.
-	//
-	// Skipped when opts.WriteSnapshots == false (default during landing).
-	// In that mode stats.StateRoot stays whatever erigon init reported
-	// (system contracts only — bloat is unreachable, but useful for
-	// isolating snapshot bugs from rest-of-pipeline bugs during dev).
-	if opts.WriteSnapshots {
-		root, err := writeSnapshots(ctx, cfg, foundational, stats)
-		if err != nil {
-			return nil, fmt.Errorf("client/erigon: writeSnapshots: %w", err)
-		}
-		if err := patchGenesisHeaderStateRoot(cfg.DBPath, root); err != nil {
-			return nil, fmt.Errorf("client/erigon: patchGenesisHeaderStateRoot: %w", err)
-		}
-		stats.StateRoot = root
+	// 7. Streaming snapshot orchestrator: write the
+	// accounts/storage/code/commitment .kv snapshot files + the FS
+	// preconditions (salt-state.txt, erigondb.toml), compute the HPH
+	// commitment root over the post-bloat state, and patch block 0's
+	// header.stateRoot so the daemon's first FCU validates.
+	root, err := writeSnapshots(ctx, cfg, foundational, stats)
+	if err != nil {
+		return nil, fmt.Errorf("client/erigon: writeSnapshots: %w", err)
 	}
+	if err := patchGenesisHeaderStateRoot(cfg.DBPath, root); err != nil {
+		return nil, fmt.Errorf("client/erigon: patchGenesisHeaderStateRoot: %w", err)
+	}
+	stats.StateRoot = root
 
 	stats.GenerationTime = time.Since(startedAt)
 	return stats, nil
@@ -210,9 +203,9 @@ type FoundationalAlloc struct {
 //
 // Returns:
 //   - foundational — spec map (small; retained for genesisAddrs +
-//                    range-0 snapshot writes)
+//     range-0 snapshot writes)
 //   - stats        — counts + byte tallies for the spec portion only;
-//                    writeSnapshots adds autofill numbers
+//     writeSnapshots adds autofill numbers
 //
 // State-actor writes ZERO state-actor data to genesis.json
 // (writeGenesisJSON receives nil — see runImpl). The only thing
@@ -252,4 +245,3 @@ func buildAllocMap(cfg generator.Config) (*FoundationalAlloc, *generator.Stats, 
 	stats.TotalBytes = stats.StorageBytes + stats.CodeBytes
 	return foundational, stats, nil
 }
-

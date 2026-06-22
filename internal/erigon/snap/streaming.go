@@ -34,46 +34,6 @@ func FromStreamsort(s *streamsort.Store) func(yield func(DomainEntry) bool) {
 	}
 }
 
-// FromStreamsortRange adapts a *streamsort.Store containing
-// COMPOSITE keys (rangeIdx:u8 || originalKey) into the same push-style
-// iterator, but yielding ONLY entries whose composite-key starts with
-// the byte rangeIdx, with that byte stripped before being passed to
-// WriteDomain.
-//
-// Used by the multi-range orchestrator (snapshot_cgo.go) — one
-// streamsort per domain holds all 5 ranges' data; this adapter
-// prefix-scans one range at a time. Per agent C: 1 store per domain
-// (4 total) is preferable to 5×4=20 stores because each Pebble
-// instance has nontrivial memtable/cache/WAL overhead.
-//
-// Iteration order within the range is ascending by originalKey
-// (Pebble's bytewise comparator on the composite key implies
-// originalKey order within a single rangeIdx prefix).
-//
-// The yielded DomainEntry slices alias Pebble's internal buffers
-// (same caveat as FromStreamsort). The yielded Key is a slice INTO
-// the underlying composite-key buffer with the rangeIdx byte
-// trimmed via re-slicing — no copy.
-func FromStreamsortRange(s *streamsort.Store, rangeIdx uint8) func(yield func(DomainEntry) bool) {
-	return func(yield func(DomainEntry) bool) {
-		_ = s.Iterate(func(key, value []byte) error {
-			if len(key) == 0 {
-				return nil // malformed composite key — skip
-			}
-			if key[0] < rangeIdx {
-				return nil // not our range yet
-			}
-			if key[0] > rangeIdx {
-				return errStreamingStop // past our range — short-circuit
-			}
-			if !yield(DomainEntry{Key: key[1:], Value: value}) {
-				return errStreamingStop
-			}
-			return nil
-		})
-	}
-}
-
 // errStreamingStop is the sentinel returned to streamsort.Iterate when
 // the WriteDomain consumer signals stop via yield→false. streamsort
 // short-circuits on any non-nil error, so this cleanly exits the inner
