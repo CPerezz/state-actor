@@ -1,0 +1,153 @@
+# syntax=docker/dockerfile:1
+# Dockerfile.erigon — builds state-actor with the cgo_erigon +
+# cgo_erigon_commitment tags AND embeds the pinned `erigon` CLI binary.
+#
+# Build tags:
+#   - cgo_erigon: pulls in erigontech/mdbx-go for direct MDBX writes
+#     (Phase B: storage drain into TblStorageVals + history tables).
+#   - cgo_erigon_commitment: enables the vendored HexPatriciaHashed
+#     commitment trie via github.com/erigontech/erigon. Phases C+D —
+#     state-actor computes HPH over the post-Phase-B alloc, writes
+#     branch nodes to TblCommitmentVals, patches block 0's
+#     header.stateRoot. Skips the daemon's first-FCU commitment rebuild.
+#   - gofuzz: disables Erigon's bundled secp256k1 to avoid CGO
+#     duplicate-symbol link errors against geth's secp256k1.
+#
+# Phase pipeline at runtime:
+#   1. state-actor writes genesis.json (header+code; autofill-contract
+#      storage held back).
+#   2. exec `erigon init` — populates AccountVals, CodeVals, Headers,
+#      ConfigTable, SyncStage, DBSchemaVersion.
+#   3. WriteAlloc — Phase B direct-MDBX storage drain (PreAlloc iter +
+#      autofill side-data) into TblStorageVals + 3 history tables.
+#   4. runCommitmentPhase — Phase C+D: ComputeGenesisRoot → write
+#      branches to TblCommitmentVals → patch block 0 header.
+#
+# Run:
+#   docker build -f Dockerfile.erigon -t state-actor-erigon:latest .
+#   docker run --rm -v $(pwd)/_artifacts/erigon:/data state-actor-erigon:latest \
+#     --client=erigon --db=/data --target-size=4MB --seed=42
+
+# ---------- Stage 1: builder (state-actor + cgo_erigon) ----------
+FROM golang:1.25-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    git \
+    build-essential \
+    pkg-config \
+    gnupg \
+    && install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg \
+       | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
+    && chmod a+r /etc/apt/keyrings/docker.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+       https://download.docker.com/linux/debian bookworm stable" \
+       > /etc/apt/sources.list.d/docker.list \
+    && apt-get update && apt-get install -y --no-install-recommends docker-ce-cli \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV CGO_ENABLED=1
+WORKDIR /app
+
+# Clone Erigon at the pinned commit on bal-devnet-7 — the EIP-7928
+# (block-access-lists) devnet branch. Merge-base with main is
+# 7827ec7268ffc9f4c4b97cfab6740d2f8fb1fdb2 (the prior pin); bal-devnet-7
+# adds forward-fix coverage on top while staying byte-identical to the
+# prior pin for every encoder state-actor's snap writer mirrors
+# (SerialiseV3, raw address keys, addr||slot storage, uint256.Bytes()
+# storage values, raw bytecode). The committed go.mod is Erigon-FREE so
+# every other client's build (none import erigontech/erigon) resolves
+# without it — only this stage needs it. We clone the exact source tree to
+# /erigon-src and inject the require + a local replace pointing there
+# (below), giving the commitment vendor its dependency without poisoning
+# the Go module proxy with pseudo-versions.
+RUN git clone https://github.com/erigontech/erigon.git /erigon-src \
+    && cd /erigon-src \
+    && git checkout 14273f79a6
+
+# No patches applied — the daemon runs STOCK upstream Erigon. The
+# block-2 "wrong trie root" stall is fixed entirely state-actor-side
+# (the "fat genesis" MaxTxNum[0]=StepSize-1 + commitment anchor; see
+# client/erigon/genesis_patch.go + snapshot_cgo.go), so the earlier
+# debugging-instrumentation patches have been removed.
+
+COPY go.mod go.sum ./
+# Inject the erigon require + a local replace at the cloned source (the
+# committed go.mod is Erigon-free; only this image needs the dependency).
+RUN go mod edit -require=github.com/erigontech/erigon@v0.0.0-00010101000000-000000000000 -replace=github.com/erigontech/erigon=/erigon-src
+RUN go mod download
+
+COPY . .
+
+# COPY . . overwrote the edited go.mod with the committed (Erigon-free)
+# version. Re-inject the require + replace so the commitment package's
+# import of github.com/erigontech/erigon (load-bearing under
+# cgo_erigon_commitment) resolves to the cloned source.
+RUN go mod edit -require=github.com/erigontech/erigon@v0.0.0-00010101000000-000000000000 -replace=github.com/erigontech/erigon=/erigon-src
+
+# `go mod tidy -e` against /erigon-src so the build picks up v3.4.2's
+# transitive-dep graph. Local dev (./erigon-src) may point at a different
+# erigon revision with different deps. The `-e` flag is
+# needed because v3.4.2's execution/rlp test-deps reach an ambiguous
+# google.golang.org/genproto/googleapis/rpc/status import (split
+# between the legacy `genproto` module and the newer
+# `genproto/googleapis/rpc` module). That ambiguity only affects test
+# code we don't compile (we never build with cgo_erigon_commitment +
+# the rlp.test package); `-e` tells tidy to record what it can and
+# continue rather than fail outright.
+ENV GOFLAGS=-tags=cgo_erigon,cgo_erigon_commitment,gofuzz
+RUN go mod tidy -e
+
+# `-mod=mod` allows the build to fetch any remaining transitive deps
+# tidy could not resolve; in strict readonly mode an unresolved
+# transitive would re-trigger "updates to go.mod needed".
+RUN mkdir -p /out && go build -mod=mod -tags "cgo_erigon cgo_erigon_commitment gofuzz" -ldflags "-s -w" -o /out/state-actor ./
+
+# Also build the erigon binary from /erigon-src (stock upstream, no
+# patches). The daemon launched by scripts/run-bloatnet.sh uses THIS
+# binary, not the upstream image — building it here keeps the daemon
+# pinned to the exact commit (14273f79a6) state-actor's commitment
+# vendor depends on.
+#
+# `unset GOFLAGS` is critical: the state-actor build above sets
+# GOFLAGS=-tags=cgo_erigon,cgo_erigon_commitment,gofuzz which is
+# specific to state-actor's vendored Erigon import path. Building
+# upstream erigon's own cmd/erigon with those tags fails (tags refer
+# to packages that exist in state-actor but not upstream).
+RUN cd /erigon-src && \
+    unset GOFLAGS && \
+    go mod download -x 2>&1 | tail -5 && \
+    go build -mod=mod -ldflags "-s -w" -o /out/erigon ./cmd/erigon
+
+# Install erigon at /usr/local/bin so the cgo-suite tests can exec it:
+# TestErigonGoldenStateRoot runs erigon.Run in-process (which execs
+# /usr/local/bin/erigon init), and TestE2ESuite boots this builder image
+# as a sibling container with --entrypoint /usr/local/bin/erigon. The
+# runtime stage installs it at the same path for the bench daemon.
+RUN cp /out/erigon /usr/local/bin/erigon
+
+# ---------- Stage 2: extract erigon binary (pinned digest, fallback) ----------
+# Kept for documentation / fallback parity. The runtime stage below
+# uses the locally-built /out/erigon (stock, pinned commit), not this one.
+FROM erigontech/erigon@sha256:bac6b266367ec59f82576cd8cef047171601fce3f0bbbef36e3e4db24727ff6e AS erigon-bin
+
+# ---------- Stage 3: minimal runtime image ----------
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+
+# state-actor binary (cgo_erigon-tagged).
+COPY --from=builder /out/state-actor /usr/local/bin/state-actor
+
+# erigon binary built from /erigon-src (stock upstream, pinned commit
+# 14273f79a6). The state-actor generation phase and the bench daemon
+# BOTH exec this binary. PATH inheritance from the debian-slim base
+# includes /usr/local/bin so name-only lookup finds it.
+COPY --from=builder /out/erigon /usr/local/bin/erigon
+
+ENTRYPOINT ["/usr/local/bin/state-actor"]

@@ -144,7 +144,7 @@ func SortedForks() []string {
 // ceiling should be rejected at parse time so the resulting DB doesn't
 // boot with a "wrong genesis hash" mismatch.
 //
-// Today's ceilings (all 5 clients on Osaka after the writer migration to internal/genesisheader.Build):
+// Today's ceilings (all clients on Osaka after the writer migration to internal/genesisheader.Build):
 //   - geth, reth, besu, nethermind, ethrex: osaka. Header construction flows
 //     through internal/genesisheader.Build for besu/reth/nethermind/ethrex
 //     (geth uses go-ethereum's native genesis builder, which handles
@@ -152,6 +152,12 @@ func SortedForks() []string {
 //     writers emit shanghaiTime/cancunTime/pragueTime/osakaTime/
 //     terminalTotalDifficulty/blobSchedule conditionally based on
 //     g.Config — same activation set the writer encodes.
+//   - erigon: osaka. Verified empirically on the bloatnet bench host
+//     2026-05-26: `erigon init` accepts a genesis.json with OsakaTime
+//     active and emits a valid chaindata. The earlier prague-floor was
+//     a Verifier A conservative guess that empirical testing retired.
+//     Tracked in /Users/random_anon/.claude/plans/so-i-have-a-declarative-owl.md
+//     Part 5+6 Task 67.
 //
 // Osaka adds zero new genesis-block fields per go-ethereum v1.17.2
 // (Header struct unchanged from Prague's RequestsHash; OsakaTime gates
@@ -162,7 +168,7 @@ func SortedForks() []string {
 // corresponding header fields.
 func MaxForkForClient(client string) string {
 	switch client {
-	case "geth", "reth", "besu", "nethermind", "ethrex":
+	case "geth", "reth", "besu", "nethermind", "erigon", "ethrex":
 		return "osaka"
 	default:
 		return DefaultFork

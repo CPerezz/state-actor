@@ -58,3 +58,6 @@ temp/
 
 # Rust fixture generator build artifacts
 internal/reth/testdata/gen/target/
+
+# Local Erigon source for cgo_erigon_commitment dev (see go.mod replace + Dockerfile.erigon)
+/erigon-src/

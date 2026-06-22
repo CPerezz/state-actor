@@ -70,7 +70,7 @@ func TestNoRootCacheRows(t *testing.T) {
 		t.Fatalf("RunCgo: %v", err)
 	}
 
-	env, err := mdbx.NewEnv()
+	env, err := mdbx.NewEnv(mdbx.Label("chaindata"))
 	if err != nil {
 		t.Fatalf("mdbx.NewEnv: %v", err)
 	}
@@ -132,7 +132,9 @@ func checkAccountsTrieNoRoot(t *testing.T, txn *mdbx.Txn) {
 // meaning packed SubKey with nibble count = 0 = the storage-trie root).
 func checkStoragesTrieNoRoot(t *testing.T, txn *mdbx.Txn) {
 	t.Helper()
-	dbi, err := txn.OpenDBI("StoragesTrie", 0, nil, nil)
+	// StoragesTrie is a DupSort table; mdbx-go v0.40+ requires OpenDBI to
+	// pass the matching flags (v0.38 was lenient).
+	dbi, err := txn.OpenDBI("StoragesTrie", mdbx.DupSort, nil, nil)
 	if err != nil {
 		t.Fatalf("OpenDBI StoragesTrie: %v", err)
 	}

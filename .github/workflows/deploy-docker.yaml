@@ -9,6 +9,7 @@
 #   Dockerfile.reth        → ghcr.io/<owner>/state-actor-reth
 #   Dockerfile.geth        → ghcr.io/<owner>/state-actor-geth
 #   Dockerfile.ethrex      → ghcr.io/<owner>/state-actor-ethrex
+#   Dockerfile.erigon      → ghcr.io/<owner>/state-actor-erigon
 #
 # Same release approach as ethpandaops/benchmarkoor's deploy-docker.* workflows:
 # native amd64 + arm64 builds run in parallel on per-arch runners, get pushed
@@ -22,8 +23,8 @@
 # pull the multi-arch manifests above.
 #
 # The matrix is the only thing that differs from benchmarkoor (which had one
-# file per image): five Dockerfiles would otherwise mean five near-identical
-# workflow files, so the per-image fan-out lives in a matrix instead.
+# file per image): the per-client Dockerfiles would otherwise mean that many
+# near-identical workflow files, so the per-image fan-out lives in a matrix.
 
 name: Deploy - Docker
 
@@ -78,6 +79,7 @@ jobs:
           - { suffix: '-reth',       dockerfile: Dockerfile.reth }
           - { suffix: '-geth',       dockerfile: Dockerfile.geth }
           - { suffix: '-ethrex',     dockerfile: Dockerfile.ethrex }
+          - { suffix: '-erigon',     dockerfile: Dockerfile.erigon }
     env:
       GHCR_REPO: ghcr.io/${{ github.repository }}${{ matrix.suffix }}
       DOCKERFILE: ${{ matrix.dockerfile }}
@@ -132,6 +134,7 @@ jobs:
           - { suffix: '-reth',       dockerfile: Dockerfile.reth }
           - { suffix: '-geth',       dockerfile: Dockerfile.geth }
           - { suffix: '-ethrex',     dockerfile: Dockerfile.ethrex }
+          - { suffix: '-erigon',     dockerfile: Dockerfile.erigon }
     env:
       GHCR_REPO: ghcr.io/${{ github.repository }}${{ matrix.suffix }}
       DOCKERFILE: ${{ matrix.dockerfile }}
@@ -177,7 +180,7 @@ jobs:
       packages: write
     strategy:
       matrix:
-        suffix: ['', '-besu', '-nethermind', '-reth', '-geth', '-ethrex']
+        suffix: ['', '-besu', '-nethermind', '-reth', '-geth', '-ethrex', '-erigon']
     env:
       GHCR_REPO: ghcr.io/${{ github.repository }}${{ matrix.suffix }}
     steps:
@@ -210,7 +213,7 @@ jobs:
       packages: write
     strategy:
       matrix:
-        suffix: ['', '-besu', '-nethermind', '-reth', '-geth', '-ethrex']
+        suffix: ['', '-besu', '-nethermind', '-reth', '-geth', '-ethrex', '-erigon']
         tag: ${{ fromJSON(needs.meta.outputs.additional_tags) }}
     env:
       GHCR_REPO: ghcr.io/${{ github.repository }}${{ matrix.suffix }}

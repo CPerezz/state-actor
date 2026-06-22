@@ -13,11 +13,12 @@ export PATH=$HOME/.foundry/bin:/usr/local/go/bin:$PATH
 
 WORK=${WORK:-$HOME/work/bloatnet}
 REPO=${STATE_ACTOR_REPO:-$HOME/state-actor}
-CLIENTS=${CLIENTS:-geth reth nethermind besu ethrex}
+CLIENTS=${CLIENTS:-geth reth nethermind besu erigon ethrex}
 # ethrex image must include --skip-genesis-validation (lambdaclass/ethrex#6783).
 # Pin to a digest once a release ships it; :main is the post-merge interim tag.
 ETHREX_IMAGE=${ETHREX_IMAGE:-ghcr.io/lambdaclass/ethrex:main}
-SPEC=$WORK/spec-bloatnet-100gb.yaml
+SPEC_TARGET_GB=${SPEC_TARGET_GB:-25}
+SPEC=$WORK/spec-bloatnet-${SPEC_TARGET_GB}gb.yaml
 SEED=${SEED:-42}
 SPAMOOR_PRIVKEY=0x0000000000000000000000000000000000000000000000000000000000000001
 SPAMOOR_TARGET_BLOCK_DELTA=${SPAMOOR_BLOCKS:-500}
@@ -47,13 +48,24 @@ done
 if [ ! -s "$SPEC" ]; then
     echo "=== generating spec → $SPEC ==="
     cd $REPO
-    go run ./scripts/gen-bloatnet-spec -out $SPEC -seed 4242
+    go run ./scripts/gen-bloatnet-spec -out $SPEC -seed 4242 -target-gb $SPEC_TARGET_GB
 fi
 echo "=== spec: $(ls -lh $SPEC | awk '{print $5}') ==="
 
 ENGINE_DRIVER=$WORK/bin/engine-driver
 mkdir -p $WORK/bin
-if [ ! -x "$ENGINE_DRIVER" ] || [ "$REPO/scripts/engine-driver/main.go" -nt "$ENGINE_DRIVER" ]; then
+# Rebuild if missing, or if main.go or any internal/engineapi source
+# is newer (engine-driver embeds internal/engineapi.EngineDriver, so
+# changes there must trigger a rebuild — bit attempt 16).
+need_rebuild=0
+if [ ! -x "$ENGINE_DRIVER" ]; then
+    need_rebuild=1
+elif [ "$REPO/scripts/engine-driver/main.go" -nt "$ENGINE_DRIVER" ]; then
+    need_rebuild=1
+elif [ -n "$(find "$REPO/internal/engineapi" -type f -name '*.go' -newer "$ENGINE_DRIVER" -print -quit 2>/dev/null)" ]; then
+    need_rebuild=1
+fi
+if [ "$need_rebuild" = 1 ]; then
     echo "=== building engine-driver ==="
     cd $REPO
     go build -o $ENGINE_DRIVER ./scripts/engine-driver/
@@ -201,6 +213,100 @@ NETH_CFG
                 --datadir /data \
                 --http --http.addr=127.0.0.1 --http.port=8545
             ;;
+        erigon)
+            # Erigon v3.4.2 dev-mode flag set:
+            #   --dev.period 2    wall-clock block production (2 s slot)
+            #   --networkid 1337  match the chainID in genesis.json
+            #   --no-downloader   skip snapshot peer download
+            #   --nodiscover      disable peer discovery
+            #   --port :0         random p2p port (no inbound peers
+            #                     needed for a dev-mode bench)
+            #   --http etc.       RPC config matching besu/reth defaults
+            #
+            # We deliberately DO NOT pass --chain dev:
+            # v3.4.2's daemon path rejects "--chain dev" against an
+            # existing-chaindata boot with "Fatal: chain name is not
+            # recognized: dev" (a code-path quirk where the dev short-
+            # circuit at flags.go:1923 does not apply during the
+            # populated-DB validation). Letting --chain default to
+            # "mainnet" + --networkid 1337 makes the daemon honor the
+            # chain config from MDBX (chainID 1337, post-Prague forks)
+            # rather than trying to migrate to a built-in dev config.
+            #
+            # The main-branch flags (--dev-validator-seed /
+            # --dev-validator-count / --dev.slot-time) DO NOT EXIST in
+            # v3.4.2 — Erigon's main rewrote dev-mode bootstrapping
+            # post-tag.
+            # v3.4.2's --chain dev + --dev.period mode failed to mine
+            # blocks against state-actor's init'd chaindata (block 0
+            # forever). The mechanism likely expects a fresh dev-chain
+            # genesis, not our custom-init'd one. Bench iteration
+            # confirmed this empirically across 5 boot variants.
+            #
+            # Solution: drive block production via Engine API (same as
+            # besu / nethermind). engine-driver issues
+            # engine_forkchoiceUpdated + engine_newPayload calls on a
+            # wall-clock interval. erigon executes them via its
+            # consensus-less PoS-style stage runner.
+            #
+            # Flags:
+            #   --networkid 1337         match chainID in genesis.json
+            #   --authrpc.addr 127.0.0.1 engine API listener
+            #   --authrpc.port 8551
+            #   --no-downloader          skip snapshot peer download
+            #   --port 0                 random p2p port
+            #   --nodiscover             disable peer discovery
+            #   --http.*                 eth RPC for spamoor + verify
+            #
+            # We deliberately omit --chain dev (v3.4.2 daemon fails
+            # with "chain name is not recognized: dev" against
+            # populated chaindata; see flags.go:1923) and let chain
+            # config come from MDBX.
+            #
+            # JWT file pre-existing at /data/jwt.hex (created by the
+            # bench script's setup phase). The erigon container needs
+            # --authrpc.jwtsecret to enable Engine API; geth/reth use
+            # different mechanisms.
+            cp $JWT_HEX $data/jwt.hex 2>/dev/null || true
+            chmod 0644 $data/jwt.hex 2>/dev/null || true
+            # --externalcl: required because v3.4.2's --chain dev path
+            # is broken (PoW mining was removed in #17813; no block
+            # production without external CL). Per Erigon issue #18827
+            # the workaround is to drive block production via Engine
+            # API + an external consensus-layer mock — exactly what
+            # our engine-driver provides.
+            # --snap.stop / --snap.state.stop: critical for state-actor
+            # boot. Without them, erigon's `StageSnapshots` stage tries
+            # to wait for snapshot downloads from peers (even with
+            # --no-downloader) and `engine_forkchoiceUpdated` calls
+            # respond SYNCING forever instead of accepting our genesis
+            # as head. Discovered via bench attempt 14:
+            #   "[rpc] download of segments not complete yet. please
+            #   wait StageSnapshots to finish"
+            # Daemon uses the state-actor-erigon image's locally-built
+            # erigon binary (stock upstream, pinned commit 14273f79a6 — no
+            # patches). Override the image's default entrypoint to
+            # /usr/local/bin/erigon since state-actor-erigon is a
+            # multi-purpose image (state-actor binary + erigon binary).
+            docker run -d --name $ct \
+                --network host \
+                -v $data:/data \
+                --entrypoint /usr/local/bin/erigon \
+                state-actor-erigon:latest \
+                --datadir /data \
+                --networkid 1337 \
+                --no-downloader \
+                --snap.stop \
+                --snap.state.stop \
+                --externalcl \
+                --authrpc.addr 127.0.0.1 \
+                --authrpc.port 8551 \
+                --authrpc.jwtsecret /data/jwt.hex \
+                --port 0 \
+                --http --http.addr=127.0.0.1 --http.port=8545 \
+                --http.api=eth,net,web3,txpool,debug \
+                --nodiscover
+            ;;
         ethrex)
             # ethrex has no self-mining dev mode usable here, so it is
             # engine-driven like besu/nethermind — but it REQUIRES JWT on
@@ -232,21 +338,24 @@ NETH_CFG
     esac
 }
 
-# Starts engine-driver for besu+nethermind (geth+reth self-mine via --dev.*).
-# Returns 1 if the driver dies within 1s of launch (bad config, port wedged).
+# Starts engine-driver for besu+nethermind+erigon (geth+reth self-mine
+# via --dev.*). Returns 1 if the driver dies within 1s of launch (bad
+# config, port wedged). Erigon v3.4.2 needs the engine-driver because
+# its --chain dev + --dev.period block production fails to advance
+# blocks against state-actor's custom-init'd chaindata (see bench
+# attempt-12 finding); the Engine API path works around this.
 start_engine_driver_if_needed() {
     local client=$1 logdir=$2
     case $client in
-        besu|nethermind|ethrex) ;;
+        besu|nethermind|erigon|ethrex) ;;
         *) return 0 ;;
     esac
     echo "=== starting engine-driver for $client ==="
-    # ethrex enforces JWT on authrpc (besu/nethermind run with it disabled), so
-    # the driver must sign engine calls with the same secret the container
-    # reads at /data/jwt.hex. Requires the companion engine-driver to support
-    # -jwt; if it does not, add JWT signing there before running ethrex.
+    # erigon and ethrex both enforce JWT on authrpc (besu/nethermind run with
+    # it disabled and ignore the -jwt arg). The driver signs engine calls with
+    # the same secret the container reads at /data/jwt.hex.
     local jwt_arg=""
-    [ "$client" = "ethrex" ] && jwt_arg="-jwt $JWT_HEX"
+    case $client in erigon|ethrex) jwt_arg="-jwt $JWT_HEX" ;; esac
     nohup $ENGINE_DRIVER \
         -engine http://127.0.0.1:8551 \
         -eth http://127.0.0.1:8545 \
@@ -301,10 +410,14 @@ run_one_client() {
     local db_path="/data"
     [ "$client" = "geth" ] && db_path="/data/geth/chaindata"
 
-    # --archive is geth/reth only (besu/nethermind reject at parse).
+    # --archive is geth/reth/erigon only (besu/nethermind reject at parse;
+    # erigon accepts it as a no-op per genesis/forks.go MaxForkForClient
+    # and main.go's allow-list — the snapshot tier is archive-by-design
+    # once history files ship, and absent that the value-domain reads
+    # degrade gracefully).
     local archive_arg=""
     if [ -n "$ARCHIVE" ]; then
-        case $client in geth|reth) archive_arg="--archive" ;; esac
+        case $client in geth|reth|erigon) archive_arg="--archive" ;; esac
     fi
 
     echo "=== state-actor generation (writing to $data, container path $db_path${archive_arg:+, archive=on}) ==="
@@ -483,7 +596,13 @@ echo " Overall wall time: $((overall_end - overall_start)) seconds"
 echo "═══════════════════════════════════════════════"
 
 # Cross-client genesis state-root invariance: same YAML through every
-# client must produce the same root. Compares only clients with status=ok.
+# client must produce the same root. Erigon uses HexPatriciaHashed and
+# the rest use a standard MPT, but they are SPEC-equivalent on genesis
+# input (proven byte-for-byte by
+# internal/erigon/_fixtures/commitment/h4_test.go's
+# TestH4_HexPatriciaHashed_MatchesMPT — both produce identical
+# 32-byte roots over the same alloc). Compares only clients with
+# status=ok.
 echo
 echo "═══════════════════════════════════════════════════════════════"
 echo " Cross-client genesis state-root invariance"

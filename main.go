@@ -1,5 +1,5 @@
 // Package main is the state-actor CLI: generates Ethereum client
-// databases (geth / besu / nethermind / reth / ethrex) end-to-end without
+// databases (geth / besu / nethermind / reth / ethrex / erigon) end-to-end without
 // going through the client binary's init path.
 package main
 
@@ -17,7 +17,8 @@ import (
 	"time"
 
 	"github.com/ethereum/state-actor/client/besu"
-  clientethrex "github.com/ethereum/state-actor/client/ethrex"
+	"github.com/ethereum/state-actor/client/erigon"
+	clientethrex "github.com/ethereum/state-actor/client/ethrex"
 	"github.com/ethereum/state-actor/client/geth"
 	"github.com/ethereum/state-actor/client/nethermind"
 	"github.com/ethereum/state-actor/client/reth"
@@ -26,9 +27,9 @@ import (
 	"github.com/ethereum/state-actor/internal/autofill"
 	"github.com/ethereum/state-actor/internal/clientpolicy"
 	"github.com/ethereum/state-actor/internal/sizecal"
-	"github.com/ethereum/state-actor/internal/syscontracts"
 	"github.com/ethereum/state-actor/internal/spec"
 	"github.com/ethereum/state-actor/internal/specbuild"
+	"github.com/ethereum/state-actor/internal/syscontracts"
 	"github.com/ethereum/state-actor/internal/templates"
 )
 
@@ -39,7 +40,7 @@ var (
 	benchmark  = flag.Bool("benchmark", false, "Run in benchmark mode (print detailed stats)")
 	binaryTrie = flag.Bool("binary-trie", false, "Generate state for binary trie mode (EIP-7864)")
 
-	targetSize = flag.String("target-size", "", "Advisory budget (e.g. '5GB', '500MB') that sizes the auto-fill of 20/10/70 mainnet-shaped synthetic state. Required unless --spec is set. With --spec, fills the headroom after the spec's projected cost; if the spec already meets the target, no auto-fill runs. Not a hard on-disk cap — actual size may vary per client. Honored by geth, besu, nethermind, reth, and ethrex.")
+	targetSize = flag.String("target-size", "", "Advisory budget (e.g. '5GB', '500MB') that sizes the auto-fill of 20/10/70 mainnet-shaped synthetic state. Required unless --spec is set. With --spec, fills the headroom after the spec's projected cost; if the spec already meets the target, no auto-fill runs. Not a hard on-disk cap — actual size may vary per client. Honored by geth, besu, nethermind, reth, ethrex, and erigon.")
 
 	fork      = flag.String("fork", "", "Hard fork active at genesis. Empty (default) resolves to the latest fork the chosen --client can write. Use --list-forks to see all values.")
 	listForks = flag.Bool("list-forks", false, "Print the list of accepted --fork values and exit.")
@@ -52,7 +53,7 @@ var (
 
 	groupDepth = flag.Int("group-depth", 8, "Binary trie group depth (1-8, default 8). Controls serialization unit size.")
 
-	client = flag.String("client", "geth", "Target Ethereum client: 'geth' (default), 'nethermind', 'besu', 'reth', or 'ethrex'.")
+	client = flag.String("client", "geth", "Target Ethereum client: 'geth' (default), 'nethermind', 'besu', 'reth', 'ethrex', or 'erigon'.")
 
 	archive = flag.Bool("archive", false, "Configure the generated DB for archive-mode operation.\n"+
 		"  reth: writes StoragesHistory + AccountsHistory + StorageChangeSets + AccountChangeSets at genesis.\n"+
@@ -114,11 +115,14 @@ func main() {
 	}
 
 	// Reject --archive for clients that have no archive code path.
+	// Erigon accepts --archive but treats it as a no-op (the snapshot
+	// tier is archive-by-design once history files ship; until then
+	// archive-mode reads degrade gracefully to the value domains).
 	if *archive {
 		switch *client {
-		case "geth", "reth":
+		case "geth", "reth", "erigon":
 		default:
-			log.Fatalf("--archive is only supported on geth and reth; got --client=%s. Re-run without --archive.", *client)
+			log.Fatalf("--archive is only supported on geth, reth, and erigon (no-op for erigon); got --client=%s. Re-run without --archive.", *client)
 		}
 	}
 
@@ -303,6 +307,13 @@ func main() {
 		stats, err = reth.RunCgo(context.Background(), config, reth.Options{})
 		if err != nil {
 			log.Fatalf("Failed to populate Reth DB: %v", err)
+		}
+
+	case "erigon":
+		var err error
+		stats, err = erigon.Run(context.Background(), config, erigon.Options{})
+		if err != nil {
+			log.Fatalf("Failed to populate Erigon DB: %v", err)
 		}
 
 	case "ethrex":

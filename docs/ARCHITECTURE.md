@@ -99,6 +99,7 @@ State Actor generates Ethereum state in three phases:
 │  │  besu: single RocksDB w/ 8 Bonsai column families + chainspec.json │ │
 │  │  nethermind: 7 RocksDB instances + parity-format chainspec sidecar │ │
 │  │  ethrex: single RocksDB w/ 20 CFs + metadata.json + genesis sidecar│ │
+│  │  erigon: Erigon v3 flat .kv snapshots + minimal MDBX               │ │
 │  └─────────────────────────────────────────────────────────────────────┘ │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
@@ -230,6 +231,16 @@ configurable worker pool / batch size at the generator level.
   per leaf: one full-path row, one nibble-path row). Writes
   `metadata.json` + `ethrex-genesis.json` sidecars. Behind the
   `cgo_ethrex` build tag.
+- **erigon** (`client/erigon/run_cgo.go`): cgo + mdbx-go + a vendored
+  commitment lib. Runs stock upstream erigon as a CLI (`erigon init`,
+  then the daemon — no upstream patch). Bulk state (accounts / storage
+  / code / commitment) streams into Erigon v3 flat snapshot `.kv` files
+  (plus `.bt` / `.kvi` / `.kvei` accessors) via `internal/erigon`; the
+  MDBX stays minimal (genesis header with a patched `stateRoot` + chain
+  config). The "fat genesis" construction (`MaxTxNum[0]=StepSize-1` + a
+  commitment anchor, see `client/erigon/genesis_patch.go` +
+  `snapshot_cgo.go`) keeps the commitment continuable past block 2.
+  Behind the `cgo_erigon` build tag.
 
 Each adapter implements the `generator.Writer` interface
 (`WriteAccount`, `WriteStorage`, `WriteCode`, `SetStateRoot`, …); the
@@ -349,6 +360,15 @@ Today's client adapters:
   `metadata.json` (schema_version=2) and `ethrex-genesis.json` (full
   genesis JSON for `ethrex --network <path>`). Behind the `cgo_ethrex`
   build tag.
+- `client/erigon/` — cgo + mdbx-go writer producing Erigon v3 flat
+  snapshot `.kv` files (accounts / storage / code / commitment) plus
+  their `.bt` / `.kvi` / `.kvei` accessors (built via `internal/erigon/`),
+  alongside a minimal MDBX (genesis header with a patched `stateRoot` +
+  chain config) laid down by the pinned `erigon init` CLI. The "fat
+  genesis" construction (`MaxTxNum[0]=StepSize-1` + a commitment anchor,
+  see `client/erigon/genesis_patch.go` + `snapshot_cgo.go`) keeps the
+  commitment continuable across genesis → first-live-block. Behind the
+  `cgo_erigon` build tag.
 
 The Nethermind adapter takes a different route from the others: instead of
 writing a chainspec for the client to consume, it writes the seven RocksDB
@@ -373,7 +393,8 @@ state-actor/
 │   ├── reth/                        # cgo + libmdbx writer (cgo_reth build tag)
 │   ├── besu/                        # cgo + librocksdb writer (cgo_besu build tag)
 │   ├── nethermind/                  # cgo + grocksdb writer (cgo_neth build tag)
-│   └── ethrex/                      # cgo + grocksdb writer, 20 CFs (cgo_ethrex build tag)
+│   ├── ethrex/                      # cgo + grocksdb writer, 20 CFs (cgo_ethrex build tag)
+│   └── erigon/                      # cgo + mdbx-go writer, Erigon v3 flat .kv (cgo_erigon build tag)
 ├── generator/                       # Core generation pipeline + Writer interface
 ├── genesis/                         # Client-neutral chainspec types + builder
 ├── internal/
@@ -391,6 +412,7 @@ state-actor/
 │   ├── reth/                        # Reth-side codec (MDBX wire format)
 │   ├── neth/                        # Nethermind-side helpers
 │   ├── ethrex/                      # ethrex path-keyed trie codec + RocksDB helpers
+│   ├── erigon/                      # erigon v3 snapshot codec (seg/btindex/recsplit) + helpers
 │   ├── engineapi/                   # Mock CL engine-API driver (besu / nethermind boot)
 │   ├── e2e_testing/                 # Shared per-client TestE2ESuite phases + checks + RPC oracle
 │   ├── rpcprobe/                    # Waitfor-RPC + JSON-RPC helpers
@@ -402,12 +424,12 @@ state-actor/
 
 ## Cross-client determinism
 
-State Actor guarantees that the same `--seed`, the same `--spec`, and the same client-policy preamble produce **the same genesis state root** across all five MPT clients (geth / reth / besu / nethermind / ethrex). This is the load-bearing invariant the project exists to enable.
+State Actor guarantees that the same `--seed`, the same `--spec`, and the same client-policy preamble produce **the same genesis state root** across all six MPT clients (geth / reth / besu / nethermind / ethrex / erigon). This is the load-bearing invariant the project exists to enable.
 
 The mechanism is three-layered:
 
 - **Deterministic address derivation.** Spec address modes — explicit, name-derived (`keccak256(BE_u64(seed) || utf8(name))[12:]`), position-derived (same but with `anon-N`) — are pure functions of the spec input. Pinned at unit level by `internal/specbuild/derive_test.go:TestResolveAddressDeterministicAcrossRuns`.
-- **Single global byte-budget constant.** `--spec`'s `approximate_size_bytes` is converted to a synthesised slot count via the global `bytesPerSlot` constant in [`internal/sizecal/factors.go`](../internal/sizecal/factors.go) — identical across all five clients, which is precisely what makes the cross-client root match. The CI invariance gate calls `sizecal.NewFixed(64)` to decouple test sizing from the production `Default()`, so a drift in either side can't silently mask the other.
+- **Single global byte-budget constant.** `--spec`'s `approximate_size_bytes` is converted to a synthesised slot count via the global `bytesPerSlot` constant in [`internal/sizecal/factors.go`](../internal/sizecal/factors.go) — identical across all six clients, which is precisely what makes the cross-client root match. The CI invariance gate calls `sizecal.NewFixed(64)` to decouple test sizing from the production `Default()`, so a drift in either side can't silently mask the other.
 - **Canonical syscontract preamble.** Every per-client writer must run `syscontracts.AddCanonicalSystemContracts(&cfg)` before producing state. The five EIP-mandated system contracts (BeaconRoots, HistoryStorage, WithdrawalQueue, ConsolidationQueue, DepositContract) must exist at their canonical addresses; without them besu refuses to boot and the other four clients compute a different root.
 
 The CI keystone job `cross-client-genesis-root` (defined in `.github/workflows/ci.yml`, exercising `examples/full-matrix-spec-feature.yaml`) re-asserts the invariant on every PR. When a divergence appears, the most likely cause is calibration drift (`internal/sizecal/`) or a missing syscontract preamble; less common but possible is per-client codec drift (`internal/reth/`, `internal/neth/`, etc.).
@@ -421,6 +443,7 @@ account at a time over a sorted key stream (`internal/streamsort`),
 emitting trie nodes as the stream advances rather than building the
 trie in memory. End-to-end throughput is dominated by the chosen
 client's on-disk format — Pebble compaction (geth), MDBX random-write
-IOPS (reth), RocksDB compaction (besu / nethermind / ethrex). Numbers vary by
+IOPS (reth), RocksDB compaction (besu / nethermind / ethrex), flat-file
+snapshot writes (erigon). Numbers vary by
 host and would rot fast; benchmark on your own hardware with
 `--benchmark --verbose` if you need a concrete figure.
