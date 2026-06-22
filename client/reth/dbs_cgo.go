@@ -105,7 +105,8 @@ func OpenEnvs(dataDir string, freshDir bool) (*Envs, error) {
 	}
 
 	// --- MDBX env ---
-	env, err := mdbx.NewEnv()
+	// mdbx-go v0.40+ requires a Label argument to NewEnv.
+	env, err := mdbx.NewEnv(mdbx.Label("chaindata"))
 	if err != nil {
 		return nil, fmt.Errorf("mdbx.NewEnv: %w", err)
 	}

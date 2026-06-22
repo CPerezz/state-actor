@@ -70,7 +70,7 @@ func TestNoRootCacheRows(t *testing.T) {
 		t.Fatalf("RunCgo: %v", err)
 	}
 
-	env, err := mdbx.NewEnv()
+	env, err := mdbx.NewEnv(mdbx.Label("chaindata"))
 	if err != nil {
 		t.Fatalf("mdbx.NewEnv: %v", err)
 	}
