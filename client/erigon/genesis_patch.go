@@ -1,3 +1,10 @@
+//go:build cgo_erigon
+
+// genesis_patch.go drives MDBX directly (erigontech/mdbx-go is cgo-only,
+// with no pure-Go fallback), so it is gated behind cgo_erigon — otherwise
+// it would break the pure-Go default build (CGO_ENABLED=0, e.g.
+// Dockerfile.geth / the docker-release base image).
+
 package erigon
 
 import (
