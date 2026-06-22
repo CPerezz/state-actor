@@ -323,7 +323,9 @@ docker run --rm \
   ./state-actor \
   --client=erigon --db=/data \
   --target-size=100MB \
-  --seed=42
+  --seed=42 \
+  --chain-id=1337 --gas-limit=60000000 \
+  --timestamp=1700000000 --extra-data=0xdeadbeef
 ```
 
 **On-disk layout:**
