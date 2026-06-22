@@ -120,6 +120,13 @@ RUN cd /erigon-src && \
     go mod download -x 2>&1 | tail -5 && \
     go build -mod=mod -ldflags "-s -w" -o /out/erigon ./cmd/erigon
 
+# Install erigon at /usr/local/bin so the cgo-suite tests can exec it:
+# TestErigonGoldenStateRoot runs erigon.Run in-process (which execs
+# /usr/local/bin/erigon init), and TestE2ESuite boots this builder image
+# as a sibling container with --entrypoint /usr/local/bin/erigon. The
+# runtime stage installs it at the same path for the bench daemon.
+RUN cp /out/erigon /usr/local/bin/erigon
+
 # ---------- Stage 2: extract erigon binary (pinned digest, fallback) ----------
 # Kept for documentation / fallback parity. The runtime stage below
 # uses the locally-built /out/erigon (stock, pinned commit), not this one.

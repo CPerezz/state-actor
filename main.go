@@ -1,5 +1,5 @@
 // Package main is the state-actor CLI: generates Ethereum client
-// databases (geth / besu / nethermind / reth / ethrex) end-to-end without
+// databases (geth / besu / nethermind / reth / ethrex / erigon) end-to-end without
 // going through the client binary's init path.
 package main
 
@@ -40,7 +40,7 @@ var (
 	benchmark  = flag.Bool("benchmark", false, "Run in benchmark mode (print detailed stats)")
 	binaryTrie = flag.Bool("binary-trie", false, "Generate state for binary trie mode (EIP-7864)")
 
-	targetSize = flag.String("target-size", "", "Advisory budget (e.g. '5GB', '500MB') that sizes the auto-fill of 20/10/70 mainnet-shaped synthetic state. Required unless --spec is set. With --spec, fills the headroom after the spec's projected cost; if the spec already meets the target, no auto-fill runs. Not a hard on-disk cap — actual size may vary per client. Honored by geth, besu, nethermind, reth, and ethrex.")
+	targetSize = flag.String("target-size", "", "Advisory budget (e.g. '5GB', '500MB') that sizes the auto-fill of 20/10/70 mainnet-shaped synthetic state. Required unless --spec is set. With --spec, fills the headroom after the spec's projected cost; if the spec already meets the target, no auto-fill runs. Not a hard on-disk cap — actual size may vary per client. Honored by geth, besu, nethermind, reth, ethrex, and erigon.")
 
 	fork      = flag.String("fork", "", "Hard fork active at genesis. Empty (default) resolves to the latest fork the chosen --client can write. Use --list-forks to see all values.")
 	listForks = flag.Bool("list-forks", false, "Print the list of accepted --fork values and exit.")
@@ -53,7 +53,7 @@ var (
 
 	groupDepth = flag.Int("group-depth", 8, "Binary trie group depth (1-8, default 8). Controls serialization unit size.")
 
-	client = flag.String("client", "geth", "Target Ethereum client: 'geth' (default), 'nethermind', 'besu', 'reth', or 'ethrex'.")
+	client = flag.String("client", "geth", "Target Ethereum client: 'geth' (default), 'nethermind', 'besu', 'reth', 'ethrex', or 'erigon'.")
 
 	archive = flag.Bool("archive", false, "Configure the generated DB for archive-mode operation.\n"+
 		"  reth: writes StoragesHistory + AccountsHistory + StorageChangeSets + AccountChangeSets at genesis.\n"+

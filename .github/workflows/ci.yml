@@ -150,6 +150,14 @@ jobs:
             test-tags: 'cgo_ethrex oracle'
             test-pkg: ./client/ethrex/
             test-run-filter: 'TestEthrexGoldenStateRoot|TestGenesisDumpGolden|TestE2ESuite'
+          - client: erigon
+            dockerfile: Dockerfile.erigon
+            image-tag: state-actor-erigon-builder:latest
+            cache-scope: erigon-builder
+            env-prefix: ERIGON
+            test-tags: 'cgo_erigon oracle'
+            test-pkg: ./client/erigon/
+            test-run-filter: 'TestErigonGoldenStateRoot|TestE2ESuite'
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/cgo-suite
@@ -227,16 +235,16 @@ jobs:
         with:
           path: _artifacts
           merge-multiple: true
-      - name: Compare genesis state-roots across all 5 clients
+      - name: Compare genesis state-roots across all 6 clients
         run: |
           set -euo pipefail
           cd _artifacts
           ls -l
-          # All 5 clients must have uploaded a result. Otherwise the
-          # invariant check is meaningless — e.g. if 4 of 5 suites fail
+          # All 6 clients must have uploaded a result. Otherwise the
+          # invariant check is meaningless — e.g. if 5 of 6 suites fail
           # before Phase 3, only 1 result lands here and the "all unique
           # roots == 1" check would trivially pass with 1 entry.
-          want=(besu ethrex geth nethermind reth)
+          want=(besu erigon ethrex geth nethermind reth)
           missing=()
           for c in "${want[@]}"; do
             if [ ! -f "$c-result.json" ]; then
