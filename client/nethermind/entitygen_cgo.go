@@ -170,6 +170,7 @@ func writeSyntheticAccounts(
 	plan := cfg.AutoFill
 
 	if plan != nil {
+		cfg.Progress.Stage("nethermind: phase 1/2 — generating accounts")
 		for i := 0; i < plan.NumEOAs; i++ {
 			acc := plan.DrawEOA(rng)
 			data, err := gethrlp.EncodeToBytes(acc.StateAccount)
@@ -191,12 +192,16 @@ func writeSyntheticAccounts(
 					stats.CodeBytes += uint64(len(acc.Code))
 				}
 			}
+			cfg.Progress.Tick(int64(i+1), int64(plan.NumEOAs), "EOAs")
 		}
 	}
 
 	plannedContracts := 0
 	if plan != nil {
 		plannedContracts = plan.NumContracts
+	}
+	if plannedContracts > 0 {
+		cfg.Progress.Stage("nethermind: phase 1/2 — generating contracts")
 	}
 	for i := 0; i < plannedContracts; i++ {
 		contract := plan.DrawContract(rng)
@@ -257,8 +262,17 @@ func writeSyntheticAccounts(
 			stats.ContractsCreated++
 			stats.StorageSlotsCreated += numSlots
 		}
+		cfg.Progress.Tick(int64(i+1), int64(plannedContracts), "contracts")
 	}
 
+	// entitiesQueued is the exact count Put into the sorter above (genesis
+	// allocs + synthetic EOAs/contracts) — the Phase-2 progress total.
+	entitiesQueued := int64(len(genesisAccounts) + plannedContracts)
+	if plan != nil {
+		entitiesQueued += int64(plan.NumEOAs)
+	}
+	cfg.Progress.Stage("nethermind: phase 2/2 — building state trie")
+	var phase2Count int64
 	if err := sorter.Iterate(func(key, value []byte) error {
 		var ah [32]byte
 		copy(ah[:], key)
@@ -273,6 +287,8 @@ func writeSyntheticAccounts(
 		if err := builder.AddAccount(ah, value); err != nil {
 			return fmt.Errorf("add account: %w", err)
 		}
+		phase2Count++
+		cfg.Progress.Tick(phase2Count, entitiesQueued, "accounts")
 		return nil
 	}); err != nil {
 		return common.Hash{}, fmt.Errorf("streamsort iterate: %w", err)

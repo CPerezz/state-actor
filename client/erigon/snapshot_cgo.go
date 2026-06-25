@@ -263,6 +263,7 @@ func writeSnapshots(
 	// contract rather than guard against it).
 	if pipelineErr == nil && cfg.AutoFill != nil {
 		rng := mrand.New(mrand.NewSource(cfg.Seed))
+		cfg.Progress.Stage("erigon: generating accounts")
 		for i := 0; i < cfg.AutoFill.NumEOAs && pipelineErr == nil; i++ {
 			acc := cfg.AutoFill.DrawEOA(rng)
 			for _, dup := genesisAddrs[acc.Address]; dup; {
@@ -291,6 +292,7 @@ func writeSnapshots(
 				break
 			}
 			stats.AccountsCreated++
+			cfg.Progress.Tick(int64(i+1), int64(cfg.AutoFill.NumEOAs), "EOAs")
 		}
 		for i := 0; i < cfg.AutoFill.NumContracts && pipelineErr == nil; i++ {
 			c := cfg.AutoFill.DrawContract(rng)
@@ -319,6 +321,7 @@ func writeSnapshots(
 			stats.StorageSlotsCreated += len(c.Storage)
 			stats.StorageBytes += uint64(len(c.Storage)) * 64
 			stats.ContractsCreated++
+			cfg.Progress.Tick(int64(i+1), int64(cfg.AutoFill.NumContracts), "contracts")
 		}
 	}
 	stats.TotalBytes = stats.StorageBytes + stats.CodeBytes
@@ -326,6 +329,8 @@ func writeSnapshots(
 	// Close entityCh → workers drain remaining items then exit.
 	close(entityCh)
 	encodeWg.Wait()
+
+	cfg.Progress.Stage("erigon: building snapshots & commitment")
 
 	// -- Step 3c: drain spec-PreAlloc Storage iters into storage +
 	// commitment-input streamsorts.
@@ -347,6 +352,11 @@ func writeSnapshots(
 	// have their per-domain writer goroutines reading (they exit on
 	// close(chans.*) below).
 	if pipelineErr == nil {
+		// Count-only heartbeat for the spec-storage drain — the dominant phase
+		// on bloat specs (millions of slots), otherwise silent under the
+		// "building snapshots & commitment" banner above. Single goroutine here,
+		// so one SlotWorker; nil-safe when progress is unwired.
+		slotW := cfg.Progress.SlotMeter().Worker()
 		for i := range cfg.PreAlloc {
 			pe := &cfg.PreAlloc[i]
 			if pe.Storage == nil {
@@ -357,6 +367,7 @@ func writeSnapshots(
 					pipelineErr = err
 					return false
 				}
+				slotW.Slot()
 				// trimLeadingZeros may filter zero values; conservatively
 				// count by the unfiltered slot. Storage byte tally for
 				// stats includes raw 32-byte value capacity (matching

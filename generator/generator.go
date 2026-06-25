@@ -20,7 +20,42 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 
 	"github.com/ethereum/state-actor/internal/entitygen"
+	"github.com/ethereum/state-actor/internal/progress"
 )
+
+// phase2TickStride gates how often the binary Phase-2 iterator samples the
+// wall clock for a progress heartbeat. Phase 2 streams one Next() per trie
+// entry (accounts×2 + every storage slot + code chunks → billions on bench
+// workloads), so calling progress.Tick — which reads time.Now() — on every
+// entry would add billions of clock reads to the hottest loop. Sampling once
+// per 2^16 entries bounds that overhead to a rounding error; the Reporter's
+// own 15 s throttle still decides when a line is actually printed.
+const phase2TickStride = 1 << 16
+
+// tickingIterator wraps an ethdb.Iterator to emit a throttled Phase-2 progress
+// heartbeat as entries stream past. It is observation-only: Key, Value, and
+// iteration order are forwarded verbatim, so the computed root is byte-
+// identical. total is the Phase-1 entry count — an upper bound when
+// --target-size stops the underlying iterator early (the bar just won't reach
+// 100%). A nil progress reporter makes Tick a no-op, so this stays silent for
+// library/test callers.
+type tickingIterator struct {
+	ethdb.Iterator
+	progress *progress.Reporter
+	total    int64
+	n        int64
+}
+
+func (it *tickingIterator) Next() bool {
+	ok := it.Iterator.Next()
+	if ok {
+		it.n++
+		if it.n&(phase2TickStride-1) == 0 {
+			it.progress.Tick(it.n, it.total, "entries")
+		}
+	}
+	return ok
+}
 
 // Generator handles state generation.
 type Generator struct {
@@ -227,17 +262,7 @@ func (g *Generator) generateStreamingBinary() (retStats *Stats, retErr error) {
 		return nil
 	}
 
-	var lastLogTime = time.Now()
-	logProgress := func(phase string, current, total int, slots int64) {
-		if time.Since(lastLogTime) < 20*time.Second {
-			return
-		}
-		lastLogTime = time.Now()
-		totalEntries := preambleEntries + contractEntries
-		pct := float64(current) / float64(total) * 100
-		log.Printf("[%s] %d/%d (%.1f%%), %d storage slots, %d trie entries",
-			phase, current, total, pct, slots, totalEntries)
-	}
+	g.config.Progress.Stage("binary: phase 1/2 — generating accounts")
 
 	// Track genesis addresses for collision avoidance.
 	genesisAddrs := make(map[common.Address]bool, len(g.config.GenesisAccounts))
@@ -304,7 +329,8 @@ func (g *Generator) generateStreamingBinary() (retStats *Stats, retErr error) {
 			if len(stats.SampleEOAs) < 3 {
 				stats.SampleEOAs = append(stats.SampleEOAs, acc.address)
 			}
-			logProgress("EOA", i+1, plan.NumEOAs, 0)
+			g.config.Progress.Tick(int64(i+1), int64(plan.NumEOAs),
+				fmt.Sprintf("EOAs · %d trie entries", preambleEntries+contractEntries))
 		}
 	}
 
@@ -352,7 +378,8 @@ func (g *Generator) generateStreamingBinary() (retStats *Stats, retErr error) {
 		}
 		contractIdx++
 		if plan != nil {
-			logProgress("Contract", contractIdx, plan.NumContracts, int64(stats.StorageSlotsCreated))
+			g.config.Progress.Tick(int64(contractIdx), int64(plan.NumContracts),
+				fmt.Sprintf("contracts · %d slots", stats.StorageSlotsCreated))
 		}
 
 		// Phase 1 raw-byte safety cap: stop generating more entries once
@@ -389,6 +416,9 @@ func (g *Generator) generateStreamingBinary() (retStats *Stats, retErr error) {
 	// --- Phase 2: Stream sorted entries from temp DB → compute root hash ---
 
 	totalEntries := preambleEntries + contractEntries
+
+	g.config.Progress.Stage(fmt.Sprintf(
+		"binary: phase 2/2 — computing trie root from %d entries", totalEntries))
 
 	// Compact the temp DB to flatten LSM levels into a single sorted run.
 	// This makes the sequential iteration single-pass I/O instead of a
@@ -450,6 +480,9 @@ func (g *Generator) generateStreamingBinary() (retStats *Stats, retErr error) {
 			shouldStop: tracker.ShouldStop,
 		}
 	}
+	// Outermost wrap: heartbeat on entries actually yielded to the builder
+	// (after any target-size early-stop), so Phase 2 isn't silent on long runs.
+	iter = &tickingIterator{Iterator: iter, progress: g.config.Progress, total: totalEntries}
 
 	// afterStem runs in the builder goroutine (the goroutine that owns the
 	// sbw + tnw Pebble batches) so MaybeCalibrate's synchronous flush
@@ -613,7 +646,6 @@ func trimLeftZeroes(s []byte) []byte {
 	}
 	return nil
 }
-
 
 func formatBytesInternal(b uint64) string {
 	const unit = 1024
