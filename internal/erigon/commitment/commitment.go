@@ -7,6 +7,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"os"
+	"strconv"
 
 	gethcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -104,19 +106,23 @@ func EncodeStorageUpdate(value []byte) []byte {
 // commitmentChunkKeys, when > 0, bounds how many keys each incremental
 // commitment chunk Touches before a Process flush (A0), so one chunk's
 // Updates.keys dedup map + etl working set are ~O(commitmentChunkKeys)
-// instead of O(total-keys) (~tens of GB across a 100 GB alloc).
+// instead of O(total-keys) (~tens of GB across a 100 GB alloc). When > 0 the
+// chunked path uses the SERIAL incremental Process (bounded RAM, correct
+// per-block engine); 0 uses the single concurrent Process (fast, full
+// t.keys in RAM — fine when RAM is ample, e.g. the 240 GB bench).
 //
-// DEFAULT 0 = DISABLED: the whole alloc runs as a SINGLE Process — the
-// bench-validated single-shot path (TestH4 confirms erigon HPH == geth MPT
-// root; the other commitment tests pass). Multi-chunk incremental is WIP:
-// the bench revealed the CONCURRENT unfold mishandles a leaf→branch
-// transition ACROSS chunks ("empty branch data read during unfold, prefix
-// 00 ... deleted=true") — when chunk N writes a leaf under a nibble and
-// chunk N+1 adds a second key there expecting a branch. Until that is fixed
-// (TestComputeGenesisRoot_ChunkedVsSingle is the gate, currently skipped),
-// production runs single-shot and t.keys (~100 B/unique-key) is the RAM
-// floor. setCommitmentChunkKeys overrides this in the (skipped) gate test.
-var commitmentChunkKeys = 0
+// DEFAULT 0 (single concurrent Process). Override at runtime with
+// STATE_ACTOR_COMMITMENT_CHUNK_KEYS (e.g. 5000000) to bound RAM on
+// memory-constrained / low-memory-validation runs at the cost of a serial
+// commitment walk. setCommitmentChunkKeys overrides it in tests.
+var commitmentChunkKeys = func() int {
+	if v := os.Getenv("STATE_ACTOR_COMMITMENT_CHUNK_KEYS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return 0
+}()
 
 // setCommitmentChunkKeys swaps commitmentChunkKeys for the duration of a
 // test; the returned func restores the previous value.
@@ -191,31 +197,34 @@ func ComputeGenesisRoot(commitmentInputStore, branchesOut *streamsort.Store, tmp
 	// (and the ApplyAndClearInlineDeferredUpdates flush below) lands in it.
 	rootCtx, _ := factory()
 
-	// A0 — chunked Touch+Process. Build the trie INCREMENTALLY in bounded
-	// chunks of commitmentChunkKeys. Each chunk gets a FRESH Updates, so the
+	// A0 — chunked Touch+Process. When commitmentChunkKeys > 0, build the trie
+	// INCREMENTALLY in bounded chunks: each chunk gets a FRESH Updates, so the
 	// upstream Updates.keys dedup map (~100 B/unique-key) AND the per-nibble
 	// etl working set stay bounded by the chunk size instead of growing to
 	// O(total-keys) — tens of GB across a 100 GB alloc if done one-shot. The
-	// pph is REUSED across chunks (no Reset), so the trie accumulates;
+	// hph is REUSED across chunks (no Reset), so the trie accumulates;
 	// ctx.Branch (the live branchStore) feeds each chunk the branches written
-	// by earlier chunks. This is upstream's incremental per-block model —
-	// CanDoConcurrentNext (hex_concurrent_patricia_hashed.go:330) exists
-	// precisely because Process is meant to be called repeatedly.
+	// by earlier chunks — upstream's incremental per-block model.
 	//
-	// SAFETY DEFAULT: commitmentChunkKeys is large, so any alloc at or below
-	// it runs as a SINGLE Process — byte-identical to the proven single-shot
-	// path (the existing golden/H4 tests exercise exactly this). Multi-chunk
-	// only engages at bench scale; TestComputeGenesisRoot_ChunkedVsSingle
-	// pins that a forced-small chunk size yields the SAME root as one shot.
-	//
-	// VALIDATION PENDING ON BENCH (cgo tests don't link on macOS, see plan
-	// Tier 0/3): the incremental-concurrent multi-chunk path must be
-	// confirmed against golden roots + cross-verify before it is relied on.
-	// Single-chunk (the production default for sub-chunk allocs) is the
-	// already-validated A2 behaviour.
+	// commitmentChunkKeys==0 (default) → ONE concurrent Process: the
+	// bench-validated single-shot path (TestH4: erigon HPH root == geth MPT
+	// root). commitmentChunkKeys>0 → SERIAL incremental chunks (bounded RAM);
+	// TestComputeGenesisRoot_ChunkedVsSingle pins that a forced-small chunk
+	// size yields the SAME root + branch set as one shot.
 	hph := erigoncommitment.NewHexPatriciaHashed(20 /* accountKeyLen */, rootCtx)
 	pph := erigoncommitment.NewConcurrentPatriciaHashed(hph, rootCtx)
 	defer pph.Close()
+
+	// commitmentChunkKeys <= 0 → ONE concurrent Process (the validated A2
+	// single-shot path: 16-way ParallelHashSort, full t.keys in RAM). > 0 →
+	// SERIAL incremental chunks: each chunk a fresh Updates (bounds t.keys +
+	// etl) run through the SERIAL HexPatriciaHashed.Process, reusing hph (no
+	// Reset) with ctx.Branch reading earlier chunks' branches from the live
+	// store. Serial is upstream's proven per-block incremental engine
+	// (SharedDomainsCommitmentContext.ComputeCommitment reuses one trie +
+	// Process per block, state carried in-memory) and handles the leaf→branch
+	// transition the CONCURRENT incremental path mishandles.
+	useConcurrent := commitmentChunkKeys <= 0
 
 	var (
 		rootBytes    []byte
@@ -225,11 +234,11 @@ func ComputeGenesisRoot(commitmentInputStore, branchesOut *streamsort.Store, tmp
 		placeholder  erigoncommitment.Update
 	)
 	newChunk := func() {
-		// ModeDirect + concurrent up-front, as the single-shot path always
-		// did (ParallelHashSort only requires mode==ModeDirect &&
-		// sortPerNibble==true; the CanDoConcurrentNext gate is a hint).
 		upds = erigoncommitment.NewUpdates(erigoncommitment.ModeDirect, tmpDir, erigoncommitment.KeyToHexNibbleHash)
-		upds.SetConcurrentCommitment(true)
+		if useConcurrent {
+			// ParallelHashSort needs mode==ModeDirect && sortPerNibble==true.
+			upds.SetConcurrentCommitment(true)
+		}
 		chunkKeys = 0
 	}
 	processChunk := func() error {
@@ -243,21 +252,29 @@ func ComputeGenesisRoot(commitmentInputStore, branchesOut *streamsort.Store, tmp
 			upds = nil
 			return nil
 		}
-		rb, err := pph.Process(context.Background(), upds, "state-actor-genesis", nil,
-			erigoncommitment.WarmupConfig{CtxFactory: factory})
+		var (
+			rb  []byte
+			err error
+		)
+		if useConcurrent {
+			rb, err = pph.Process(context.Background(), upds, "state-actor-genesis", nil,
+				erigoncommitment.WarmupConfig{CtxFactory: factory})
+		} else {
+			rb, err = hph.Process(context.Background(), upds, "state-actor-genesis", nil,
+				erigoncommitment.WarmupConfig{})
+		}
 		if err != nil {
 			return fmt.Errorf("Process: %w", err)
 		}
 		rootBytes = rb
-		// Flush this chunk's root-level deferred branch updates into the live
-		// store. ParallelHashSort returns rootHash WITHOUT flushing the root
-		// HPH's deferred branch (SpawnSubTrie disables defer only for the
-		// per-nibble mounts, not the root), so without this the root-level
-		// (empty-prefix, compact-key 0x10) branch is missing → divergent root
-		// + a daemon FCU panic on SeekCommitment. Doing it per chunk also
-		// makes the root branch available to the next chunk's reads, and for
-		// chunkKeys==1-chunk it is exactly the single-shot flush.
-		if err := pph.RootTrie().ApplyAndClearInlineDeferredUpdates(); err != nil {
+		// Flush the root HPH's deferred branch updates into the live store.
+		// ParallelHashSort (concurrent) returns rootHash WITHOUT flushing the
+		// root's deferred branch (SpawnSubTrie disables defer only for the
+		// per-nibble mounts), so this is REQUIRED there; the serial Process
+		// already applies deferred at its tail, so the call is a harmless
+		// no-op. Either way it guarantees each chunk's root branch is in the
+		// live store for the next chunk's reads. (hph == pph.RootTrie().)
+		if err := hph.ApplyAndClearInlineDeferredUpdates(); err != nil {
 			return fmt.Errorf("ApplyAndClearInlineDeferredUpdates: %w", err)
 		}
 		processedAny = true

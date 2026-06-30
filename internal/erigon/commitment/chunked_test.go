@@ -22,15 +22,12 @@ import (
 // validation for the multi-chunk path that production only exercises at
 // bench scale.
 func TestComputeGenesisRoot_ChunkedVsSingle(t *testing.T) {
-	// WIP — bench (erigon 14273f79a6) showed the multi-chunk concurrent
-	// path fails: "empty branch data read during unfold, prefix 00 ...
-	// deleted=true" when chunk N writes a leaf under a nibble and chunk N+1
-	// adds a second key there expecting a branch (a leaf→branch transition
-	// the concurrent incremental unfold mishandles). Production runs
-	// single-shot (commitmentChunkKeys default 0). Unskip this once the
-	// incremental-concurrent contract is fixed; it is the equivalence gate.
-	t.Skip("A0 multi-chunk incremental commitment is WIP — concurrent unfold mishandles leaf→branch across chunks")
-
+	// Gate for A0: forcing a tiny chunk size (serial incremental path) must
+	// yield the byte-identical root + branch set as the single concurrent
+	// Process. The earlier CONCURRENT incremental attempt failed here
+	// ("empty branch data read during unfold ... leaf→branch"); the serial
+	// per-chunk engine (upstream's proven per-block model) fixes it.
+	//
 	// Alloc with enough commitment keys (accounts + storage) to span many
 	// chunks at chunk size 3.
 	accounts := make([]Account, 0, 12)
