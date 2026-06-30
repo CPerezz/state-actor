@@ -125,7 +125,13 @@ func EncodeStorageUpdate(value []byte) []byte {
 // 16 workers reading concurrently is fine. `mergedBranches` stays in
 // memory: bounded by trie depth × entry count (~few hundred MB max
 // even at 25 GB scale, since branches are O(N) not O(StorageSlots)).
-func ComputeGenesisRoot(commitmentInputStore *streamsort.Store) (Result, error) {
+// tmpDir is the on-disk scratch directory for the upstream etl.Collector
+// spill (the per-nibble (hashedKey, plainKey) runs). It MUST point at real
+// bind-mounted disk (e.g. cfg.DBPath): the previous "" passed os.TempDir(),
+// which on bench hosts is tmpfs (RAM-backed), so the ~28 GB of touched-key
+// spill was actually resident memory. The path is pure scratch — it cannot
+// affect the sort order, the hashing, or the computed root.
+func ComputeGenesisRoot(commitmentInputStore *streamsort.Store, tmpDir string) (Result, error) {
 	mergedBranches := make(map[string][]byte)
 	var mergeMu sync.Mutex
 
@@ -165,7 +171,7 @@ func ComputeGenesisRoot(commitmentInputStore *streamsort.Store) (Result, error) 
 
 	upds := erigoncommitment.NewUpdates(
 		erigoncommitment.ModeDirect,
-		"",
+		tmpDir,
 		erigoncommitment.KeyToHexNibbleHash,
 	)
 	// Force the parallel path on the very first Process call. Upstream's
@@ -286,7 +292,8 @@ func ComputeGenesisRootFromAccounts(accounts []Account) (Result, error) {
 	if err := store.Finalize(); err != nil {
 		return Result{}, fmt.Errorf("ComputeGenesisRootFromAccounts: Finalize: %w", err)
 	}
-	return ComputeGenesisRoot(store)
+	// Tests/H4-invariance use tiny inputs; "" (os.TempDir) is fine here.
+	return ComputeGenesisRoot(store, "")
 }
 
 // subtreeCtx implements erigoncommitment.PatriciaContext over a

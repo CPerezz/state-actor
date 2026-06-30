@@ -429,9 +429,11 @@ func writeSnapshots(
 	}
 
 	// -- Step 4: HPH commitment walk over commitmentInputStore.
-	// ctx.Account/Storage callbacks read from streamsort.Get
-	// (disk-backed). branches map stays in memory (bounded).
-	result, err := internalcommitment.ComputeGenesisRoot(commitmentInputStore)
+	// ctx.Account/Storage callbacks read from streamsort.Get (disk-backed).
+	// cfg.DBPath (real bind-mounted disk) is the etl spill dir — see A1 in
+	// ComputeGenesisRoot; "" would spill the ~28 GB touched-key runs to
+	// tmpfs (RAM) on the bench host.
+	result, err := internalcommitment.ComputeGenesisRoot(commitmentInputStore, cfg.DBPath)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("writeSnapshots: ComputeGenesisRoot: %w", err)
 	}
