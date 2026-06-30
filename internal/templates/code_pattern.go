@@ -3,6 +3,7 @@ package templates
 import (
 	"encoding/binary"
 	"fmt"
+	"slices"
 
 	"github.com/ethereum/go-ethereum/common"
 )
@@ -25,6 +26,17 @@ const (
 	// byte at offset 0x5FFF, then drops off the code (no STOP needed —
 	// the EVM treats end-of-code as a clean exit).
 	CodePatternUniqueJumpdestPreAmsterdam = "unique_jumpdest_pre_amsterdam"
+
+	// CodePatternMaxSamePreAmsterdam — 24576-byte identical runtime
+	// (STOP at 0x00, 24575 JUMPDESTs). Unlike unique patterns, all copies
+	// share one code hash (no embedded address). Used by
+	// AccountMode.EXISTING_CONTRACT_SAME; CodePatternRuntimeSize = 0.
+	CodePatternMaxSamePreAmsterdam = "max_same_pre_amsterdam"
+
+	// CodePatternMaxDiffPreAmsterdam — 24576-byte runtime with embedded
+	// address at bytes 0x0C..0x20 (STOP + padding + address + JUMPDESTs).
+	// Byte-unique per contract. Used by AccountMode.EXISTING_CONTRACT_DIFF.
+	CodePatternMaxDiffPreAmsterdam = "max_diff_pre_amsterdam"
 )
 
 // preAmsterdamMaxCodeSize is the EIP-170 contract-code limit applied
@@ -32,25 +44,29 @@ const (
 // amsterdam pattern variant will live alongside this one when scheduled.
 const preAmsterdamMaxCodeSize = 0x6000 // 24576 bytes.
 
+// single source of truth for recognized pattern names.
+var knownCodePatterns = []string{
+	CodePatternUniqueJumpdestPreAmsterdam,
+	CodePatternMaxSamePreAmsterdam,
+	CodePatternMaxDiffPreAmsterdam,
+}
+
 // IsKnownCodePattern reports whether the given string is one of the
 // recognized named code patterns. Used at parameter-validate time.
 func IsKnownCodePattern(name string) bool {
-	switch name {
-	case CodePatternUniqueJumpdestPreAmsterdam:
-		return true
-	}
-	return false
+	return slices.Contains(knownCodePatterns, name)
 }
 
-// CodePatternRuntimeSize returns the per-derived-contract runtime size
-// in bytes for a known pattern name; 0 for unknown names. Used to
-// estimate resident memory: pattern runtimes are byte-unique per
-// derived address, so the full count × size set stays reachable (via
-// generator.Config.GenesisCode) for the entire run.
+// CodePatternRuntimeSize returns runtime size for unique patterns,
+// 0 for unknown/shared patterns. Used for resident memory estimation.
 func CodePatternRuntimeSize(name string) uint64 {
 	switch name {
 	case CodePatternUniqueJumpdestPreAmsterdam:
 		return preAmsterdamMaxCodeSize
+	case CodePatternMaxDiffPreAmsterdam:
+		return preAmsterdamMaxCodeSize
+	case CodePatternMaxSamePreAmsterdam:
+		return 0
 	}
 	return 0
 }
@@ -107,6 +123,31 @@ func BuildUniqueJumpdestRuntimePreAmsterdam(addr common.Address) []byte {
 	return out
 }
 
+// appendJumpdestFillSeed appends the shared initcode prologue for
+// pre-Amsterdam max-size patterns: fills mem[0:0x8000] with JUMPDESTs
+// via PUSH32 + MCOPY loop. The unique, max-same, and max-diff patterns
+// all build on this prefix; kept centralized to prevent hash drift.
+func appendJumpdestFillSeed(buf []byte) []byte {
+	// PUSH32 (32 × JUMPDEST); PUSH1 0x00; MSTORE.
+	buf = append(buf, 0x7F) // PUSH32
+	for range 32 {
+		buf = append(buf, 0x5B)
+	}
+	buf = append(buf, 0x60, 0x00) // PUSH1 0
+	buf = append(buf, 0x52)       // MSTORE
+
+	// Doubling MCOPY: sizes {32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384}.
+	// Push order: len, src, dst (MCOPY pops with dst on top).
+	for s := uint(5); s < 15; s++ {
+		size := uint64(1) << s
+		buf = append(buf, pushImmediate(size)...) // len
+		buf = append(buf, 0x60, 0x00)             // PUSH1 0 (src)
+		buf = append(buf, pushImmediate(size)...) // dst
+		buf = append(buf, 0x5E)                   // MCOPY
+	}
+	return buf
+}
+
 // BuildUniqueJumpdestInitcodePreAmsterdam returns the initcode that —
 // if run — would deploy the unique-jumpdest runtime above. State-actor
 // never executes this initcode; only its keccak256 hash is used by
@@ -125,26 +166,8 @@ func BuildUniqueJumpdestRuntimePreAmsterdam(addr common.Address) []byte {
 //  5. PUSH2 0x6000; PUSH1 0x00; RETURN — emit the first 0x6000 bytes
 //     of memory as the runtime.
 func BuildUniqueJumpdestInitcodePreAmsterdam() []byte {
-	var buf []byte
-
-	// 1. PUSH32 (32 × JUMPDEST); PUSH1 0x00; MSTORE.
-	buf = append(buf, 0x7F) // PUSH32
-	for range 32 {
-		buf = append(buf, 0x5B)
-	}
-	buf = append(buf, 0x60, 0x00) // PUSH1 0
-	buf = append(buf, 0x52)       // MSTORE
-
-	// 2. Doubling MCOPY: size in {32, 64, 128, 256, 512, 1024, 2048,
-	//    4096, 8192, 16384}. MCOPY pops (dst, src, len) with dst on top,
-	//    so we push len first, then src, then dst.
-	for s := uint(5); s < 15; s++ {
-		size := uint64(1) << s
-		buf = append(buf, pushImmediate(size)...) // len
-		buf = append(buf, 0x60, 0x00)             // PUSH1 0 (src)
-		buf = append(buf, pushImmediate(size)...) // dst
-		buf = append(buf, 0x5E)                   // MCOPY
-	}
+	// Step 1 and 2: seed mem[0:0x8000] with JUMPDEST (shared prologue).
+	buf := appendJumpdestFillSeed(nil)
 
 	// 3. PUSH32 entry; PUSH1 0x00; MSTORE.
 	// entry = PUSH2 0x5FFF; JUMP (4 bytes) + JUMPDEST × 28.
@@ -184,6 +207,86 @@ func BuildUniqueJumpdestInitcodePreAmsterdam() []byte {
 	return buf
 }
 
+// maxSameRuntimePreAmsterdam is the shared runtime for max-same pattern.
+// All derived contracts alias this read-only slice (byte-identical).
+var maxSameRuntimePreAmsterdam = buildMaxSameRuntimePreAmsterdam()
+
+// buildMaxSameRuntimePreAmsterdam returns the 24576-byte runtime: a STOP
+// (0x00) at offset 0 so a call halts immediately, JUMPDEST (0x5B) for
+// every other byte. Matches the deployed code of execution-specs
+// UniqueMaxContractInitcode(diff=False).
+func buildMaxSameRuntimePreAmsterdam() []byte {
+	out := make([]byte, preAmsterdamMaxCodeSize)
+	for i := range out {
+		out[i] = 0x5B // JUMPDEST
+	}
+	out[0] = 0x00 // STOP — a call to the contract halts at byte 0.
+	return out
+}
+
+// BuildMaxSameInitcodePreAmsterdam returns initcode that deploys a
+// STOP + JUMPDEST-sea runtime.
+// Vendored to match bench test CREATE2 derivation. Only the hash is used
+// (initcode never executes).
+//
+// Steps: fill mem with JUMPDESTs, overwrite mem[0] with STOP, return 0x6000 bytes.
+func BuildMaxSameInitcodePreAmsterdam() []byte {
+	// 1+2. Seed mem[0:0x8000] with JUMPDEST (shared prologue).
+	buf := appendJumpdestFillSeed(nil)
+
+	// 3. MSTORE8(0, 0): MSTORE8 pops (offset, value) with offset on top,
+	// so push value first, then offset.
+	buf = append(buf, 0x60, 0x00) // PUSH1 0 (value)
+	buf = append(buf, 0x60, 0x00) // PUSH1 0 (offset)
+	buf = append(buf, 0x53)       // MSTORE8
+
+	// 4. PUSH2 0x6000; PUSH1 0x00; RETURN.
+	buf = append(buf, 0x61, 0x60, 0x00) // PUSH2 0x6000 (length)
+	buf = append(buf, 0x60, 0x00)       // PUSH1 0 (offset)
+	buf = append(buf, 0xF3)             // RETURN
+
+	return buf
+}
+
+// BuildMaxDiffRuntimePreAmsterdam returns the 24576-byte runtime with
+// embedded address (STOP + padding + address + JUMPDESTs at 0x0C..0x20).
+// Byte-unique per contract. Matches UniqueMaxContractInitcode(diff=True).
+func BuildMaxDiffRuntimePreAmsterdam(addr common.Address) []byte {
+	out := make([]byte, preAmsterdamMaxCodeSize)
+	for i := range out {
+		out[i] = 0x5B // JUMPDEST
+	}
+	// Bytes 0x00..0x0C — STOP at byte 0 plus 11 zero padding bytes
+	// (MSTORE(0, ADDRESS) writes the address right-aligned in 32 bytes).
+	for i := 0; i < 0x0C; i++ {
+		out[i] = 0x00
+	}
+	// Bytes 0x0C..0x20 — the 20-byte address.
+	copy(out[0x0C:0x20], addr[:])
+	// Bytes 0x20..0x6000 stay JUMPDEST from the fill.
+	return out
+}
+
+// BuildMaxDiffInitcodePreAmsterdam returns initcode with embedded ADDRESS.
+// Vendored for CREATE2; only hash used (never executes).
+func BuildMaxDiffInitcodePreAmsterdam() []byte {
+	// 1+2. Seed mem[0:0x8000] with JUMPDEST (shared prologue).
+	buf := appendJumpdestFillSeed(nil)
+
+	// 3. MSTORE(0, ADDRESS): MSTORE pops (offset, value) with offset on
+	// top, so push value (ADDRESS) first, then offset.
+	buf = append(buf, 0x30)       // ADDRESS (value)
+	buf = append(buf, 0x60, 0x00) // PUSH1 0 (offset)
+	buf = append(buf, 0x52)       // MSTORE
+
+	// 4. PUSH2 0x6000; PUSH1 0x00; RETURN.
+	buf = append(buf, 0x61, 0x60, 0x00) // PUSH2 0x6000 (length)
+	buf = append(buf, 0x60, 0x00)       // PUSH1 0 (offset)
+	buf = append(buf, 0xF3)             // RETURN
+
+	return buf
+}
+
 // pushImmediate emits the smallest PUSHN + immediate bytes that pushes
 // `v` onto the EVM stack. Used by the initcode builder to keep the
 // emitted blob compact (32 → PUSH1, 256 → PUSH2, …, up to PUSH8 since
@@ -213,6 +316,10 @@ func codePatternRuntimeFor(name string, addr common.Address) ([]byte, error) {
 	switch name {
 	case CodePatternUniqueJumpdestPreAmsterdam:
 		return BuildUniqueJumpdestRuntimePreAmsterdam(addr), nil
+	case CodePatternMaxSamePreAmsterdam:
+		return maxSameRuntimePreAmsterdam, nil
+	case CodePatternMaxDiffPreAmsterdam:
+		return BuildMaxDiffRuntimePreAmsterdam(addr), nil
 	}
 	return nil, fmt.Errorf("unknown code_pattern %q", name)
 }
@@ -226,6 +333,10 @@ func codePatternInitcodeFor(name string) ([]byte, error) {
 	switch name {
 	case CodePatternUniqueJumpdestPreAmsterdam:
 		return BuildUniqueJumpdestInitcodePreAmsterdam(), nil
+	case CodePatternMaxSamePreAmsterdam:
+		return BuildMaxSameInitcodePreAmsterdam(), nil
+	case CodePatternMaxDiffPreAmsterdam:
+		return BuildMaxDiffInitcodePreAmsterdam(), nil
 	}
 	return nil, fmt.Errorf("unknown code_pattern %q", name)
 }
