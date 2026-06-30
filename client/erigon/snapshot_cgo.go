@@ -6,7 +6,9 @@ import (
 	"context"
 	"fmt"
 	mrand "math/rand"
+	"os"
 	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 
@@ -63,11 +65,17 @@ import (
 var fullRange = snap.StepRange{From: 0, To: 1}
 
 // erigonWorkers is the size of the Phase 1 autofill encode-worker pool.
-// Defaults to min(NumCPU, 8) to match the proven cap from reth, besu,
-// and nethermind (client/reth/spec_storage_streaming_cgo.go:95-104,
-// client/besu/state_writer_cgo.go:298, client/nethermind/phase0_cgo.go).
-// Tests override via setErigonWorkers.
+// Defaults to min(NumCPU, 8) to match the proven cap from reth, besu, and
+// nethermind, but is overridable via STATE_ACTOR_ERIGON_WORKERS to exploit
+// many-core hosts (the RNG draw stays single-threaded on the main goroutine
+// for cross-client invariance; only the CPU-bound encode is parallelised,
+// so a larger pool is safe for the root). Tests override via setErigonWorkers.
 var erigonWorkers = func() int {
+	if v := os.Getenv("STATE_ACTOR_ERIGON_WORKERS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
+			return n
+		}
+	}
 	n := runtime.NumCPU()
 	if n > 8 {
 		n = 8
@@ -84,6 +92,19 @@ func setErigonWorkers(n int) (restore func()) {
 	prev := erigonWorkers
 	erigonWorkers = n
 	return func() { erigonWorkers = prev }
+}
+
+// envCacheBytes returns the byte size from a "<N> GiB" env var, or
+// defaultGB GiB if unset/invalid. Used to scale Pebble block caches to the
+// host's RAM for the read-heavy commitment phase.
+func envCacheBytes(envVar string, defaultGB int) int64 {
+	gb := defaultGB
+	if v := os.Getenv(envVar); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			gb = n
+		}
+	}
+	return int64(gb) << 30
 }
 
 // entityWork is one alloc entry queued for an encode-worker. The main
@@ -182,10 +203,11 @@ func writeSnapshots(
 	// cache the LSM SSTs miss on most reads. Bump the cache here so
 	// the Pebble block cache holds a non-trivial fraction of the
 	// working set; benchmarking showed 50+ min Phase 2 wall at default.
-	// Tunable via the environment-derived future Options if needed;
-	// 4 GiB is the floor that the bench host (240 GiB RAM) can spare.
+	// Tunable via STATE_ACTOR_COMMITMENT_CACHE_GB (default 4 GiB). On a
+	// many-core / large-RAM host, a bigger cache keeps the commitment walk's
+	// random Account/Storage Gets in RAM, which is the dominant Phase-2 cost.
 	commitmentInputStore, err := streamsort.NewWithOptions(cfg.DBPath, streamsort.Options{
-		BlockCacheBytes: 4 << 30,
+		BlockCacheBytes: envCacheBytes("STATE_ACTOR_COMMITMENT_CACHE_GB", 4),
 	})
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("writeSnapshots: open commitmentInput streamsort: %w", err)

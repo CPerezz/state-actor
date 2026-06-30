@@ -5,6 +5,7 @@ package commitment
 import (
 	"fmt"
 	"os"
+	"strconv"
 
 	"github.com/cockroachdb/pebble"
 )
@@ -24,23 +25,40 @@ import (
 // prefix (sorted single-pass folds each prefix once and never re-descends
 // it), so get() returns nil there — byte-identical to the old map path.
 type branchStore struct {
-	dir string
-	db  *pebble.DB
+	dir   string
+	db    *pebble.DB
+	cache *pebble.Cache
 }
 
 // newBranchStore opens a fresh temp Pebble DB under tmpDir (empty →
-// os.TempDir()).
+// os.TempDir()). The block cache is the dominant speed lever for the
+// CHUNKED/incremental path, where every chunk after the first re-reads
+// earlier chunks' branches via ctx.Branch: a cache that holds the hot branch
+// set keeps those reads in RAM. Sized by STATE_ACTOR_BRANCH_CACHE_GB
+// (default 1 GiB). A 256 MiB memtable cuts L0 churn under the write load.
 func newBranchStore(tmpDir string) (*branchStore, error) {
 	dir, err := os.MkdirTemp(tmpDir, "commitment-branches-*")
 	if err != nil {
 		return nil, fmt.Errorf("commitment: mkdir branch store: %w", err)
 	}
-	db, err := pebble.Open(dir, &pebble.Options{DisableWAL: true})
+	cacheBytes := int64(1) << 30
+	if v := os.Getenv("STATE_ACTOR_BRANCH_CACHE_GB"); v != "" {
+		if n, perr := strconv.Atoi(v); perr == nil && n > 0 {
+			cacheBytes = int64(n) << 30
+		}
+	}
+	cache := pebble.NewCache(cacheBytes)
+	db, err := pebble.Open(dir, &pebble.Options{
+		DisableWAL:   true,
+		Cache:        cache,
+		MemTableSize: 256 << 20,
+	})
 	if err != nil {
+		cache.Unref()
 		_ = os.RemoveAll(dir)
 		return nil, fmt.Errorf("commitment: open branch store: %w", err)
 	}
-	return &branchStore{dir: dir, db: db}, nil
+	return &branchStore{dir: dir, db: db, cache: cache}, nil
 }
 
 // set writes one branch (last-write-wins on a re-fold). Safe for the 16
@@ -87,11 +105,15 @@ func (b *branchStore) iterate(yield func(prefix, data []byte) error) error {
 	return it.Error()
 }
 
-// close releases the DB and removes the temp dir. Idempotent.
+// close releases the DB + cache and removes the temp dir. Idempotent.
 func (b *branchStore) close() {
 	if b.db != nil {
 		_ = b.db.Close()
 		b.db = nil
+	}
+	if b.cache != nil {
+		b.cache.Unref()
+		b.cache = nil
 	}
 	if b.dir != "" {
 		_ = os.RemoveAll(b.dir)
