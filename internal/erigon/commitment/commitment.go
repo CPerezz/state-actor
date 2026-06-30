@@ -101,13 +101,22 @@ func EncodeStorageUpdate(value []byte) []byte {
 	return upd.Encode(nil, numBuf[:])
 }
 
-// commitmentChunkKeys bounds how many keys each incremental commitment
-// chunk Touches before a Process flush (A0). One chunk's Updates.keys dedup
-// map + etl working set are ~O(commitmentChunkKeys) — independent of total
-// alloc size. The default is large enough that typical allocs run as a
-// SINGLE Process (the proven single-shot path); only bench-scale allocs
-// chunk. setCommitmentChunkKeys overrides it for the chunked-vs-single test.
-var commitmentChunkKeys = 50_000_000
+// commitmentChunkKeys, when > 0, bounds how many keys each incremental
+// commitment chunk Touches before a Process flush (A0), so one chunk's
+// Updates.keys dedup map + etl working set are ~O(commitmentChunkKeys)
+// instead of O(total-keys) (~tens of GB across a 100 GB alloc).
+//
+// DEFAULT 0 = DISABLED: the whole alloc runs as a SINGLE Process — the
+// bench-validated single-shot path (TestH4 confirms erigon HPH == geth MPT
+// root; the other commitment tests pass). Multi-chunk incremental is WIP:
+// the bench revealed the CONCURRENT unfold mishandles a leaf→branch
+// transition ACROSS chunks ("empty branch data read during unfold, prefix
+// 00 ... deleted=true") — when chunk N writes a leaf under a nibble and
+// chunk N+1 adds a second key there expecting a branch. Until that is fixed
+// (TestComputeGenesisRoot_ChunkedVsSingle is the gate, currently skipped),
+// production runs single-shot and t.keys (~100 B/unique-key) is the RAM
+// floor. setCommitmentChunkKeys overrides this in the (skipped) gate test.
+var commitmentChunkKeys = 0
 
 // setCommitmentChunkKeys swaps commitmentChunkKeys for the duration of a
 // test; the returned func restores the previous value.
@@ -263,7 +272,7 @@ func ComputeGenesisRoot(commitmentInputStore, branchesOut *streamsort.Store, tmp
 	if err := commitmentInputStore.Iterate(func(plainKey, _ []byte) error {
 		upds.TouchPlainKeyDirect(string(plainKey), &placeholder)
 		chunkKeys++
-		if chunkKeys >= commitmentChunkKeys {
+		if commitmentChunkKeys > 0 && chunkKeys >= commitmentChunkKeys {
 			if err := processChunk(); err != nil {
 				return err
 			}
