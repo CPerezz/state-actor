@@ -7,7 +7,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"sync"
 
 	gethcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -44,9 +43,18 @@ type Account struct {
 
 // Result carries the outputs of a successful commitment computation.
 type Result struct {
-	Root        gethcommon.Hash
+	Root     gethcommon.Hash
+	HPHState []byte
+	// BranchCount is the number of distinct branch-node prefixes the walk
+	// produced (== the old len(BranchNodes)). Production reads it as the
+	// commitment-domain key count for WriteCommitment; the branch bytes
+	// themselves are streamed straight into the caller-supplied branchesOut.
+	BranchCount uint64
+	// BranchNodes is populated ONLY by ComputeGenesisRootFromAccounts (the
+	// small-input test / H4-invariance wrapper) for byte-level determinism
+	// assertions. Production ComputeGenesisRoot leaves it nil — branches go
+	// to branchesOut on disk, never a RAM map.
 	BranchNodes map[string][]byte
-	HPHState    []byte
 }
 
 // EncodeAccountUpdate returns the Update.Encode bytes for an account
@@ -116,58 +124,47 @@ func EncodeStorageUpdate(value []byte) []byte {
 //     rootMu. After all 16 finish, root.fold() produces the final hash
 //     from the 16 child cells via the standard foldBranch path.
 //   - Subtree branch keys are disjoint by first nibble — workers write
-//     PutBranch into PER-WORKER context maps; closeFn merges into the
-//     shared mergedBranches under mergeMu (no overwrite ambiguity).
+//     PutBranch into the SHARED live branch store (a temp Pebble KV);
+//     concurrent Set on disjoint prefixes has no overwrite hazard.
 //
-// Memory profile: the in-memory `state map` of the original
-// implementation is GONE — Account/Storage lookups during the HPH walk
-// hit Pebble via streamsort.Get. Pebble's read path is thread-safe so
-// 16 workers reading concurrently is fine. `mergedBranches` stays in
-// memory: bounded by trie depth × entry count (~few hundred MB max
-// even at 25 GB scale, since branches are O(N) not O(StorageSlots)).
+// Memory profile: Account/Storage lookups during the HPH walk hit Pebble
+// via streamsort.Get (thread-safe; 16 concurrent readers fine). Branches
+// no longer accumulate in a RAM map — the old mergedBranches was
+// Θ(total-keys) (storage slots are hashed into the same unified trie), so
+// at bench scale it was tens of GB. They now stream into the live
+// branchStore (bounded by its Pebble memtable+cache) and are dumped into
+// the caller's write-once branchesOut at the end.
+//
+// branchesOut is the write-once streamsort WriteCommitment will consume;
+// ComputeGenesisRoot Puts the sorted branches into it but does NOT
+// Finalize (WriteCommitment appends KeyCommitmentState then Finalizes).
+//
 // tmpDir is the on-disk scratch directory for the upstream etl.Collector
 // spill (the per-nibble (hashedKey, plainKey) runs). It MUST point at real
 // bind-mounted disk (e.g. cfg.DBPath): the previous "" passed os.TempDir(),
 // which on bench hosts is tmpfs (RAM-backed), so the ~28 GB of touched-key
 // spill was actually resident memory. The path is pure scratch — it cannot
 // affect the sort order, the hashing, or the computed root.
-func ComputeGenesisRoot(commitmentInputStore *streamsort.Store, tmpDir string) (Result, error) {
-	mergedBranches := make(map[string][]byte)
-	var mergeMu sync.Mutex
+func ComputeGenesisRoot(commitmentInputStore, branchesOut *streamsort.Store, tmpDir string) (Result, error) {
+	// Live read-write branch sink shared by all 16 nibble-disjoint workers
+	// + the root ctx. Replaces the in-memory mergedBranches map. Created
+	// under tmpDir (real disk).
+	branches, err := newBranchStore(tmpDir)
+	if err != nil {
+		return Result{}, fmt.Errorf("commitment.ComputeGenesisRoot: branch store: %w", err)
+	}
+	defer branches.close()
 
-	// factory yields a fresh subtreeCtx per worker — each owns a private
-	// branches map. closeFn merges that map into mergedBranches when the
-	// worker finishes. Upstream's ParallelHashSort calls factory both
-	// during unfoldRoot (16 initial per-mount ctxs, populated with the
-	// empty initial branches) and per-worker (16 fresh ctxs that absorb
-	// followAndUpdate PutBranch writes). Both lifecycle paths funnel
-	// through the same merge.
+	// factory yields a subtreeCtx bound to the SHARED live branch store.
+	// Workers write disjoint first-nibble prefixes, so concurrent PutBranch
+	// (pebble Set) has no key-overwrite hazard and needs no per-worker merge.
 	factory := func() (erigoncommitment.PatriciaContext, func()) {
-		sub := &subtreeCtx{
-			commitmentInputStore: commitmentInputStore,
-			branches:             make(map[string][]byte),
-		}
-		closeFn := func() {
-			if len(sub.branches) == 0 {
-				return
-			}
-			mergeMu.Lock()
-			for k, v := range sub.branches {
-				mergedBranches[k] = v
-			}
-			mergeMu.Unlock()
-		}
-		return sub, closeFn
+		return &subtreeCtx{commitmentInputStore: commitmentInputStore, branches: branches}, func() {}
 	}
 
-	// rootCtx is the context attached to the root HPH itself (consulted
-	// by unfoldRoot's needUnfolding/unfold walk and by the final
-	// root.fold() pass that builds the depth-0 branch). For a genesis
-	// trie the initial branches map is empty so unfoldRoot is a no-op;
-	// the root-level PutBranch from foldBranch lands here, then merges
-	// via rootClose.
-	rootCtx, rootClose := factory()
-	defer rootClose()
+	// rootCtx shares the same store; the root-level PutBranch from foldBranch
+	// (and the ApplyAndClearInlineDeferredUpdates flush below) lands in it.
+	rootCtx, _ := factory()
 
 	upds := erigoncommitment.NewUpdates(
 		erigoncommitment.ModeDirect,
@@ -246,7 +243,18 @@ func ComputeGenesisRoot(commitmentInputStore *streamsort.Store, tmpDir string) (
 		return Result{}, fmt.Errorf("commitment.ComputeGenesisRoot: EncodeCurrentState: %w", err)
 	}
 
-	return Result{Root: root, BranchNodes: mergedBranches, HPHState: hphState}, nil
+	// Dump the branches (ascending prefix order) into the caller's
+	// write-once commitment .kv streamsort, counting distinct prefixes for
+	// WriteCommitment's keyCount. branchesOut stays WRITING.
+	var branchCount uint64
+	if err := branches.iterate(func(prefix, data []byte) error {
+		branchCount++
+		return branchesOut.Put(prefix, data)
+	}); err != nil {
+		return Result{}, fmt.Errorf("commitment.ComputeGenesisRoot: dump branches: %w", err)
+	}
+
+	return Result{Root: root, HPHState: hphState, BranchCount: branchCount}, nil
 }
 
 // ComputeGenesisRootFromAccounts is a backward-compat wrapper for
@@ -293,35 +301,60 @@ func ComputeGenesisRootFromAccounts(accounts []Account) (Result, error) {
 		return Result{}, fmt.Errorf("ComputeGenesisRootFromAccounts: Finalize: %w", err)
 	}
 	// Tests/H4-invariance use tiny inputs; "" (os.TempDir) is fine here.
-	return ComputeGenesisRoot(store, "")
+	branchesOut, err := streamsort.New("")
+	if err != nil {
+		return Result{}, fmt.Errorf("ComputeGenesisRootFromAccounts: branchesOut streamsort.New: %w", err)
+	}
+	defer branchesOut.Close()
+
+	res, err := ComputeGenesisRoot(store, branchesOut, "")
+	if err != nil {
+		return Result{}, err
+	}
+
+	// Collect the streamed branches into a map so tests can make byte-level
+	// determinism + count assertions (production never does this — branches
+	// stay on disk). Iterate auto-finalizes the WRITING branchesOut.
+	branches := make(map[string][]byte)
+	if err := branchesOut.Iterate(func(k, v []byte) error {
+		branches[string(k)] = append([]byte(nil), v...)
+		return nil
+	}); err != nil {
+		return Result{}, fmt.Errorf("ComputeGenesisRootFromAccounts: collect branches: %w", err)
+	}
+	res.BranchNodes = branches
+	return res, nil
 }
 
 // subtreeCtx implements erigoncommitment.PatriciaContext over a
 // streamsort-backed commitmentInputStore (random-access via Pebble,
-// thread-safe read path) plus a PER-WORKER branches map.
+// thread-safe read path) plus the SHARED live branch store.
 //
 // Lifecycle: one subtreeCtx per ConcurrentPatriciaHashed worker (16 of
-// them inside ParallelHashSort) plus one for the root HPH. The
-// per-worker branches map is mutated only by that worker's
-// followAndUpdate PutBranch calls; on worker exit, the closeFn
-// returned by the factory merges it into a shared mergedBranches map
-// under mergeMu. Subtree branch keys are disjoint by first nibble so
-// the post-merge has no overwrite ambiguity.
+// them inside ParallelHashSort) plus one for the root HPH. All of them
+// point at the same *branchStore. Workers write disjoint first-nibble
+// prefixes, so concurrent PutBranch (pebble Set) and Branch (pebble Get)
+// are safe with no overwrite ambiguity — pebble's Set/Get are goroutine-
+// safe. Branch reads back prior writes, which is a no-op for a single
+// from-empty genesis Process (sorted single-pass never re-descends a
+// folded prefix) and the read path that makes incremental/chunked
+// commitment work.
 type subtreeCtx struct {
 	commitmentInputStore *streamsort.Store
-	branches             map[string][]byte
+	branches             *branchStore
 }
 
 func (c *subtreeCtx) Branch(prefix []byte) ([]byte, erigonkv.Step, error) {
-	if data, ok := c.branches[string(prefix)]; ok {
-		return data, 0, nil
+	data, err := c.branches.get(prefix)
+	if err != nil {
+		return nil, 0, err
 	}
-	return nil, 0, nil
+	return data, 0, nil
 }
 
 func (c *subtreeCtx) PutBranch(prefix []byte, data []byte, prevData []byte) error {
-	c.branches[string(prefix)] = append([]byte(nil), data...)
-	return nil
+	// pebble copies key+value internally, so no manual copy is needed.
+	return c.branches.set(prefix, data)
 }
 
 func (c *subtreeCtx) Account(plainKey []byte) (*erigoncommitment.Update, error) {

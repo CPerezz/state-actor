@@ -429,14 +429,26 @@ func writeSnapshots(
 	}
 
 	// -- Step 4: HPH commitment walk over commitmentInputStore.
+	// Create the commitment branchesStore (write-once .kv streamsort) BEFORE
+	// the walk: ComputeGenesisRoot streams the trie's branches straight into
+	// it (replacing the old in-memory mergedBranches map + the Step-5a copy
+	// loop). It is left WRITING for WriteCommitment's KeyCommitmentState Put
+	// + Finalize below.
+	branchesStore, err := streamsort.New(cfg.DBPath)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("writeSnapshots: open branches streamsort: %w", err)
+	}
+	defer branchesStore.Close()
+
 	// ctx.Account/Storage callbacks read from streamsort.Get (disk-backed).
-	// cfg.DBPath (real bind-mounted disk) is the etl spill dir — see A1 in
-	// ComputeGenesisRoot; "" would spill the ~28 GB touched-key runs to
-	// tmpfs (RAM) on the bench host.
-	result, err := internalcommitment.ComputeGenesisRoot(commitmentInputStore, cfg.DBPath)
+	// cfg.DBPath (real bind-mounted disk) is the etl spill dir (A1) AND the
+	// live branch-store dir; "" would spill the ~28 GB touched-key runs and
+	// the branches to tmpfs (RAM) on the bench host.
+	result, err := internalcommitment.ComputeGenesisRoot(commitmentInputStore, branchesStore, cfg.DBPath)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("writeSnapshots: ComputeGenesisRoot: %w", err)
 	}
+	nBranches := result.BranchCount
 	// KeyCommitmentState encodes (txNum=StepSize-1, blockNum=0): the
 	// "fat genesis" anchor. Genesis is made to OCCUPY the entire frozen
 	// step 0 by writing MaxTxNum[0]=StepSize-1 (see genesis_patch.go), so
@@ -461,20 +473,8 @@ func writeSnapshots(
 		return common.Hash{}, fmt.Errorf("writeSnapshots: encode KeyCommitmentState: %w", err)
 	}
 
-	// -- Step 5a: marshal the global branches map into a streamsort
-	// keyed by branch prefix (sorted for deterministic .kv output).
-	branchesStore, err := streamsort.New(cfg.DBPath)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("writeSnapshots: open branches streamsort: %w", err)
-	}
-	defer branchesStore.Close()
-	var nBranches uint64
-	for prefix, data := range result.BranchNodes {
-		if err := branchesStore.Put([]byte(prefix), data); err != nil {
-			return common.Hash{}, fmt.Errorf("writeSnapshots: put branch %x: %w", []byte(prefix), err)
-		}
-		nBranches++
-	}
+	// -- Step 5a: branchesStore is already populated (streamed by
+	// ComputeGenesisRoot in Step 4); nBranches = result.BranchCount.
 
 	// -- Step 5b: snap.NewWriter + parallel multi-range emit.
 	settings := snap.Settings{
