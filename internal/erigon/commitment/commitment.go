@@ -215,16 +215,18 @@ func ComputeGenesisRoot(commitmentInputStore, branchesOut *streamsort.Store, tmp
 	pph := erigoncommitment.NewConcurrentPatriciaHashed(hph, rootCtx)
 	defer pph.Close()
 
-	// commitmentChunkKeys <= 0 → ONE concurrent Process (the validated A2
-	// single-shot path: 16-way ParallelHashSort, full t.keys in RAM). > 0 →
-	// SERIAL incremental chunks: each chunk a fresh Updates (bounds t.keys +
-	// etl) run through the SERIAL HexPatriciaHashed.Process, reusing hph (no
-	// Reset) with ctx.Branch reading earlier chunks' branches from the live
-	// store. Serial is upstream's proven per-block incremental engine
-	// (SharedDomainsCommitmentContext.ComputeCommitment reuses one trie +
-	// Process per block, state carried in-memory) and handles the leaf→branch
-	// transition the CONCURRENT incremental path mishandles.
-	useConcurrent := commitmentChunkKeys <= 0
+	// Per-chunk engine (A0). commitmentChunkKeys <= 0 → a SINGLE concurrent
+	// Process (the validated A2 fast path; full t.keys in RAM). > 0 → bounded
+	// chunks where the FIRST chunk runs SERIAL to populate the root branch
+	// from empty, and every SUBSEQUENT chunk runs CONCURRENT (16-way
+	// ParallelHashSort) reusing hph (no Reset) with ctx.Branch reading earlier
+	// chunks' branches from the live store. This is upstream's idiomatic
+	// first-serial-then-concurrent pipeline: a concurrent ParallelHashSort
+	// over an EMPTY trie does not establish the root branch the next chunk's
+	// unfold needs (the "empty branch data read during unfold, prefix 00"
+	// failure), but the serial first Process does. So only the first chunk
+	// pays the serial cost; the bulk is concurrent → bounded RAM AND fast.
+	chunking := commitmentChunkKeys > 0
 
 	var (
 		rootBytes    []byte
@@ -233,9 +235,12 @@ func ComputeGenesisRoot(commitmentInputStore, branchesOut *streamsort.Store, tmp
 		processedAny bool
 		placeholder  erigoncommitment.Update
 	)
+	// chunkConcurrent reports whether THIS chunk uses the concurrent engine:
+	// always for single-Process; for chunking, every chunk after the first.
+	chunkConcurrent := func() bool { return !chunking || processedAny }
 	newChunk := func() {
 		upds = erigoncommitment.NewUpdates(erigoncommitment.ModeDirect, tmpDir, erigoncommitment.KeyToHexNibbleHash)
-		if useConcurrent {
+		if chunkConcurrent() {
 			// ParallelHashSort needs mode==ModeDirect && sortPerNibble==true.
 			upds.SetConcurrentCommitment(true)
 		}
@@ -256,7 +261,7 @@ func ComputeGenesisRoot(commitmentInputStore, branchesOut *streamsort.Store, tmp
 			rb  []byte
 			err error
 		)
-		if useConcurrent {
+		if chunkConcurrent() {
 			rb, err = pph.Process(context.Background(), upds, "state-actor-genesis", nil,
 				erigoncommitment.WarmupConfig{CtxFactory: factory})
 		} else {
