@@ -101,6 +101,22 @@ func EncodeStorageUpdate(value []byte) []byte {
 	return upd.Encode(nil, numBuf[:])
 }
 
+// commitmentChunkKeys bounds how many keys each incremental commitment
+// chunk Touches before a Process flush (A0). One chunk's Updates.keys dedup
+// map + etl working set are ~O(commitmentChunkKeys) — independent of total
+// alloc size. The default is large enough that typical allocs run as a
+// SINGLE Process (the proven single-shot path); only bench-scale allocs
+// chunk. setCommitmentChunkKeys overrides it for the chunked-vs-single test.
+var commitmentChunkKeys = 50_000_000
+
+// setCommitmentChunkKeys swaps commitmentChunkKeys for the duration of a
+// test; the returned func restores the previous value.
+func setCommitmentChunkKeys(n int) (restore func()) {
+	prev := commitmentChunkKeys
+	commitmentChunkKeys = n
+	return func() { commitmentChunkKeys = prev }
+}
+
 // ComputeGenesisRoot runs Erigon's ConcurrentPatriciaHashed (16-nibble
 // subtree-parallel HPH) against the commitmentInputStore's encoded Update
 // payloads.
@@ -166,74 +182,106 @@ func ComputeGenesisRoot(commitmentInputStore, branchesOut *streamsort.Store, tmp
 	// (and the ApplyAndClearInlineDeferredUpdates flush below) lands in it.
 	rootCtx, _ := factory()
 
-	upds := erigoncommitment.NewUpdates(
-		erigoncommitment.ModeDirect,
-		tmpDir,
-		erigoncommitment.KeyToHexNibbleHash,
-	)
-	// Force the parallel path on the very first Process call. Upstream's
-	// idiomatic pipeline runs the first Process sequentially to populate
-	// the root branch, then SetConcurrentCommitment(true) for subsequent
-	// calls. For state-actor's one-shot genesis we don't have a
-	// "subsequent" — we set the flag up-front. ParallelHashSort
-	// (hex_concurrent_patricia_hashed.go:207) only requires
-	// mode==ModeDirect && sortPerNibble==true — both satisfied. The
-	// CanDoConcurrentNext gate is a next-call optimization hint, not a
-	// correctness gate.
-	upds.SetConcurrentCommitment(true)
+	// A0 — chunked Touch+Process. Build the trie INCREMENTALLY in bounded
+	// chunks of commitmentChunkKeys. Each chunk gets a FRESH Updates, so the
+	// upstream Updates.keys dedup map (~100 B/unique-key) AND the per-nibble
+	// etl working set stay bounded by the chunk size instead of growing to
+	// O(total-keys) — tens of GB across a 100 GB alloc if done one-shot. The
+	// pph is REUSED across chunks (no Reset), so the trie accumulates;
+	// ctx.Branch (the live branchStore) feeds each chunk the branches written
+	// by earlier chunks. This is upstream's incremental per-block model —
+	// CanDoConcurrentNext (hex_concurrent_patricia_hashed.go:330) exists
+	// precisely because Process is meant to be called repeatedly.
+	//
+	// SAFETY DEFAULT: commitmentChunkKeys is large, so any alloc at or below
+	// it runs as a SINGLE Process — byte-identical to the proven single-shot
+	// path (the existing golden/H4 tests exercise exactly this). Multi-chunk
+	// only engages at bench scale; TestComputeGenesisRoot_ChunkedVsSingle
+	// pins that a forced-small chunk size yields the SAME root as one shot.
+	//
+	// VALIDATION PENDING ON BENCH (cgo tests don't link on macOS, see plan
+	// Tier 0/3): the incremental-concurrent multi-chunk path must be
+	// confirmed against golden roots + cross-verify before it is relied on.
+	// Single-chunk (the production default for sub-chunk allocs) is the
+	// already-validated A2 behaviour.
+	hph := erigoncommitment.NewHexPatriciaHashed(20 /* accountKeyLen */, rootCtx)
+	pph := erigoncommitment.NewConcurrentPatriciaHashed(hph, rootCtx)
+	defer pph.Close()
 
-	// Walker: iterate every entry in commitmentInputStore (which holds
-	// addresses + addr||slot composite keys for the full alloc). Per
-	// upstream commitment.go:1666-1681, ModeDirect's TouchPlainKeyDirect
-	// discards the *Update arg — only the (hashedKey, plainKey) pair is
-	// recorded in the per-nibble etl.Collector. So we pass a placeholder;
-	// HPH re-fetches via ctx.Account/Storage during Process.
-	var placeholder erigoncommitment.Update
+	var (
+		rootBytes    []byte
+		upds         *erigoncommitment.Updates
+		chunkKeys    int
+		processedAny bool
+		placeholder  erigoncommitment.Update
+	)
+	newChunk := func() {
+		// ModeDirect + concurrent up-front, as the single-shot path always
+		// did (ParallelHashSort only requires mode==ModeDirect &&
+		// sortPerNibble==true; the CanDoConcurrentNext gate is a hint).
+		upds = erigoncommitment.NewUpdates(erigoncommitment.ModeDirect, tmpDir, erigoncommitment.KeyToHexNibbleHash)
+		upds.SetConcurrentCommitment(true)
+		chunkKeys = 0
+	}
+	processChunk := func() error {
+		if upds == nil {
+			return nil
+		}
+		// Skip an empty TRAILING chunk (total keys a multiple of the chunk
+		// size), but DO process an empty FIRST chunk so an empty alloc still
+		// yields the empty-trie root.
+		if chunkKeys == 0 && processedAny {
+			upds = nil
+			return nil
+		}
+		rb, err := pph.Process(context.Background(), upds, "state-actor-genesis", nil,
+			erigoncommitment.WarmupConfig{CtxFactory: factory})
+		if err != nil {
+			return fmt.Errorf("Process: %w", err)
+		}
+		rootBytes = rb
+		// Flush this chunk's root-level deferred branch updates into the live
+		// store. ParallelHashSort returns rootHash WITHOUT flushing the root
+		// HPH's deferred branch (SpawnSubTrie disables defer only for the
+		// per-nibble mounts, not the root), so without this the root-level
+		// (empty-prefix, compact-key 0x10) branch is missing → divergent root
+		// + a daemon FCU panic on SeekCommitment. Doing it per chunk also
+		// makes the root branch available to the next chunk's reads, and for
+		// chunkKeys==1-chunk it is exactly the single-shot flush.
+		if err := pph.RootTrie().ApplyAndClearInlineDeferredUpdates(); err != nil {
+			return fmt.Errorf("ApplyAndClearInlineDeferredUpdates: %w", err)
+		}
+		processedAny = true
+		upds = nil
+		return nil
+	}
+
+	// Walker: ModeDirect TouchPlainKeyDirect records (hashedKey, plainKey)
+	// into the per-nibble etl collector + the dedup map; the *Update arg is
+	// discarded (HPH re-fetches via ctx.Account/Storage during Process).
+	newChunk()
 	if err := commitmentInputStore.Iterate(func(plainKey, _ []byte) error {
 		upds.TouchPlainKeyDirect(string(plainKey), &placeholder)
+		chunkKeys++
+		if chunkKeys >= commitmentChunkKeys {
+			if err := processChunk(); err != nil {
+				return err
+			}
+			newChunk()
+		}
 		return nil
 	}); err != nil {
 		return Result{}, fmt.Errorf("commitment.ComputeGenesisRoot: iterate commitmentInputStore: %w", err)
 	}
-
-	hph := erigoncommitment.NewHexPatriciaHashed(20 /* accountKeyLen */, rootCtx)
-	pph := erigoncommitment.NewConcurrentPatriciaHashed(hph, rootCtx)
-	defer pph.Close()
-	rootBytes, err := pph.Process(
-		context.Background(),
-		upds,
-		"state-actor-genesis",
-		nil,
-		erigoncommitment.WarmupConfig{CtxFactory: factory},
-	)
-	if err != nil {
-		return Result{}, fmt.Errorf("commitment.ComputeGenesisRoot: Process: %w", err)
+	if err := processChunk(); err != nil {
+		return Result{}, fmt.Errorf("commitment.ComputeGenesisRoot: %w", err)
 	}
+
 	if len(rootBytes) != 32 {
 		return Result{}, fmt.Errorf("commitment.ComputeGenesisRoot: unexpected root hash length %d", len(rootBytes))
 	}
 	var root gethcommon.Hash
 	copy(root[:], rootBytes)
-
-	// Flush the root HPH's deferred branch updates into rootCtx.PutBranch.
-	//
-	// NewHexPatriciaHashed defaults branchEncoder to deferred mode
-	// (hex_patricia_hashed.go:160 upstream). SpawnSubTrie explicitly
-	// disables deferred mode for the per-nibble mounts
-	// (hex_concurrent_patricia_hashed.go:128 upstream), but the root
-	// keeps it. The serial HexPatriciaHashed.Process flushes deferred
-	// updates at its tail (hex_patricia_hashed.go:2889) — but
-	// ConcurrentPatriciaHashed.ParallelHashSort
-	// (hex_concurrent_patricia_hashed.go:207-295) returns rootHash
-	// without that flush. Without this explicit call, the
-	// mergedBranches map is missing the root-level (empty-prefix,
-	// compact-key 0x10) branch entry, which causes a divergent root
-	// vs serial HPH at any alloc that produces a 16-cell root branch
-	// and a daemon FCU panic when SeekCommitment restores HPH state
-	// and the first block-0 update calls ctx.Branch(nil).
-	if err := pph.RootTrie().ApplyAndClearInlineDeferredUpdates(); err != nil {
-		return Result{}, fmt.Errorf("commitment.ComputeGenesisRoot: ApplyAndClearInlineDeferredUpdates: %w", err)
-	}
 
 	// HPHState comes from the root trie after all subtrees have folded
 	// back into root.grid[0]. RootTrie() returns the same root HPH we
