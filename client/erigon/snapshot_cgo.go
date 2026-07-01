@@ -120,6 +120,10 @@ type entityWork struct {
 type domainWrite struct {
 	key   []byte
 	value []byte
+	// part is the commit-input sub-store index (0..15) for commitIn writes,
+	// precomputed on the parallel encode worker (InputPart of the account
+	// address). Unused for the accounts/storage/code channels.
+	part uint8
 }
 
 // perDomainChans is the 4 per-domain channels — one dedicated writer
@@ -206,13 +210,34 @@ func writeSnapshots(
 	// Tunable via STATE_ACTOR_COMMITMENT_CACHE_GB (default 4 GiB). On a
 	// many-core / large-RAM host, a bigger cache keeps the commitment walk's
 	// random Account/Storage Gets in RAM, which is the dominant Phase-2 cost.
-	commitmentInputStore, err := streamsort.NewWithOptions(cfg.DBPath, streamsort.Options{
-		BlockCacheBytes: envCacheBytes("STATE_ACTOR_COMMITMENT_CACHE_GB", 4),
-	})
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("writeSnapshots: open commitmentInput streamsort: %w", err)
+	// 16 nibble-partitioned commit-input sub-stores (Tier-C): each of the 16
+	// ParallelHashSort workers reads exactly ONE → disjoint Pebble block caches
+	// → the shared-cache random-Get contention (the profiled commitment hot
+	// spot) disappears. The cache budget is split across the 16.
+	partCache := envCacheBytes("STATE_ACTOR_COMMITMENT_CACHE_GB", 4) / int64(internalcommitment.NumInputParts)
+	if partCache < 8<<20 {
+		partCache = 8 << 20
 	}
-	defer commitmentInputStore.Close()
+	commitmentInputStores := make([]*streamsort.Store, internalcommitment.NumInputParts)
+	for i := range commitmentInputStores {
+		s, serr := streamsort.NewWithOptions(cfg.DBPath, streamsort.Options{BlockCacheBytes: partCache})
+		if serr != nil {
+			for _, s2 := range commitmentInputStores {
+				if s2 != nil {
+					s2.Close()
+				}
+			}
+			return common.Hash{}, fmt.Errorf("writeSnapshots: open commitmentInput sub-store %d: %w", i, serr)
+		}
+		commitmentInputStores[i] = s
+	}
+	defer func() {
+		for _, s := range commitmentInputStores {
+			if s != nil {
+				s.Close()
+			}
+		}
+	}()
 
 	// counts: atomic per-domain increments by workers.
 	var counts domainCounts
@@ -253,7 +278,7 @@ func writeSnapshots(
 	go runDomainWriter(pipelineCtx, &writerWg, writerErrCh, cancelPipeline, chans.accounts, accountsStore, "accounts")
 	go runDomainWriter(pipelineCtx, &writerWg, writerErrCh, cancelPipeline, chans.storage, storageStore, "storage")
 	go runDomainWriter(pipelineCtx, &writerWg, writerErrCh, cancelPipeline, chans.code, codeStore, "code")
-	go runDomainWriter(pipelineCtx, &writerWg, writerErrCh, cancelPipeline, chans.commitIn, commitmentInputStore, "commitmentInput")
+	go runCommitInWriter(pipelineCtx, &writerWg, writerErrCh, cancelPipeline, chans.commitIn, commitmentInputStores)
 
 	// sendEntity exits early if the pipeline already cancelled (a worker
 	// or writer failed mid-stream).
@@ -393,8 +418,9 @@ func writeSnapshots(
 			if pe.Storage == nil {
 				continue
 			}
+			part := uint8(internalcommitment.InputPart(pe.Address[:]))
 			pe.Storage(func(slot, value common.Hash) bool {
-				if err := encodeStorageSlot(pipelineCtx, pe.Address, slot, value, chans, &counts); err != nil {
+				if err := encodeStorageSlot(pipelineCtx, pe.Address, slot, value, part, chans, &counts); err != nil {
 					pipelineErr = err
 					return false
 				}
@@ -454,10 +480,14 @@ func writeSnapshots(
 		{"accounts", accountsStore},
 		{"storage", storageStore},
 		{"code", codeStore},
-		{"commitmentInput", commitmentInputStore},
 	} {
 		if err := fz.store.Finalize(); err != nil {
 			return common.Hash{}, fmt.Errorf("writeSnapshots: Finalize %s streamsort: %w", fz.name, err)
+		}
+	}
+	for i, s := range commitmentInputStores {
+		if err := s.Finalize(); err != nil {
+			return common.Hash{}, fmt.Errorf("writeSnapshots: Finalize commitmentInput sub-store %d: %w", i, err)
 		}
 	}
 
@@ -525,7 +555,7 @@ func writeSnapshots(
 	// cfg.DBPath (real bind-mounted disk) is the etl spill dir (A1) AND the
 	// live branch-store dir; "" would spill the ~28 GB touched-key runs and
 	// the branches to tmpfs (RAM) on the bench host.
-	result, err := internalcommitment.ComputeGenesisRoot(commitmentInputStore, branchesStore, cfg.DBPath)
+	result, err := internalcommitment.ComputeGenesisRoot(commitmentInputStores, branchesStore, cfg.DBPath)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("writeSnapshots: ComputeGenesisRoot: %w", err)
 	}
@@ -539,8 +569,10 @@ func writeSnapshots(
 	// a large cache without compounding the snapshot-write footprint. Close is
 	// idempotent (streamsort guards on closed.Swap), so the deferred Close
 	// degrades to a no-op.
-	if err := commitmentInputStore.Close(); err != nil {
-		return common.Hash{}, fmt.Errorf("writeSnapshots: close commitmentInputStore: %w", err)
+	for i, s := range commitmentInputStores {
+		if err := s.Close(); err != nil {
+			return common.Hash{}, fmt.Errorf("writeSnapshots: close commitmentInput sub-store %d: %w", i, err)
+		}
 	}
 	nBranches := result.BranchCount
 	// KeyCommitmentState encodes (txNum=StepSize-1, blockNum=0): the
@@ -710,9 +742,13 @@ func encodeEntity(
 		atomic.AddUint64(&counts.code, 1)
 	}
 
+	// Route this account (and all its storage) to its commit-input sub-store by
+	// the first nibble of keccak(addr) — the ParallelHashSort worker shard.
+	part := uint8(internalcommitment.InputPart(addrKey))
+
 	// Inline storage (foundational PreAlloc + contract autofill).
 	for slot, value := range ew.entry.Storage {
-		if err := encodeStorageSlot(ctx, ew.addr, slot, value, out, counts); err != nil {
+		if err := encodeStorageSlot(ctx, ew.addr, slot, value, part, out, counts); err != nil {
 			return err
 		}
 	}
@@ -720,7 +756,7 @@ func encodeEntity(
 	// Commitment input: account-level Update keyed by plain addr. Reuse the
 	// code hash computed above (no second keccak).
 	commitBytes := internalcommitment.EncodeAccountUpdateCodeHash(ew.entry.Nonce, balance, codeHash)
-	return sendDomainWrite(ctx, out.commitIn, domainWrite{key: addrKey, value: commitBytes})
+	return sendDomainWrite(ctx, out.commitIn, domainWrite{key: addrKey, value: commitBytes, part: part})
 }
 
 // encodeStorageSlot encodes one (addr, slot, value) tuple. Skip on
@@ -731,6 +767,7 @@ func encodeStorageSlot(
 	addr common.Address,
 	slotKey common.Hash,
 	slotValue common.Hash,
+	part uint8, // commit-input sub-store = the owning account's part
 	out *perDomainChans,
 	counts *domainCounts,
 ) error {
@@ -750,7 +787,7 @@ func encodeStorageSlot(
 	atomic.AddUint64(&counts.storage, 1)
 
 	commitBytes := internalcommitment.EncodeStorageUpdate(slotValue[:])
-	return sendDomainWrite(ctx, out.commitIn, domainWrite{key: plainKey, value: commitBytes})
+	return sendDomainWrite(ctx, out.commitIn, domainWrite{key: plainKey, value: commitBytes, part: part})
 }
 
 // sendDomainWrite is the cancel-aware channel send used by encoders.
@@ -768,6 +805,43 @@ func sendDomainWrite(ctx context.Context, ch chan<- domainWrite, dw domainWrite)
 // (internal/streamsort/streamsort.go) — having exactly one writer
 // goroutine per domain is what makes the worker pool safe without a
 // mutex on the streamsort itself.
+// runCommitInWriter drains the commit-input channel into the 16 nibble sub-stores,
+// routing each write by its precomputed part (set in encodeEntity, so the keccak
+// stays on the parallel encode workers, not this single writer).
+func runCommitInWriter(
+	ctx context.Context,
+	wg *sync.WaitGroup,
+	errCh chan<- error,
+	cancel context.CancelFunc,
+	in <-chan domainWrite,
+	stores []*streamsort.Store,
+) {
+	defer wg.Done()
+	if err := commitInWriter(ctx, in, stores); err != nil {
+		select {
+		case errCh <- err:
+		default:
+		}
+		cancel()
+	}
+}
+
+func commitInWriter(ctx context.Context, in <-chan domainWrite, stores []*streamsort.Store) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case dw, ok := <-in:
+			if !ok {
+				return nil
+			}
+			if err := stores[dw.part].Put(dw.key, dw.value); err != nil {
+				return fmt.Errorf("commitInWriter[part=%d]: %w", dw.part, err)
+			}
+		}
+	}
+}
+
 func domainWriter(
 	ctx context.Context,
 	in <-chan domainWrite,

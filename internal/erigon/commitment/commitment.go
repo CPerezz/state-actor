@@ -205,7 +205,29 @@ func setFirstChunkKeys(n int) (restore func()) {
 // which on bench hosts is tmpfs (RAM-backed), so the ~28 GB of touched-key
 // spill was actually resident memory. The path is pure scratch — it cannot
 // affect the sort order, the hashing, or the computed root.
-func ComputeGenesisRoot(commitmentInputStore, branchesOut *streamsort.Store, tmpDir string) (Result, error) {
+// NumInputParts is the commitment-input partition count — equal to the
+// ParallelHashSort nibble-shard count. The input is split into 16 sub-stores by
+// the first nibble of the keccak-hashed key; each of the 16 concurrent workers
+// reads exactly ONE sub-store, so the 16 Pebble block caches are disjoint →
+// the cross-worker per-block atomic-refcount ping-pong (the profiled 58%
+// contention) disappears. Root is unaffected: partitioning only decides which
+// file holds a value, never the keccak order or the fold.
+const NumInputParts = 16
+
+// InputPart maps a plain key to its sub-store index (0..15): the first nibble of
+// KeyToHexNibbleHash(plainKey) — exactly how ParallelHashSort shards its workers
+// (upstream: t.nibbles[hashedKey[0]].Collect). For storage keys the hash derives
+// from the account address, so an account and all its storage share one part.
+func InputPart(plainKey []byte) int {
+	return int(erigoncommitment.KeyToHexNibbleHash(plainKey)[0])
+}
+
+// ComputeGenesisRoot folds the 16 nibble-partitioned commitment-input sub-stores
+// into the genesis root. inputStores must have len == NumInputParts.
+func ComputeGenesisRoot(inputStores []*streamsort.Store, branchesOut *streamsort.Store, tmpDir string) (Result, error) {
+	if len(inputStores) != NumInputParts {
+		return Result{}, fmt.Errorf("commitment.ComputeGenesisRoot: got %d input stores, want %d", len(inputStores), NumInputParts)
+	}
 	// Live read-write branch sink shared by all 16 nibble-disjoint workers
 	// + the root ctx. Replaces the in-memory mergedBranches map. Created
 	// under tmpDir (real disk).
@@ -219,7 +241,7 @@ func ComputeGenesisRoot(commitmentInputStore, branchesOut *streamsort.Store, tmp
 	// Workers write disjoint first-nibble prefixes, so concurrent PutBranch
 	// (pebble Set) has no key-overwrite hazard and needs no per-worker merge.
 	factory := func() (erigoncommitment.PatriciaContext, func()) {
-		return &subtreeCtx{commitmentInputStore: commitmentInputStore, branches: branches}, func() {}
+		return &subtreeCtx{inputStores: inputStores, branches: branches}, func() {}
 	}
 
 	// rootCtx shares the same store; the root-level PutBranch from foldBranch
@@ -320,26 +342,63 @@ func ComputeGenesisRoot(commitmentInputStore, branchesOut *streamsort.Store, tmp
 	// into the per-nibble etl collector + the dedup map; the *Update arg is
 	// discarded (HPH re-fetches via ctx.Account/Storage during Process).
 	newChunk()
-	if err := commitmentInputStore.Iterate(func(plainKey, _ []byte) error {
-		upds.TouchPlainKeyDirect(string(plainKey), &placeholder)
-		chunkKeys++
-		// Chunk 0 (the serial one) flushes at min(firstChunkKeys,
-		// commitmentChunkKeys) so its single-core cost stays negligible; every
-		// later (concurrent) chunk flushes at the full commitmentChunkKeys.
-		chunkLimit := commitmentChunkKeys
-		if !processedAny && firstChunkKeys > 0 && firstChunkKeys < chunkLimit {
-			chunkLimit = firstChunkKeys
+	// Round-robin the 16 sub-store cursors so EVERY chunk — especially chunk 0
+	// (serial) — spans all 16 first-nibbles. This preserves the
+	// first-serial-then-concurrent invariant: chunk 0 must establish every root
+	// child, else a later concurrent chunk unfolds a still-empty branch and the
+	// root diverges. Reading the sub-stores sequentially would make chunk 0
+	// single-nibble → wrong root. The fold is key-set-determined, so round-robin
+	// order yields the same root (see TestComputeGenesisRoot_ChunkedVsSingle).
+	cursors := make([]*streamsort.Cursor, 0, NumInputParts)
+	closeCursors := func() {
+		for _, c := range cursors {
+			_ = c.Close()
 		}
-		if commitmentChunkKeys > 0 && chunkKeys >= chunkLimit {
-			if err := processChunk(); err != nil {
-				return err
-			}
-			newChunk()
-		}
-		return nil
-	}); err != nil {
-		return Result{}, fmt.Errorf("commitment.ComputeGenesisRoot: iterate commitmentInputStore: %w", err)
 	}
+	for i := range inputStores {
+		cur, cerr := inputStores[i].NewCursor()
+		if cerr != nil {
+			closeCursors()
+			return Result{}, fmt.Errorf("commitment.ComputeGenesisRoot: cursor[%d]: %w", i, cerr)
+		}
+		cursors = append(cursors, cur)
+	}
+	for {
+		advanced := false
+		for _, cur := range cursors {
+			if !cur.Valid() {
+				continue
+			}
+			upds.TouchPlainKeyDirect(string(cur.Key()), &placeholder)
+			chunkKeys++
+			cur.Next()
+			advanced = true
+			// Chunk 0 flushes at min(firstChunkKeys, commitmentChunkKeys) so its
+			// single-core cost stays negligible; later concurrent chunks flush at
+			// the full commitmentChunkKeys.
+			chunkLimit := commitmentChunkKeys
+			if !processedAny && firstChunkKeys > 0 && firstChunkKeys < chunkLimit {
+				chunkLimit = firstChunkKeys
+			}
+			if commitmentChunkKeys > 0 && chunkKeys >= chunkLimit {
+				if err := processChunk(); err != nil {
+					closeCursors()
+					return Result{}, fmt.Errorf("commitment.ComputeGenesisRoot: %w", err)
+				}
+				newChunk()
+			}
+		}
+		if !advanced {
+			break
+		}
+	}
+	for _, cur := range cursors {
+		if err := cur.Err(); err != nil {
+			closeCursors()
+			return Result{}, fmt.Errorf("commitment.ComputeGenesisRoot: cursor: %w", err)
+		}
+	}
+	closeCursors()
 	if err := processChunk(); err != nil {
 		return Result{}, fmt.Errorf("commitment.ComputeGenesisRoot: %w", err)
 	}
@@ -377,20 +436,31 @@ func ComputeGenesisRoot(commitmentInputStore, branchesOut *streamsort.Store, tmp
 // the slice into a temp streamsort + calls the streaming
 // ComputeGenesisRoot. Not for production at bench scale.
 func ComputeGenesisRootFromAccounts(accounts []Account) (Result, error) {
-	store, err := streamsort.New("")
-	if err != nil {
-		return Result{}, fmt.Errorf("ComputeGenesisRootFromAccounts: streamsort.New: %w", err)
+	// 16 nibble-partitioned input sub-stores (matches production).
+	stores := make([]*streamsort.Store, 0, NumInputParts)
+	closeAll := func() {
+		for _, s := range stores {
+			s.Close()
+		}
 	}
-	defer store.Close()
+	for i := 0; i < NumInputParts; i++ {
+		s, err := streamsort.New("")
+		if err != nil {
+			closeAll()
+			return Result{}, fmt.Errorf("ComputeGenesisRootFromAccounts: streamsort.New[%d]: %w", i, err)
+		}
+		stores = append(stores, s)
+	}
+	defer closeAll()
 
 	for _, a := range accounts {
-		// Account entry keyed by 20-byte address.
 		var balance *uint256.Int
 		if a.Balance != nil {
 			balance = a.Balance
 		}
 		acctBytes := EncodeAccountUpdate(a.Nonce, balance, a.Code)
-		if err := store.Put(a.Address[:], acctBytes); err != nil {
+		part := InputPart(a.Address[:]) // storage shares this part (hash derives from addr)
+		if err := stores[part].Put(a.Address[:], acctBytes); err != nil {
 			return Result{}, fmt.Errorf("ComputeGenesisRootFromAccounts: put account %s: %w", a.Address.Hex(), err)
 		}
 		// Storage entries keyed by addr||slot. Skip all-zero values.
@@ -403,17 +473,15 @@ func ComputeGenesisRootFromAccounts(accounts []Account) (Result, error) {
 			composite = append(composite, a.Address[:]...)
 			composite = append(composite, slot[:]...)
 			storBytes := EncodeStorageUpdate(val[:])
-			if err := store.Put(composite, storBytes); err != nil {
+			if err := stores[part].Put(composite, storBytes); err != nil {
 				return Result{}, fmt.Errorf("ComputeGenesisRootFromAccounts: put storage %s/%s: %w", a.Address.Hex(), slot.Hex(), err)
 			}
 		}
 	}
-	// ComputeGenesisRoot requires its input streamsort to be Finalized
-	// — Iterate and Get on the store both gate on the Finalize state
-	// transition. The wrapper Puts everything here, so we Finalize
-	// before delegating.
-	if err := store.Finalize(); err != nil {
-		return Result{}, fmt.Errorf("ComputeGenesisRootFromAccounts: Finalize: %w", err)
+	for i := range stores {
+		if err := stores[i].Finalize(); err != nil {
+			return Result{}, fmt.Errorf("ComputeGenesisRootFromAccounts: Finalize[%d]: %w", i, err)
+		}
 	}
 	// Tests/H4-invariance use tiny inputs; "" (os.TempDir) is fine here.
 	branchesOut, err := streamsort.New("")
@@ -422,7 +490,7 @@ func ComputeGenesisRootFromAccounts(accounts []Account) (Result, error) {
 	}
 	defer branchesOut.Close()
 
-	res, err := ComputeGenesisRoot(store, branchesOut, "")
+	res, err := ComputeGenesisRoot(stores, branchesOut, "")
 	if err != nil {
 		return Result{}, err
 	}
@@ -455,8 +523,11 @@ func ComputeGenesisRootFromAccounts(accounts []Account) (Result, error) {
 // folded prefix) and the read path that makes incremental/chunked
 // commitment work.
 type subtreeCtx struct {
-	commitmentInputStore *streamsort.Store
-	branches             *branchStore
+	// inputStores is the 16 nibble-partitioned commitment-input sub-stores.
+	// Account/Storage route by InputPart(plainKey); a concurrent worker only
+	// ever hits one part, so its Pebble cache is uncontended.
+	inputStores []*streamsort.Store
+	branches    *branchStore
 }
 
 func (c *subtreeCtx) Branch(prefix []byte) ([]byte, erigonkv.Step, error) {
@@ -473,7 +544,7 @@ func (c *subtreeCtx) PutBranch(prefix []byte, data []byte, prevData []byte) erro
 }
 
 func (c *subtreeCtx) Account(plainKey []byte) (*erigoncommitment.Update, error) {
-	enc, err := c.commitmentInputStore.Get(plainKey)
+	enc, err := c.inputStores[InputPart(plainKey)].Get(plainKey)
 	if err != nil {
 		return nil, fmt.Errorf("commitment.subtreeCtx.Account: Get(%x): %w", plainKey, err)
 	}
@@ -497,7 +568,7 @@ func (c *subtreeCtx) Account(plainKey []byte) (*erigoncommitment.Update, error) 
 }
 
 func (c *subtreeCtx) Storage(plainKey []byte) (*erigoncommitment.Update, error) {
-	enc, err := c.commitmentInputStore.Get(plainKey)
+	enc, err := c.inputStores[InputPart(plainKey)].Get(plainKey)
 	if err != nil {
 		return nil, fmt.Errorf("commitment.subtreeCtx.Storage: Get(%x): %w", plainKey, err)
 	}
