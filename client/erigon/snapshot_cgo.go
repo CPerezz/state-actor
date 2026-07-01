@@ -550,7 +550,7 @@ func writeSnapshots(
 		{snap.DomainStorage, storageStore, counts.storage},
 		{snap.DomainCode, codeStore, counts.code},
 	}
-	emitErrCh := make(chan error, len(domainSpecs))
+	emitErrCh := make(chan error, len(domainSpecs)+1) // +1 for commitment
 	var emitWg sync.WaitGroup
 	sem := make(chan struct{}, runtime.NumCPU())
 	for _, ds := range domainSpecs {
@@ -567,19 +567,30 @@ func writeSnapshots(
 			}
 		}(ds)
 	}
+	// Commitment: single [0,1) range. It is the LARGEST domain (~44 GB .kv at
+	// 100 GB, plus the only recsplit MPHF over ~nBranches keys) yet depends only
+	// on branchesStore + keyStateValue — both ready from the fold, NOT on the
+	// other domains. Run it as a 4th goroutine in the SAME fan-out (the Writer
+	// is immutable and each domain writes its own files) so its long build
+	// overlaps accounts/storage/code instead of running serially after them.
+	// frozenSteps(commitment)=0 so the daemon's mem-tier KeyCommitmentState
+	// writes pass CheckDataAvailable trivially (see the fullRange doc above).
+	sem <- struct{}{}
+	emitWg.Add(1)
+	go func() {
+		defer func() { <-sem; emitWg.Done() }()
+		if err := snap.WriteCommitment(ctx, w, fullRange, keyStateValue, branchesStore, nBranches); err != nil {
+			select {
+			case emitErrCh <- fmt.Errorf("WriteCommitment: %w", err):
+			default:
+			}
+		}
+	}()
 	emitWg.Wait()
 	select {
 	case err := <-emitErrCh:
 		return common.Hash{}, fmt.Errorf("writeSnapshots: %w", err)
 	default:
-	}
-
-	// Commitment: single [0,1) range. frozenSteps(commitment)=0 so the
-	// daemon's mem-tier writes of KeyCommitmentState at txNum=blockTxNum
-	// (stored as step=0) pass CheckDataAvailable trivially (0 < 0 is
-	// false). See the fullRange doc above for the full rationale.
-	if err := snap.WriteCommitment(ctx, w, fullRange, keyStateValue, branchesStore, nBranches); err != nil {
-		return common.Hash{}, fmt.Errorf("writeSnapshots: WriteCommitment: %w", err)
 	}
 
 	if cfg.Verbose {
