@@ -330,6 +330,63 @@ func (s *Store) Iterate(yield func(key, value []byte) error) error {
 	return nil
 }
 
+// Cursor is a forward pull-iterator over a finalized Store. Unlike Iterate
+// (callback-driven, one store at a time), the CALLER drives advancement, so
+// several Cursors over different Stores can be interleaved — e.g. a
+// deterministic round-robin merge across the 16 nibble-partitioned commitment
+// sub-stores, where every chunk must span all first-nibbles. Not goroutine-safe
+// (one Cursor per goroutine); Close exactly once (holds a reader ref meanwhile).
+type Cursor struct {
+	s    *Store
+	iter *pebble.Iterator
+}
+
+// NewCursor finalizes the store if needed and returns a Cursor positioned at
+// the first key (Valid()==true iff the store is non-empty).
+func (s *Store) NewCursor() (*Cursor, error) {
+	if s.closed.Load() {
+		return nil, fmt.Errorf("streamsort: NewCursor after Close")
+	}
+	if !s.finalized.Load() {
+		if err := s.Finalize(); err != nil {
+			return nil, err
+		}
+	}
+	s.readers.Add(1)
+	iter, err := s.db.NewIter(nil)
+	if err != nil {
+		s.readers.Done()
+		return nil, fmt.Errorf("streamsort: NewCursor NewIter: %w", err)
+	}
+	iter.First()
+	return &Cursor{s: s, iter: iter}, nil
+}
+
+// Valid reports whether Key/Value are positioned on a live entry.
+func (c *Cursor) Valid() bool { return c.iter.Valid() }
+
+// Next advances one entry and reports whether the new position is valid.
+func (c *Cursor) Next() bool { return c.iter.Next() }
+
+// Key / Value return the current entry. They alias Pebble's buffers and are
+// only valid until the next Next/Close — copy if retained.
+func (c *Cursor) Key() []byte   { return c.iter.Key() }
+func (c *Cursor) Value() []byte { return c.iter.Value() }
+
+// Err returns any accumulated iteration error.
+func (c *Cursor) Err() error { return c.iter.Error() }
+
+// Close releases the iterator and the reader ref. Idempotent.
+func (c *Cursor) Close() error {
+	if c.iter == nil {
+		return nil
+	}
+	err := c.iter.Close()
+	c.iter = nil
+	c.s.readers.Done()
+	return err
+}
+
 // Close flushes any pending batch (if Finalize was not called), waits
 // for in-flight readers to drain, closes the DB, frees the cache, and
 // removes the temp directory. Idempotent. RemoveAll failures are
