@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/pprof"
 	"strconv"
 	"strings"
 	"time"
@@ -79,6 +80,22 @@ func main() {
 	}
 
 	flag.Parse()
+
+	// Optional CPU profile for the perf investigation (Tier B). Set
+	// STATE_ACTOR_CPUPROFILE=/path to capture the whole run; the generation,
+	// commitment, and snapshot phases are distinct call trees, so `pprof top`
+	// attributes cost per phase.
+	if p := os.Getenv("STATE_ACTOR_CPUPROFILE"); p != "" {
+		f, err := os.Create(p)
+		if err != nil {
+			log.Fatalf("cpuprofile create: %v", err)
+		}
+		defer f.Close()
+		if err := pprof.StartCPUProfile(f); err != nil {
+			log.Fatalf("cpuprofile start: %v", err)
+		}
+		defer pprof.StopCPUProfile()
+	}
 
 	if *listForks {
 		fmt.Println("Supported --fork values (default = latest):")
