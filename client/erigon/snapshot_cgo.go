@@ -742,9 +742,11 @@ func encodeEntity(
 		atomic.AddUint64(&counts.code, 1)
 	}
 
-	// Route this account (and all its storage) to its commit-input sub-store by
-	// the first nibble of keccak(addr) — the ParallelHashSort worker shard.
-	part := uint8(internalcommitment.InputPart(addrKey))
+	// Key the commit-input row by the FULL hashed key (so a worker's hashed-sorted
+	// reads are sequential — the reused-cursor fast path) and route to its
+	// sub-store by the first nibble (the ParallelHashSort worker shard).
+	hashedAddr := internalcommitment.HashedKey(addrKey)
+	part := hashedAddr[0]
 
 	// Inline storage (foundational PreAlloc + contract autofill).
 	for slot, value := range ew.entry.Storage {
@@ -756,7 +758,11 @@ func encodeEntity(
 	// Commitment input: account-level Update keyed by plain addr. Reuse the
 	// code hash computed above (no second keccak).
 	commitBytes := internalcommitment.EncodeAccountUpdateCodeHash(ew.entry.Nonce, balance, codeHash)
-	return sendDomainWrite(ctx, out.commitIn, domainWrite{key: addrKey, value: commitBytes, part: part})
+	return sendDomainWrite(ctx, out.commitIn, domainWrite{
+		key:   hashedAddr,
+		value: internalcommitment.EncodeInputRow(addrKey, commitBytes),
+		part:  part,
+	})
 }
 
 // encodeStorageSlot encodes one (addr, slot, value) tuple. Skip on
@@ -787,7 +793,11 @@ func encodeStorageSlot(
 	atomic.AddUint64(&counts.storage, 1)
 
 	commitBytes := internalcommitment.EncodeStorageUpdate(slotValue[:])
-	return sendDomainWrite(ctx, out.commitIn, domainWrite{key: plainKey, value: commitBytes, part: part})
+	return sendDomainWrite(ctx, out.commitIn, domainWrite{
+		key:   internalcommitment.HashedKey(plainKey),
+		value: internalcommitment.EncodeInputRow(plainKey, commitBytes),
+		part:  part,
+	})
 }
 
 // sendDomainWrite is the cancel-aware channel send used by encoders.
