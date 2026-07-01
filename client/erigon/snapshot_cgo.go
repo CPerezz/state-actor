@@ -6,7 +6,9 @@ import (
 	"context"
 	"fmt"
 	mrand "math/rand"
+	"os"
 	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 
@@ -63,10 +65,17 @@ import (
 var fullRange = snap.StepRange{From: 0, To: 1}
 
 // erigonWorkers is the size of the Phase 1 autofill encode-worker pool.
-// Defaults to min(NumCPU, 8) to match the proven cap from reth, besu,
-// and nethermind (client/reth/spec_storage_streaming_cgo.go:95-104,
-// client/besu/state_writer_cgo.go:298, client/nethermind/phase0_cgo.go).
+// Defaults to min(NumCPU, 8) to match the proven cap from reth, besu, and
+// nethermind, but is overridable via STATE_ACTOR_ERIGON_WORKERS to exploit
+// many-core hosts (the RNG draw stays single-threaded on the main goroutine
+// for cross-client invariance; only the CPU-bound encode is parallelised,
+// so a larger pool is safe for the root). Tests override via setErigonWorkers.
 var erigonWorkers = func() int {
+	if v := os.Getenv("STATE_ACTOR_ERIGON_WORKERS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
+			return n
+		}
+	}
 	n := runtime.NumCPU()
 	if n > 8 {
 		n = 8
@@ -76,6 +85,27 @@ var erigonWorkers = func() int {
 	}
 	return n
 }()
+
+// setErigonWorkers swaps erigonWorkers for the duration of a test.
+// The returned function restores the previous value.
+func setErigonWorkers(n int) (restore func()) {
+	prev := erigonWorkers
+	erigonWorkers = n
+	return func() { erigonWorkers = prev }
+}
+
+// envCacheBytes returns the byte size from a "<N> GiB" env var, or
+// defaultGB GiB if unset/invalid. Used to scale Pebble block caches to the
+// host's RAM for the read-heavy commitment phase.
+func envCacheBytes(envVar string, defaultGB int) int64 {
+	gb := defaultGB
+	if v := os.Getenv(envVar); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			gb = n
+		}
+	}
+	return int64(gb) << 30
+}
 
 // entityWork is one alloc entry queued for an encode-worker. The main
 // goroutine fills these and sends them on entityCh; workers consume
@@ -173,10 +203,11 @@ func writeSnapshots(
 	// cache the LSM SSTs miss on most reads. Bump the cache here so
 	// the Pebble block cache holds a non-trivial fraction of the
 	// working set; benchmarking showed 50+ min Phase 2 wall at default.
-	// Tunable via the environment-derived future Options if needed;
-	// 4 GiB is the floor that the bench host (240 GiB RAM) can spare.
+	// Tunable via STATE_ACTOR_COMMITMENT_CACHE_GB (default 4 GiB). On a
+	// many-core / large-RAM host, a bigger cache keeps the commitment walk's
+	// random Account/Storage Gets in RAM, which is the dominant Phase-2 cost.
 	commitmentInputStore, err := streamsort.NewWithOptions(cfg.DBPath, streamsort.Options{
-		BlockCacheBytes: 4 << 30,
+		BlockCacheBytes: envCacheBytes("STATE_ACTOR_COMMITMENT_CACHE_GB", 4),
 	})
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("writeSnapshots: open commitmentInput streamsort: %w", err)
@@ -431,12 +462,26 @@ func writeSnapshots(
 	}
 
 	// -- Step 4: HPH commitment walk over commitmentInputStore.
-	// ctx.Account/Storage callbacks read from streamsort.Get
-	// (disk-backed). branches map stays in memory (bounded).
-	result, err := internalcommitment.ComputeGenesisRoot(commitmentInputStore)
+	// Create the commitment branchesStore (write-once .kv streamsort) BEFORE
+	// the walk: ComputeGenesisRoot streams the trie's branches straight into
+	// it (replacing the old in-memory mergedBranches map + the Step-5a copy
+	// loop). It is left WRITING for WriteCommitment's KeyCommitmentState Put
+	// + Finalize below.
+	branchesStore, err := streamsort.New(cfg.DBPath)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("writeSnapshots: open branches streamsort: %w", err)
+	}
+	defer branchesStore.Close()
+
+	// ctx.Account/Storage callbacks read from streamsort.Get (disk-backed).
+	// cfg.DBPath (real bind-mounted disk) is the etl spill dir (A1) AND the
+	// live branch-store dir; "" would spill the ~28 GB touched-key runs and
+	// the branches to tmpfs (RAM) on the bench host.
+	result, err := internalcommitment.ComputeGenesisRoot(commitmentInputStore, branchesStore, cfg.DBPath)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("writeSnapshots: ComputeGenesisRoot: %w", err)
 	}
+	nBranches := result.BranchCount
 	// KeyCommitmentState encodes (txNum=StepSize-1, blockNum=0): the
 	// "fat genesis" anchor. Genesis is made to OCCUPY the entire frozen
 	// step 0 by writing MaxTxNum[0]=StepSize-1 (see genesis_patch.go), so
@@ -461,20 +506,8 @@ func writeSnapshots(
 		return common.Hash{}, fmt.Errorf("writeSnapshots: encode KeyCommitmentState: %w", err)
 	}
 
-	// -- Step 5a: marshal the global branches map into a streamsort
-	// keyed by branch prefix (sorted for deterministic .kv output).
-	branchesStore, err := streamsort.New(cfg.DBPath)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("writeSnapshots: open branches streamsort: %w", err)
-	}
-	defer branchesStore.Close()
-	var nBranches uint64
-	for prefix, data := range result.BranchNodes {
-		if err := branchesStore.Put([]byte(prefix), data); err != nil {
-			return common.Hash{}, fmt.Errorf("writeSnapshots: put branch %x: %w", []byte(prefix), err)
-		}
-		nBranches++
-	}
+	// -- Step 5a: branchesStore is already populated (streamed by
+	// ComputeGenesisRoot in Step 4); nBranches = result.BranchCount.
 
 	// -- Step 5b: snap.NewWriter + parallel multi-range emit.
 	settings := snap.Settings{
