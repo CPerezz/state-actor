@@ -473,6 +473,54 @@ func writeSnapshots(
 	}
 	defer branchesStore.Close()
 
+	// Overlap the Phase-5b accounts/storage/code snapshot-write with the
+	// commitment fold below. These three domains depend only on the finalized
+	// accountsStore/storageStore/codeStore + counts — NOT on the fold's result —
+	// so start them NOW and let their (mostly single-core) compression run on
+	// the cores the 16-way fold leaves idle. Only WriteCommitment needs the
+	// fold's branches + keyStateValue, so it is queued after the fold. The
+	// Writer is immutable and every domain writes its own files, so all these
+	// goroutines are race-free.
+	settings := snap.Settings{
+		Seed:              cfg.Seed,
+		StepSize:          internalerigon.StepSize,
+		StepsInFrozenFile: internalerigon.StepsInFrozenFile,
+		SnapshotVersion:   internalerigon.SnapshotFormatVersion,
+	}
+	w, err := snap.NewWriter(cfg.DBPath, settings)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("writeSnapshots: snap.NewWriter: %w", err)
+	}
+	defer w.Close()
+
+	type domainSpec struct {
+		domain snap.Domain
+		store  *streamsort.Store
+		count  uint64
+	}
+	domainSpecs := []domainSpec{
+		{snap.DomainAccounts, accountsStore, counts.accounts},
+		{snap.DomainStorage, storageStore, counts.storage},
+		{snap.DomainCode, codeStore, counts.code},
+	}
+	emitErrCh := make(chan error, len(domainSpecs)+1) // +1 for commitment
+	var emitWg sync.WaitGroup
+	sem := make(chan struct{}, runtime.NumCPU())
+	for _, ds := range domainSpecs {
+		sem <- struct{}{}
+		emitWg.Add(1)
+		go func(ds domainSpec) {
+			defer func() { <-sem; emitWg.Done() }()
+			if err := w.WriteDomain(ctx, ds.domain, fullRange, ds.count,
+				snap.FromStreamsort(ds.store)); err != nil {
+				select {
+				case emitErrCh <- fmt.Errorf("WriteDomain(%v): %w", ds.domain, err):
+				default:
+				}
+			}
+		}(ds)
+	}
+
 	// ctx.Account/Storage callbacks read from streamsort.Get (disk-backed).
 	// cfg.DBPath (real bind-mounted disk) is the etl spill dir (A1) AND the
 	// live branch-store dir; "" would spill the ~28 GB touched-key runs and
@@ -519,54 +567,10 @@ func writeSnapshots(
 		return common.Hash{}, fmt.Errorf("writeSnapshots: encode KeyCommitmentState: %w", err)
 	}
 
-	// -- Step 5a: branchesStore is already populated (streamed by
-	// ComputeGenesisRoot in Step 4); nBranches = result.BranchCount.
-
-	// -- Step 5b: snap.NewWriter + parallel multi-range emit.
-	settings := snap.Settings{
-		Seed:              cfg.Seed,
-		StepSize:          internalerigon.StepSize,
-		StepsInFrozenFile: internalerigon.StepsInFrozenFile,
-		SnapshotVersion:   internalerigon.SnapshotFormatVersion,
-	}
-	w, err := snap.NewWriter(cfg.DBPath, settings)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("writeSnapshots: snap.NewWriter: %w", err)
-	}
-	defer w.Close()
-
-	// Fan out 3 independent WriteDomain calls (accounts/storage/code,
-	// each at the single [0,1) fullRange). Each call has its own .kv +
-	// accessors output, its own streamsort input, and no shared mutable
-	// state — safe to run in parallel. Semaphore-bound at NumCPU keeps
-	// seg.Compressor pressure realistic on small hosts.
-	type domainSpec struct {
-		domain snap.Domain
-		store  *streamsort.Store
-		count  uint64
-	}
-	domainSpecs := []domainSpec{
-		{snap.DomainAccounts, accountsStore, counts.accounts},
-		{snap.DomainStorage, storageStore, counts.storage},
-		{snap.DomainCode, codeStore, counts.code},
-	}
-	emitErrCh := make(chan error, len(domainSpecs)+1) // +1 for commitment
-	var emitWg sync.WaitGroup
-	sem := make(chan struct{}, runtime.NumCPU())
-	for _, ds := range domainSpecs {
-		sem <- struct{}{}
-		emitWg.Add(1)
-		go func(ds domainSpec) {
-			defer func() { <-sem; emitWg.Done() }()
-			if err := w.WriteDomain(ctx, ds.domain, fullRange, ds.count,
-				snap.FromStreamsort(ds.store)); err != nil {
-				select {
-				case emitErrCh <- fmt.Errorf("WriteDomain(%v): %w", ds.domain, err):
-				default:
-				}
-			}
-		}(ds)
-	}
+	// -- Step 5b: accounts/storage/code are already being written (fan-out
+	// started above, overlapping the fold). Queue the commitment domain now
+	// that the fold has produced its branches + keyStateValue.
+	//
 	// Commitment: single [0,1) range. It is the LARGEST domain (~44 GB .kv at
 	// 100 GB, plus the only recsplit MPHF over ~nBranches keys) yet depends only
 	// on branchesStore + keyStateValue — both ready from the fold, NOT on the
