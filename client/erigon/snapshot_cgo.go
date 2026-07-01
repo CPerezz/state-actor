@@ -481,6 +481,19 @@ func writeSnapshots(
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("writeSnapshots: ComputeGenesisRoot: %w", err)
 	}
+	// commitmentInputStore is not read after the commitment walk (Phase 5b
+	// reads accounts/storage/code + branchesStore only). Close it NOW —
+	// ahead of the deferred Close at function scope — to release its
+	// STATE_ACTOR_COMMITMENT_CACHE_GB block cache, 256 MiB memtable, and the
+	// ~tens-of-GB on-disk spill dir BEFORE the mmap-heavy Phase-5b snapshot
+	// write. Holding that cache through Phase 5b is what pushed the 100 GB
+	// run's RSS to the OOM edge; freeing it here lets the commitment walk use
+	// a large cache without compounding the snapshot-write footprint. Close is
+	// idempotent (streamsort guards on closed.Swap), so the deferred Close
+	// degrades to a no-op.
+	if err := commitmentInputStore.Close(); err != nil {
+		return common.Hash{}, fmt.Errorf("writeSnapshots: close commitmentInputStore: %w", err)
+	}
 	nBranches := result.BranchCount
 	// KeyCommitmentState encodes (txNum=StepSize-1, blockNum=0): the
 	// "fat genesis" anchor. Genesis is made to OCCUPY the entire frozen
@@ -660,9 +673,14 @@ func encodeEntity(
 		acct.Balance = *b
 		balance = b
 	}
+	// Hash the code ONCE here (for the snapshot CodeHash) and reuse it for the
+	// commitment Update below — EncodeAccountUpdate would otherwise keccak the
+	// same bytes a second time (commitment.go). nil = no code.
+	var codeHash *common.Hash
 	if len(ew.entry.Code) > 0 {
 		h := crypto.Keccak256Hash(ew.entry.Code)
 		copy(acct.CodeHash[:], h[:])
+		codeHash = &h
 	}
 	if err := sendDomainWrite(ctx, out.accounts, domainWrite{key: addrKey, value: account.SerialiseV3(acct)}); err != nil {
 		return err
@@ -684,8 +702,9 @@ func encodeEntity(
 		}
 	}
 
-	// Commitment input: account-level Update keyed by plain addr.
-	commitBytes := internalcommitment.EncodeAccountUpdate(ew.entry.Nonce, balance, ew.entry.Code)
+	// Commitment input: account-level Update keyed by plain addr. Reuse the
+	// code hash computed above (no second keccak).
+	commitBytes := internalcommitment.EncodeAccountUpdateCodeHash(ew.entry.Nonce, balance, codeHash)
 	return sendDomainWrite(ctx, out.commitIn, domainWrite{key: addrKey, value: commitBytes})
 }
 

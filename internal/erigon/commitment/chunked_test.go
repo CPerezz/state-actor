@@ -4,6 +4,7 @@ package commitment
 
 import (
 	"bytes"
+	"encoding/binary"
 	"testing"
 
 	gethcommon "github.com/ethereum/go-ethereum/common"
@@ -76,4 +77,43 @@ func TestComputeGenesisRoot_ChunkedVsSingle(t *testing.T) {
 		t.Errorf("branch BYTES differ between single-shot and chunked builds")
 	}
 	t.Logf("chunked == single: root %s, %d branches", single.Root.Hex(), single.BranchCount)
+}
+
+// TestComputeGenesisRoot_FirstChunkShrink is the correctness gate for the
+// serial-first-chunk shrink: a first chunk SMALLER than the regular chunk size
+// must yield the byte-identical root — PROVIDED it still covers all 16 first
+// nibbles (the concurrent unfold needs every first-nibble root child to exist;
+// a sub-coverage first chunk legitimately diverges). 2048 keccak-distributed
+// accounts make even a 256-key first chunk cover all 16 nibbles.
+func TestComputeGenesisRoot_FirstChunkShrink(t *testing.T) {
+	const n = 2048
+	accounts := make([]Account, 0, n)
+	for i := 0; i < n; i++ {
+		var addr gethcommon.Address
+		binary.BigEndian.PutUint64(addr[12:], uint64(i+1))
+		accounts = append(accounts, Account{
+			Address: addr,
+			Nonce:   uint64(i + 1),
+			Balance: uint256.NewInt(uint64(i + 1)),
+		})
+	}
+	compute := func(chunk, first int) Result {
+		t.Helper()
+		r1 := setCommitmentChunkKeys(chunk)
+		defer r1()
+		r2 := setFirstChunkKeys(first)
+		defer r2()
+		res, err := ComputeGenesisRootFromAccounts(accounts)
+		if err != nil {
+			t.Fatalf("ComputeGenesisRootFromAccounts(chunk=%d,first=%d): %v", chunk, first, err)
+		}
+		return res
+	}
+	single := compute(0, 1<<17)  // single concurrent Process (production default)
+	shrunk := compute(1024, 256) // first chunk 256 (covers all 16 nibbles), rest 1024
+	if single.Root != shrunk.Root {
+		t.Fatalf("ROOT DIVERGED: single=%s shrunk-first-chunk=%s — nibble-covering first-chunk shrink changed the root",
+			single.Root.Hex(), shrunk.Root.Hex())
+	}
+	t.Logf("first-chunk-shrink == single: root %s", single.Root.Hex())
 }

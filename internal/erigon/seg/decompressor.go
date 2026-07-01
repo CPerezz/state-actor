@@ -117,6 +117,12 @@ func NewDecompressor(path string) (*Decompressor, error) {
 	if err != nil {
 		return nil, fmt.Errorf("seg: mmap %s: %w", path, err)
 	}
+	// The .kv is decoded strictly front-to-back exactly once (offset discovery
+	// in WriteDomain Pass 2). Hint the kernel: aggressive read-ahead for the
+	// sequential scan, and — importantly for the OOM-sensitive Phase 5b — let
+	// it drop already-read pages sooner, keeping file-RSS low on a 44 GiB .kv.
+	// Advisory only; best-effort, never changes decoded bytes.
+	_ = unix.Madvise(data, unix.MADV_SEQUENTIAL)
 	// Munmap on any parse error below so a rejected file doesn't leak the
 	// mapping.
 	ok := false

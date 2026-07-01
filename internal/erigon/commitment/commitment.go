@@ -68,6 +68,19 @@ type Result struct {
 // is HPH's internal wire format; SerialiseV3 is Erigon's state-domain
 // .kv value format — different shapes).
 func EncodeAccountUpdate(nonce uint64, balance *uint256.Int, code []byte) []byte {
+	if len(code) > 0 {
+		h := crypto.Keccak256Hash(code)
+		return EncodeAccountUpdateCodeHash(nonce, balance, &h)
+	}
+	return EncodeAccountUpdateCodeHash(nonce, balance, nil)
+}
+
+// EncodeAccountUpdateCodeHash is EncodeAccountUpdate with a PRECOMPUTED code
+// hash, letting a caller that already keccak'd the code (e.g. the erigon
+// writer, which hashes it once for the snapshot SerialiseV3 CodeHash) avoid
+// hashing the same bytes a second time. codeHash != nil → the account has code
+// with that keccak256 (sets CodeUpdate); nil → no code (empty-code hash).
+func EncodeAccountUpdateCodeHash(nonce uint64, balance *uint256.Int, codeHash *gethcommon.Hash) []byte {
 	upd := erigoncommitment.Update{
 		Flags: erigoncommitment.NonceUpdate | erigoncommitment.BalanceUpdate,
 		Nonce: nonce,
@@ -75,9 +88,8 @@ func EncodeAccountUpdate(nonce uint64, balance *uint256.Int, code []byte) []byte
 	if balance != nil {
 		upd.Balance = *balance
 	}
-	if len(code) > 0 {
-		h := crypto.Keccak256Hash(code)
-		upd.CodeHash = erigonHash(h)
+	if codeHash != nil {
+		upd.CodeHash = erigonHash(*codeHash)
 		upd.Flags |= erigoncommitment.CodeUpdate
 	} else {
 		upd.CodeHash = erigonHash(emptyCodeHash)
@@ -130,6 +142,23 @@ func setCommitmentChunkKeys(n int) (restore func()) {
 	prev := commitmentChunkKeys
 	commitmentChunkKeys = n
 	return func() { commitmentChunkKeys = prev }
+}
+
+// firstChunkKeys caps the SERIAL first chunk (chunk 0) when chunking is active.
+// Chunk 0 runs on a single core to establish the root branch that the
+// subsequent concurrent (16-way) chunks unfold; at the full commitmentChunkKeys
+// width that serial prefix is ~12% of the whole fold (serial is ~16×/key). A
+// few ×64K keys already span all 16 first nibbles — all the concurrent unfold
+// needs — so capping chunk 0 makes its serial cost negligible WITHOUT changing
+// the root (chunk boundaries don't affect the fold; see
+// TestComputeGenesisRoot_ChunkedVsSingle). Effective size is
+// min(firstChunkKeys, commitmentChunkKeys). setFirstChunkKeys overrides in tests.
+var firstChunkKeys = 1 << 17 // 131072
+
+func setFirstChunkKeys(n int) (restore func()) {
+	prev := firstChunkKeys
+	firstChunkKeys = n
+	return func() { firstChunkKeys = prev }
 }
 
 // ComputeGenesisRoot runs Erigon's ConcurrentPatriciaHashed (16-nibble
@@ -294,7 +323,14 @@ func ComputeGenesisRoot(commitmentInputStore, branchesOut *streamsort.Store, tmp
 	if err := commitmentInputStore.Iterate(func(plainKey, _ []byte) error {
 		upds.TouchPlainKeyDirect(string(plainKey), &placeholder)
 		chunkKeys++
-		if commitmentChunkKeys > 0 && chunkKeys >= commitmentChunkKeys {
+		// Chunk 0 (the serial one) flushes at min(firstChunkKeys,
+		// commitmentChunkKeys) so its single-core cost stays negligible; every
+		// later (concurrent) chunk flushes at the full commitmentChunkKeys.
+		chunkLimit := commitmentChunkKeys
+		if !processedAny && firstChunkKeys > 0 && firstChunkKeys < chunkLimit {
+			chunkLimit = firstChunkKeys
+		}
+		if commitmentChunkKeys > 0 && chunkKeys >= chunkLimit {
 			if err := processChunk(); err != nil {
 				return err
 			}
