@@ -40,7 +40,6 @@
 package streamsort
 
 import (
-	"bytes"
 	"fmt"
 	"log"
 	"math"
@@ -385,64 +384,6 @@ func (c *Cursor) Close() error {
 	err := c.iter.Close()
 	c.iter = nil
 	c.s.readers.Done()
-	return err
-}
-
-// Getter is a reusable point-lookup over a finalized Store backed by ONE
-// long-lived pebble.Iterator. For a caller that Gets keys in ASCENDING order —
-// e.g. a ParallelHashSort worker reading its own hashed-key-sorted commitment
-// sub-store — SeekGE stays within the currently-open sstable and skips the
-// per-call iterator construction (the profiled newIters cost) that Store.Get
-// (db.Get) pays on every call. Not goroutine-safe (one Getter per goroutine);
-// Close exactly once (holds a reader ref meanwhile).
-type Getter struct {
-	s    *Store
-	iter *pebble.Iterator
-}
-
-// NewGetter finalizes the store if needed and returns a reusable Getter.
-func (s *Store) NewGetter() (*Getter, error) {
-	if s.closed.Load() {
-		return nil, fmt.Errorf("streamsort: NewGetter after Close")
-	}
-	if !s.finalized.Load() {
-		if err := s.Finalize(); err != nil {
-			return nil, err
-		}
-	}
-	s.readers.Add(1)
-	iter, err := s.db.NewIter(nil)
-	if err != nil {
-		s.readers.Done()
-		return nil, fmt.Errorf("streamsort: NewGetter NewIter: %w", err)
-	}
-	return &Getter{s: s, iter: iter}, nil
-}
-
-// Get returns the value for key, or (nil, nil) if the key is absent. The
-// returned slice is copied out of Pebble's buffer. Callers that issue keys in
-// ascending order get the reused-iterator fast path.
-func (g *Getter) Get(key []byte) ([]byte, error) {
-	if !g.iter.SeekGE(key) {
-		return nil, g.iter.Error()
-	}
-	if !bytes.Equal(g.iter.Key(), key) {
-		return nil, g.iter.Error()
-	}
-	v := g.iter.Value()
-	out := make([]byte, len(v))
-	copy(out, v)
-	return out, g.iter.Error()
-}
-
-// Close releases the iterator and the reader ref. Idempotent.
-func (g *Getter) Close() error {
-	if g.iter == nil {
-		return nil
-	}
-	err := g.iter.Close()
-	g.iter = nil
-	g.s.readers.Done()
 	return err
 }
 
