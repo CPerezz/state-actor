@@ -49,14 +49,40 @@ type Result struct {
 	HPHState []byte
 	// BranchCount is the number of distinct branch-node prefixes the walk
 	// produced (== the old len(BranchNodes)). Production reads it as the
-	// commitment-domain key count for WriteCommitment; the branch bytes
-	// themselves are streamed straight into the caller-supplied branchesOut.
+	// commitment-domain key count for WriteCommitment.
 	BranchCount uint64
 	// BranchNodes is populated ONLY by ComputeGenesisRootFromAccounts (the
 	// small-input test / H4-invariance wrapper) for byte-level determinism
-	// assertions. Production ComputeGenesisRoot leaves it nil — branches go
-	// to branchesOut on disk, never a RAM map.
+	// assertions. Production ComputeGenesisRoot leaves it nil — branches
+	// stay on disk in the retained branch store, never a RAM map.
 	BranchNodes map[string][]byte
+	// branches is the live branch store RETAINED past ComputeGenesisRoot:
+	// production streams it via BranchIterate straight into
+	// snap.WriteCommitment (no intermediate re-sort store — the rows are
+	// already ascending in the branch store's Pebble LSM) and must call
+	// CloseBranches when done. Nil once closed.
+	branches *branchStore
+}
+
+// BranchIterate streams every (prefix, branchData) row in ascending prefix
+// order from the retained branch store. Key/value byte slices alias Pebble's
+// buffers — copy if retained beyond the callback. Callable repeatedly until
+// CloseBranches.
+func (r *Result) BranchIterate(yield func(prefix, data []byte) error) error {
+	if r.branches == nil {
+		return errors.New("commitment.Result.BranchIterate: branch store closed or not retained")
+	}
+	return r.branches.iterate(yield)
+}
+
+// CloseBranches releases the retained on-disk branch store (DB + cache +
+// temp dir). Idempotent; safe on a zero Result.
+func (r *Result) CloseBranches() {
+	if r.branches == nil {
+		return
+	}
+	r.branches.close()
+	r.branches = nil
 }
 
 // EncodeAccountUpdate returns the Update.Encode bytes for an account
@@ -229,18 +255,26 @@ func InputPart(plainKey []byte) int {
 
 // ComputeGenesisRoot folds the 16 nibble-partitioned commitment-input sub-stores
 // into the genesis root. inputStores must have len == NumInputParts.
-func ComputeGenesisRoot(inputStores []*streamsort.Store, branchesOut *streamsort.Store, tmpDir string) (Result, error) {
+func ComputeGenesisRoot(inputStores []*streamsort.Store, tmpDir string) (Result, error) {
 	if len(inputStores) != NumInputParts {
 		return Result{}, fmt.Errorf("commitment.ComputeGenesisRoot: got %d input stores, want %d", len(inputStores), NumInputParts)
 	}
 	// Live read-write branch sink shared by all 16 nibble-disjoint workers
 	// + the root ctx. Replaces the in-memory mergedBranches map. Created
-	// under tmpDir (real disk).
+	// under tmpDir (real disk). On success, OWNERSHIP TRANSFERS to the
+	// returned Result (Result.BranchIterate streams it into the commitment
+	// .kv writer; Result.CloseBranches releases it) — closed here only on
+	// error paths.
 	branches, err := newBranchStore(tmpDir)
 	if err != nil {
 		return Result{}, fmt.Errorf("commitment.ComputeGenesisRoot: branch store: %w", err)
 	}
-	defer branches.close()
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			branches.close()
+		}
+	}()
 
 	// factory yields a subtreeCtx bound to the SHARED live branch store.
 	// Workers write disjoint first-nibble prefixes, so concurrent PutBranch
@@ -422,18 +456,23 @@ func ComputeGenesisRoot(inputStores []*streamsort.Store, branchesOut *streamsort
 		return Result{}, fmt.Errorf("commitment.ComputeGenesisRoot: EncodeCurrentState: %w", err)
 	}
 
-	// Dump the branches (ascending prefix order) into the caller's
-	// write-once commitment .kv streamsort, counting distinct prefixes for
-	// WriteCommitment's keyCount. branchesOut stays WRITING.
+	// Count distinct prefixes for WriteCommitment's keyCount (a pure
+	// sequential scan — no re-Put: the branch store itself is retained on
+	// the Result and streamed directly into the commitment .kv writer,
+	// eliding the old branchesOut re-sort store, a full extra Pebble
+	// write+compaction+read of the ~44 GB branch set at 100 GB scale).
+	// NOTE: chunked mode re-folds (overwrites) prefixes, so the count MUST
+	// come from a scan, not a set-counter.
 	var branchCount uint64
 	if err := branches.iterate(func(prefix, data []byte) error {
 		branchCount++
-		return branchesOut.Put(prefix, data)
+		return nil
 	}); err != nil {
-		return Result{}, fmt.Errorf("commitment.ComputeGenesisRoot: dump branches: %w", err)
+		return Result{}, fmt.Errorf("commitment.ComputeGenesisRoot: count branches: %w", err)
 	}
 
-	return Result{Root: root, HPHState: hphState, BranchCount: branchCount}, nil
+	handedOff = true
+	return Result{Root: root, HPHState: hphState, BranchCount: branchCount, branches: branches}, nil
 }
 
 // ComputeGenesisRootFromAccounts is a backward-compat wrapper for
@@ -489,22 +528,17 @@ func ComputeGenesisRootFromAccounts(accounts []Account) (Result, error) {
 		}
 	}
 	// Tests/H4-invariance use tiny inputs; "" (os.TempDir) is fine here.
-	branchesOut, err := streamsort.New("")
-	if err != nil {
-		return Result{}, fmt.Errorf("ComputeGenesisRootFromAccounts: branchesOut streamsort.New: %w", err)
-	}
-	defer branchesOut.Close()
-
-	res, err := ComputeGenesisRoot(stores, branchesOut, "")
+	res, err := ComputeGenesisRoot(stores, "")
 	if err != nil {
 		return Result{}, err
 	}
+	defer res.CloseBranches()
 
-	// Collect the streamed branches into a map so tests can make byte-level
-	// determinism + count assertions (production never does this — branches
-	// stay on disk). Iterate auto-finalizes the WRITING branchesOut.
+	// Collect the retained branch store into a map so tests can make
+	// byte-level determinism + count assertions (production never does this
+	// — it streams BranchIterate straight into snap.WriteCommitment).
 	branches := make(map[string][]byte)
-	if err := branchesOut.Iterate(func(k, v []byte) error {
+	if err := res.BranchIterate(func(k, v []byte) error {
 		branches[string(k)] = append([]byte(nil), v...)
 		return nil
 	}); err != nil {

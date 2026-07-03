@@ -168,11 +168,12 @@ type domainCounts struct {
 //     overlap; RNG order stays on main thread for cross-client
 //     invariance.
 //  4. Run HPH commitment over the commitmentInputStore (disk-backed
-//     ctx.Account/Storage callbacks via streamsort.Get).
-//     5a. Marshal branches map into branchesStore (sequential — small).
-//     5b. Multi-range write loop — 4 ranges × 3 domains FAN OUT into
-//     goroutines (semaphore-bounded at NumCPU). Commitment phase
-//     stays serial (small + shared branchesStore).
+//     ctx.Account/Storage callbacks via streamsort.Get). The walk's live
+//     branch store is retained on the Result for direct streaming.
+//     5b. Snapshot writes FAN OUT into goroutines (semaphore-bounded at
+//     NumCPU): accounts/storage/code start BEFORE the fold (overlap);
+//     commitment queues after it, streaming Result.BranchIterate straight
+//     into WriteCommitment (no intermediate branchesStore re-sort).
 //
 // Returns the HPH root; runImpl patches it into block-0 header.stateRoot.
 func writeSnapshots(
@@ -498,16 +499,11 @@ func writeSnapshots(
 	}
 
 	// -- Step 4: HPH commitment walk over commitmentInputStore.
-	// Create the commitment branchesStore (write-once .kv streamsort) BEFORE
-	// the walk: ComputeGenesisRoot streams the trie's branches straight into
-	// it (replacing the old in-memory mergedBranches map + the Step-5a copy
-	// loop). It is left WRITING for WriteCommitment's KeyCommitmentState Put
-	// + Finalize below.
-	branchesStore, err := streamsort.New(cfg.DBPath)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("writeSnapshots: open branches streamsort: %w", err)
-	}
-	defer branchesStore.Close()
+	// The walk's live branch store is RETAINED on the returned Result:
+	// WriteCommitment streams Result.BranchIterate directly (splicing the
+	// KeyCommitmentState row at its sort position), so the old intermediate
+	// branchesStore re-sort — a full extra Pebble write+compaction+read of
+	// the ~44 GB branch set at 100 GB scale — no longer exists.
 
 	// Overlap the Phase-5b accounts/storage/code snapshot-write with the
 	// commitment fold below. These three domains depend only on the finalized
@@ -561,12 +557,18 @@ func writeSnapshots(
 	// cfg.DBPath (real bind-mounted disk) is the etl spill dir (A1) AND the
 	// live branch-store dir; "" would spill the ~28 GB touched-key runs and
 	// the branches to tmpfs (RAM) on the bench host.
-	result, err := internalcommitment.ComputeGenesisRoot(commitmentInputStores, branchesStore, cfg.DBPath)
+	result, err := internalcommitment.ComputeGenesisRoot(commitmentInputStores, cfg.DBPath)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("writeSnapshots: ComputeGenesisRoot: %w", err)
 	}
+	// The retained branch store outlives the fold: the WriteCommitment
+	// fan-out goroutine below streams it, and emitWg.Wait() precedes every
+	// return after this point, so a defer (LIFO, post-Wait) is safe on both
+	// the success and error paths.
+	defer result.CloseBranches()
 	// commitmentInputStore is not read after the commitment walk (Phase 5b
-	// reads accounts/storage/code + branchesStore only). Close it NOW —
+	// reads accounts/storage/code + the retained branch store only). Close
+	// it NOW —
 	// ahead of the deferred Close at function scope — to release its
 	// STATE_ACTOR_COMMITMENT_CACHE_GB block cache, 256 MiB memtable, and the
 	// ~tens-of-GB on-disk spill dir BEFORE the mmap-heavy Phase-5b snapshot
@@ -610,18 +612,22 @@ func writeSnapshots(
 	// that the fold has produced its branches + keyStateValue.
 	//
 	// Commitment: single [0,1) range. It is the LARGEST domain (~44 GB .kv at
-	// 100 GB, plus the only recsplit MPHF over ~nBranches keys) yet depends only
-	// on branchesStore + keyStateValue — both ready from the fold, NOT on the
+	// 100 GB, plus the only recsplit MPHF over ~nBranches keys) yet depends
+	// only on the fold's retained branch store + keyStateValue — NOT on the
 	// other domains. Run it as a 4th goroutine in the SAME fan-out (the Writer
 	// is immutable and each domain writes its own files) so its long build
 	// overlaps accounts/storage/code instead of running serially after them.
-	// frozenSteps(commitment)=0 so the daemon's mem-tier KeyCommitmentState
-	// writes pass CheckDataAvailable trivially (see the fullRange doc above).
+	// The branch rows stream STRAIGHT from the walk's live branch store
+	// (Result.BranchIterate is already ascending; WriteCommitment splices the
+	// KeyCommitmentState row at its sort position) — no intermediate re-sort
+	// store. frozenSteps(commitment)=0 so the daemon's mem-tier
+	// KeyCommitmentState writes pass CheckDataAvailable trivially (see the
+	// fullRange doc above).
 	sem <- struct{}{}
 	emitWg.Add(1)
 	go func() {
 		defer func() { <-sem; emitWg.Done() }()
-		if err := snap.WriteCommitment(ctx, w, fullRange, keyStateValue, branchesStore, nBranches); err != nil {
+		if err := snap.WriteCommitment(ctx, w, fullRange, keyStateValue, snap.BranchStream(result.BranchIterate), nBranches); err != nil {
 			select {
 			case emitErrCh <- fmt.Errorf("WriteCommitment: %w", err):
 			default:

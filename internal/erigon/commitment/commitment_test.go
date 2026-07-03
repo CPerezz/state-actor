@@ -10,6 +10,8 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/holiman/uint256"
+
+	"github.com/ethereum/state-actor/internal/streamsort"
 )
 
 // TestEmptyAllocReturnsEmptyTrieRoot pins the canonical empty-trie
@@ -72,9 +74,9 @@ func TestContractWithStorageProducesRoot(t *testing.T) {
 	bal := uint256.NewInt(42)
 	code := []byte{0x60, 0x80, 0x60, 0x40, 0x52, 0x60, 0x05, 0x60, 0x00, 0x55} // PUSH1 5 PUSH1 0 SSTORE
 	storage := map[common.Hash]common.Hash{
-		common.BigToHash(uint256.NewInt(0).ToBig()):       common.BigToHash(uint256.NewInt(100).ToBig()),
-		common.BigToHash(uint256.NewInt(1).ToBig()):       common.BigToHash(uint256.NewInt(200).ToBig()),
-		common.BigToHash(uint256.NewInt(0x1000).ToBig()):  common.BigToHash(uint256.NewInt(0xdeadbeef).ToBig()),
+		common.BigToHash(uint256.NewInt(0).ToBig()):      common.BigToHash(uint256.NewInt(100).ToBig()),
+		common.BigToHash(uint256.NewInt(1).ToBig()):      common.BigToHash(uint256.NewInt(200).ToBig()),
+		common.BigToHash(uint256.NewInt(0x1000).ToBig()): common.BigToHash(uint256.NewInt(0xdeadbeef).ToBig()),
 	}
 	accounts := []Account{{
 		Address: addr,
@@ -174,4 +176,82 @@ func branchNodesBytes(m map[string][]byte) []byte {
 		out = append(out, m[k]...)
 	}
 	return out
+}
+
+// TestResultBranchLifetime pins the M1c ownership contract: the branch store
+// RETAINED on Result survives ComputeGenesisRoot's return, BranchIterate
+// yields the identical row set (repeatably), and CloseBranches is idempotent
+// with BranchIterate failing loudly afterwards.
+func TestResultBranchLifetime(t *testing.T) {
+	accounts := make([]Account, 0, 64)
+	for i := 0; i < 64; i++ {
+		var addr common.Address
+		addr[0], addr[19] = byte(i+1), byte(i)
+		accounts = append(accounts, Account{
+			Address: addr,
+			Nonce:   uint64(i + 1),
+			Balance: uint256.NewInt(uint64(1000 * (i + 1))),
+		})
+	}
+	// Build the 16-store partition + call ComputeGenesisRoot DIRECTLY (not
+	// the FromAccounts wrapper, which closes the branches itself).
+	stores := make([]*streamsort.Store, 0, NumInputParts)
+	defer func() {
+		for _, s := range stores {
+			s.Close()
+		}
+	}()
+	for i := 0; i < NumInputParts; i++ {
+		s, err := streamsort.New("")
+		if err != nil {
+			t.Fatalf("streamsort.New[%d]: %v", i, err)
+		}
+		stores = append(stores, s)
+	}
+	for _, a := range accounts {
+		acctBytes := EncodeAccountUpdate(a.Nonce, a.Balance, nil)
+		if err := stores[InputPart(a.Address[:])].Put(a.Address[:], acctBytes); err != nil {
+			t.Fatalf("put: %v", err)
+		}
+	}
+	for i := range stores {
+		if err := stores[i].Finalize(); err != nil {
+			t.Fatalf("finalize[%d]: %v", i, err)
+		}
+	}
+
+	res, err := ComputeGenesisRoot(stores, "")
+	if err != nil {
+		t.Fatalf("ComputeGenesisRoot: %v", err)
+	}
+
+	collect := func() (map[string][]byte, uint64) {
+		m := make(map[string][]byte)
+		var n uint64
+		if err := res.BranchIterate(func(k, v []byte) error {
+			m[string(k)] = append([]byte(nil), v...)
+			n++
+			return nil
+		}); err != nil {
+			t.Fatalf("BranchIterate: %v", err)
+		}
+		return m, n
+	}
+	first, n1 := collect()
+	second, n2 := collect() // repeatable until CloseBranches
+	if n1 != res.BranchCount || n2 != res.BranchCount {
+		t.Fatalf("BranchIterate row counts %d/%d != BranchCount %d", n1, n2, res.BranchCount)
+	}
+	if len(first) == 0 {
+		t.Fatal("no branches retained — Result.branches lost")
+	}
+	if !bytes.Equal(branchNodesBytes(first), branchNodesBytes(second)) {
+		t.Fatal("BranchIterate not repeatable: byte sets differ across calls")
+	}
+
+	res.CloseBranches()
+	res.CloseBranches() // idempotent
+	if err := res.BranchIterate(func(k, v []byte) error { return nil }); err == nil {
+		t.Fatal("BranchIterate after CloseBranches should error")
+	}
 }
