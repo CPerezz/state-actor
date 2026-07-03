@@ -253,11 +253,83 @@ func InputPart(plainKey []byte) int {
 	return int(erigoncommitment.KeyToHexNibbleHash(plainKey)[0])
 }
 
+// InputKeying selects how the commit-input sub-store rows are keyed.
+type InputKeying int
+
+const (
+	// KeyingPlain: rows keyed by plainKey (addr / addr||slot), value = the
+	// bare encoded Update. Valid in BOTH chunked and single-shot modes —
+	// plain-key order is independent of keccak order, so every round-robin
+	// Touch chunk is a broad hashed sample (the property that keeps the
+	// chunked concurrent fold's skeleton wide; see the 209af4a revert).
+	KeyingPlain InputKeying = iota
+	// KeyingHashed: rows keyed by HashedKey(plainKey), value =
+	// EncodeInputRow(plainKey, update). SINGLE-SHOT ONLY: under chunking the
+	// hashed sort makes each round-robin chunk a NARROW consecutive hashed
+	// slice per nibble, whose thin serial-chunk skeleton breaks later
+	// concurrent chunks ("empty branch data read during unfold" — the bug
+	// that forced the 209af4a revert). In exchange, each 16-way worker reads
+	// its sub-store in exactly hashed order, so subtreeCtx serves
+	// Account/Storage from ONE reused SeekGE Getter (kills the profiled
+	// per-Get newIters chain). ComputeGenesisRoot REJECTS this keying when
+	// chunking is enabled.
+	KeyingHashed
+)
+
+// HashedInput reports whether the commit-input rows should be hashed-keyed:
+// exactly when the fold is single-shot. SINGLE SOURCE OF TRUTH — the
+// generation-side keying and ComputeGenesisRoot's keying parameter both
+// derive from this one predicate (a process-constant), so the forbidden
+// hashed+chunked combination cannot arise from a config skew; the entry
+// assertion in ComputeGenesisRoot is belt-and-suspenders.
+func HashedInput() bool { return commitmentChunkKeys == 0 }
+
+// HashedKey returns KeyToHexNibbleHash(plainKey) — the nibblized keccak
+// (64 B account / 128 B storage) that ParallelHashSort sorts by. KeyingHashed
+// keys each commit-input sub-store by THIS so a worker's hashed-sorted reads
+// are sequential on disk (the reused-SeekGE-Getter fast path); its first
+// nibble [0] is the sub-store index (== InputPart).
+func HashedKey(plainKey []byte) []byte {
+	return erigoncommitment.KeyToHexNibbleHash(plainKey)
+}
+
+// EncodeInputRow builds a KeyingHashed commit-input VALUE: the sub-stores are
+// keyed by the HASHED key, so the plain key must travel in the value for the
+// Touch to recover it (TouchPlainKeyDirect needs the plain key). Layout:
+// 1-byte len(plainKey) || plainKey || updateBytes (plainKey is 20 or 52 B).
+func EncodeInputRow(plainKey, updateBytes []byte) []byte {
+	out := make([]byte, 0, 1+len(plainKey)+len(updateBytes))
+	out = append(out, byte(len(plainKey)))
+	out = append(out, plainKey...)
+	out = append(out, updateBytes...)
+	return out
+}
+
+// DecodeInputRow splits a value produced by EncodeInputRow back into
+// (plainKey, updateBytes). The returned slices alias enc.
+func DecodeInputRow(enc []byte) (plainKey, updateBytes []byte, err error) {
+	if len(enc) == 0 {
+		return nil, nil, errors.New("commitment.DecodeInputRow: empty row")
+	}
+	n := int(enc[0])
+	if 1+n > len(enc) {
+		return nil, nil, fmt.Errorf("commitment.DecodeInputRow: plainKey len %d exceeds row %d", n, len(enc))
+	}
+	return enc[1 : 1+n], enc[1+n:], nil
+}
+
 // ComputeGenesisRoot folds the 16 nibble-partitioned commitment-input sub-stores
-// into the genesis root. inputStores must have len == NumInputParts.
-func ComputeGenesisRoot(inputStores []*streamsort.Store, tmpDir string) (Result, error) {
+// into the genesis root. inputStores must have len == NumInputParts and be
+// keyed per `keying` (which must match how generation wrote the rows — both
+// sides derive from HashedInput()).
+func ComputeGenesisRoot(inputStores []*streamsort.Store, tmpDir string, keying InputKeying) (Result, error) {
 	if len(inputStores) != NumInputParts {
 		return Result{}, fmt.Errorf("commitment.ComputeGenesisRoot: got %d input stores, want %d", len(inputStores), NumInputParts)
+	}
+	// The forbidden combination — hashed keying under chunking reintroduces
+	// the narrow-chunk empty-branch failure (209af4a). Fail loudly instead.
+	if keying == KeyingHashed && commitmentChunkKeys > 0 {
+		return Result{}, errors.New("commitment.ComputeGenesisRoot: hashed input keying requires single-shot (STATE_ACTOR_COMMITMENT_CHUNK_KEYS=0)")
 	}
 	// Live read-write branch sink shared by all 16 nibble-disjoint workers
 	// + the root ctx. Replaces the in-memory mergedBranches map. Created
@@ -280,12 +352,19 @@ func ComputeGenesisRoot(inputStores []*streamsort.Store, tmpDir string) (Result,
 	// Workers write disjoint first-nibble prefixes, so concurrent PutBranch
 	// (pebble Set) has no key-overwrite hazard and needs no per-worker merge.
 	factory := func() (erigoncommitment.PatriciaContext, func()) {
-		return &subtreeCtx{inputStores: inputStores, branches: branches}, func() {}
+		sc := &subtreeCtx{inputStores: inputStores, branches: branches, keying: keying, getterPart: -1}
+		return sc, func() {
+			if sc.getter != nil {
+				_ = sc.getter.Close()
+			}
+		}
 	}
 
 	// rootCtx shares the same store; the root-level PutBranch from foldBranch
 	// (and the ApplyAndClearInlineDeferredUpdates flush below) lands in it.
-	rootCtx, _ := factory()
+	// Its closeFn releases the getter it may have bound (hashed keying).
+	rootCtx, rootCtxClose := factory()
+	defer rootCtxClose()
 
 	// A0 — chunked Touch+Process. When commitmentChunkKeys > 0, build the trie
 	// INCREMENTALLY in bounded chunks: each chunk gets a FRESH Updates, so the
@@ -408,7 +487,18 @@ func ComputeGenesisRoot(inputStores []*streamsort.Store, tmpDir string) (Result,
 			if !cur.Valid() {
 				continue
 			}
-			upds.TouchPlainKeyDirect(string(cur.Key()), &placeholder)
+			// KeyingHashed stores are keyed by the hashed key; the plain key
+			// TouchPlainKeyDirect needs travels in the row value.
+			if keying == KeyingHashed {
+				plainKey, _, derr := DecodeInputRow(cur.Value())
+				if derr != nil {
+					closeCursors()
+					return Result{}, fmt.Errorf("commitment.ComputeGenesisRoot: decode input row: %w", derr)
+				}
+				upds.TouchPlainKeyDirect(string(plainKey), &placeholder)
+			} else {
+				upds.TouchPlainKeyDirect(string(cur.Key()), &placeholder)
+			}
 			chunkKeys++
 			cur.Next()
 			advanced = true
@@ -480,6 +570,13 @@ func ComputeGenesisRoot(inputStores []*streamsort.Store, tmpDir string) (Result,
 // the slice into a temp streamsort + calls the streaming
 // ComputeGenesisRoot. Not for production at bench scale.
 func ComputeGenesisRootFromAccounts(accounts []Account) (Result, error) {
+	return ComputeGenesisRootFromAccountsKeyed(accounts, KeyingPlain)
+}
+
+// ComputeGenesisRootFromAccountsKeyed is ComputeGenesisRootFromAccounts with
+// an explicit input keying, so tests can drive BOTH layouts over the same
+// alloc and assert byte-identical results (the KeyingHashed safety gate).
+func ComputeGenesisRootFromAccountsKeyed(accounts []Account, keying InputKeying) (Result, error) {
 	// 16 nibble-partitioned input sub-stores (matches production).
 	stores := make([]*streamsort.Store, 0, NumInputParts)
 	closeAll := func() {
@@ -497,6 +594,12 @@ func ComputeGenesisRootFromAccounts(accounts []Account) (Result, error) {
 	}
 	defer closeAll()
 
+	put := func(part int, plainKey, updateBytes []byte) error {
+		if keying == KeyingHashed {
+			return stores[part].Put(HashedKey(plainKey), EncodeInputRow(plainKey, updateBytes))
+		}
+		return stores[part].Put(plainKey, updateBytes)
+	}
 	for _, a := range accounts {
 		var balance *uint256.Int
 		if a.Balance != nil {
@@ -504,7 +607,7 @@ func ComputeGenesisRootFromAccounts(accounts []Account) (Result, error) {
 		}
 		acctBytes := EncodeAccountUpdate(a.Nonce, balance, a.Code)
 		part := InputPart(a.Address[:]) // storage shares this part (hash derives from addr)
-		if err := stores[part].Put(a.Address[:], acctBytes); err != nil {
+		if err := put(part, a.Address[:], acctBytes); err != nil {
 			return Result{}, fmt.Errorf("ComputeGenesisRootFromAccounts: put account %s: %w", a.Address.Hex(), err)
 		}
 		// Storage entries keyed by addr||slot. Skip all-zero values.
@@ -517,7 +620,7 @@ func ComputeGenesisRootFromAccounts(accounts []Account) (Result, error) {
 			composite = append(composite, a.Address[:]...)
 			composite = append(composite, slot[:]...)
 			storBytes := EncodeStorageUpdate(val[:])
-			if err := stores[part].Put(composite, storBytes); err != nil {
+			if err := put(part, composite, storBytes); err != nil {
 				return Result{}, fmt.Errorf("ComputeGenesisRootFromAccounts: put storage %s/%s: %w", a.Address.Hex(), slot.Hex(), err)
 			}
 		}
@@ -528,7 +631,7 @@ func ComputeGenesisRootFromAccounts(accounts []Account) (Result, error) {
 		}
 	}
 	// Tests/H4-invariance use tiny inputs; "" (os.TempDir) is fine here.
-	res, err := ComputeGenesisRoot(stores, "")
+	res, err := ComputeGenesisRoot(stores, "", keying)
 	if err != nil {
 		return Result{}, err
 	}
@@ -562,11 +665,67 @@ func ComputeGenesisRootFromAccounts(accounts []Account) (Result, error) {
 // folded prefix) and the read path that makes incremental/chunked
 // commitment work.
 type subtreeCtx struct {
-	// inputStores is the 16 nibble-partitioned commitment-input sub-stores.
-	// Account/Storage route by InputPart(plainKey); a concurrent worker only
-	// ever hits one part, so its Pebble cache is uncontended.
+	// inputStores is the 16 nibble-partitioned commitment-input sub-stores,
+	// keyed per `keying`. Account/Storage route by InputPart(plainKey); a
+	// concurrent worker only ever hits one part, so its Pebble cache is
+	// uncontended.
 	inputStores []*streamsort.Store
 	branches    *branchStore
+	keying      InputKeying
+	// getter is a lazily-opened reused SeekGE cursor on this ctx's ONE
+	// sub-store — the KeyingHashed fast path (a 16-way worker reads its
+	// nibble in hashed-sorted order, so SeekGE stays in-file, skipping the
+	// per-Get iterator build). getterPart tracks its binding: -1 = none yet,
+	// 0..15 = bound, -2 = retired (a nibble-spanning ctx — the root/serial
+	// engine — falls back to db.Get). Closed by the factory's closeFn.
+	getter     *streamsort.Getter
+	getterPart int
+}
+
+// lookup returns the encoded Update bytes for plainKey (nil if absent),
+// routing to the right nibble sub-store per the ctx's keying.
+func (c *subtreeCtx) lookup(plainKey []byte) ([]byte, error) {
+	part := InputPart(plainKey)
+	if c.keying == KeyingPlain {
+		return c.inputStores[part].Get(plainKey)
+	}
+	// KeyingHashed: rows keyed by the hashed key, value wraps the plain key.
+	hashedKey := HashedKey(plainKey)
+	var (
+		row []byte
+		err error
+	)
+	switch c.getterPart {
+	case part:
+		row, err = c.getter.Get(hashedKey)
+	case -1:
+		g, gerr := c.inputStores[part].NewGetter()
+		if gerr != nil {
+			return nil, gerr
+		}
+		c.getter, c.getterPart = g, part
+		row, err = c.getter.Get(hashedKey)
+	default:
+		// A part different from the getter's binding → this ctx spans
+		// nibbles (the root/serial ctx). Retire the getter; use db.Get.
+		if c.getter != nil {
+			_ = c.getter.Close()
+			c.getter = nil
+		}
+		c.getterPart = -2
+		row, err = c.inputStores[part].Get(hashedKey)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if row == nil {
+		return nil, nil
+	}
+	_, updateBytes, derr := DecodeInputRow(row)
+	if derr != nil {
+		return nil, derr
+	}
+	return updateBytes, nil
 }
 
 func (c *subtreeCtx) Branch(prefix []byte) ([]byte, erigonkv.Step, error) {
@@ -583,9 +742,9 @@ func (c *subtreeCtx) PutBranch(prefix []byte, data []byte, prevData []byte) erro
 }
 
 func (c *subtreeCtx) Account(plainKey []byte) (*erigoncommitment.Update, error) {
-	enc, err := c.inputStores[InputPart(plainKey)].Get(plainKey)
+	enc, err := c.lookup(plainKey)
 	if err != nil {
-		return nil, fmt.Errorf("commitment.subtreeCtx.Account: Get(%x): %w", plainKey, err)
+		return nil, fmt.Errorf("commitment.subtreeCtx.Account: lookup(%x): %w", plainKey, err)
 	}
 	if enc == nil {
 		u := new(erigoncommitment.Update)
@@ -607,9 +766,9 @@ func (c *subtreeCtx) Account(plainKey []byte) (*erigoncommitment.Update, error) 
 }
 
 func (c *subtreeCtx) Storage(plainKey []byte) (*erigoncommitment.Update, error) {
-	enc, err := c.inputStores[InputPart(plainKey)].Get(plainKey)
+	enc, err := c.lookup(plainKey)
 	if err != nil {
-		return nil, fmt.Errorf("commitment.subtreeCtx.Storage: Get(%x): %w", plainKey, err)
+		return nil, fmt.Errorf("commitment.subtreeCtx.Storage: lookup(%x): %w", plainKey, err)
 	}
 	if enc == nil {
 		u := new(erigoncommitment.Update)

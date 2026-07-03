@@ -647,7 +647,11 @@ func writeSnapshots(
 	// cfg.DBPath (real bind-mounted disk) is the etl spill dir (A1) AND the
 	// live branch-store dir; "" would spill the ~28 GB touched-key runs and
 	// the branches to tmpfs (RAM) on the bench host.
-	result, err := internalcommitment.ComputeGenesisRoot(commitmentInputStores, cfg.DBPath)
+	keying := internalcommitment.KeyingPlain
+	if internalcommitment.HashedInput() {
+		keying = internalcommitment.KeyingHashed
+	}
+	result, err := internalcommitment.ComputeGenesisRoot(commitmentInputStores, cfg.DBPath, keying)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("writeSnapshots: ComputeGenesisRoot: %w", err)
 	}
@@ -849,7 +853,13 @@ func encodeEntity(
 
 	// Route this account (and all its storage) to its commit-input sub-store by
 	// the first nibble of keccak(addr) — the ParallelHashSort worker shard.
-	part := uint8(internalcommitment.InputPart(addrKey))
+	// Under KeyingHashed (single-shot fold; commitment.HashedInput) the row is
+	// additionally KEYED by the full hashed key with the plain key in the value
+	// (EncodeInputRow), enabling the fold's sequential reused-Getter reads. The
+	// keccak is the same either way (InputPart == HashedKey[0]) and stays on
+	// this parallel encode worker.
+	hashedAddr := internalcommitment.HashedKey(addrKey)
+	part := hashedAddr[0]
 
 	// Inline storage (foundational PreAlloc + contract autofill).
 	for slot, value := range ew.entry.Storage {
@@ -858,9 +868,12 @@ func encodeEntity(
 		}
 	}
 
-	// Commitment input: account-level Update keyed by plain addr. Reuse the
-	// code hash computed above (no second keccak).
+	// Commitment input: account-level Update. Reuse the code hash computed
+	// above (no second keccak).
 	commitBytes := internalcommitment.EncodeAccountUpdateCodeHash(ew.entry.Nonce, balance, codeHash)
+	if internalcommitment.HashedInput() {
+		return out.commitIn.send(domainWrite{key: hashedAddr, value: internalcommitment.EncodeInputRow(addrKey, commitBytes), part: part})
+	}
 	return out.commitIn.send(domainWrite{key: addrKey, value: commitBytes, part: part})
 }
 
@@ -892,6 +905,11 @@ func encodeStorageSlot(
 	atomic.AddUint64(&counts.storage, 1)
 
 	commitBytes := internalcommitment.EncodeStorageUpdate(slotValue[:])
+	if internalcommitment.HashedInput() {
+		// Same part either way: HashedKey(addr||slot)[0] derives from
+		// keccak(addr), matching the owning account's part.
+		return out.commitIn.send(domainWrite{key: internalcommitment.HashedKey(plainKey), value: internalcommitment.EncodeInputRow(plainKey, commitBytes), part: part})
+	}
 	return out.commitIn.send(domainWrite{key: plainKey, value: commitBytes, part: part})
 }
 

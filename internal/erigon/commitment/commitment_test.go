@@ -220,7 +220,7 @@ func TestResultBranchLifetime(t *testing.T) {
 		}
 	}
 
-	res, err := ComputeGenesisRoot(stores, "")
+	res, err := ComputeGenesisRoot(stores, "", KeyingPlain)
 	if err != nil {
 		t.Fatalf("ComputeGenesisRoot: %v", err)
 	}
