@@ -44,7 +44,26 @@ var delegationPrefix = []byte{0xef, 0x01, 0x00}
 //
 // The nonce-zero-to-one bump consumes no RNG draws.
 func GenerateEOAFlavored(rng *mrand.Rand, flavors EOAFlavors) *entitygen.Account {
-	acc := entitygen.GenerateEOA(rng)
+	return generateEOAFlavored(rng, flavors, false)
+}
+
+// GenerateEOAFlavoredLean is GenerateEOAFlavored without the derived-hash
+// keccaks (AddrHash + delegation CodeHash) — the RNG draw sequence is
+// byte-identical (neither keccak consumes draws); Code is still built (the
+// erigon writer needs the bytes and re-derives the hash on its parallel encode
+// workers), but AddrHash / CodeHash / StateAccount.CodeHash are left at their
+// zero values. Only for writers that never read those fields.
+func GenerateEOAFlavoredLean(rng *mrand.Rand, flavors EOAFlavors) *entitygen.Account {
+	return generateEOAFlavored(rng, flavors, true)
+}
+
+func generateEOAFlavored(rng *mrand.Rand, flavors EOAFlavors, skipDerivedHashes bool) *entitygen.Account {
+	var acc *entitygen.Account
+	if skipDerivedHashes {
+		acc = entitygen.GenerateEOALean(rng)
+	} else {
+		acc = entitygen.GenerateEOA(rng)
+	}
 
 	if acc.StateAccount.Nonce == 0 {
 		acc.StateAccount.Nonce = 1
@@ -64,10 +83,12 @@ func GenerateEOAFlavored(rng *mrand.Rand, flavors EOAFlavors) *entitygen.Account
 		code := make([]byte, 0, 23)
 		code = append(code, delegationPrefix...)
 		code = append(code, target[:]...)
-		codeHash := crypto.Keccak256Hash(code)
 		acc.Code = code
-		acc.CodeHash = codeHash
-		acc.StateAccount.CodeHash = codeHash.Bytes()
+		if !skipDerivedHashes {
+			codeHash := crypto.Keccak256Hash(code)
+			acc.CodeHash = codeHash
+			acc.StateAccount.CodeHash = codeHash.Bytes()
+		}
 	}
 
 	return acc

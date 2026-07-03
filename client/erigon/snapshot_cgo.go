@@ -318,6 +318,12 @@ func writeSnapshots(
 	// nil return would crash geth at the same point — we mirror that
 	// contract rather than guard against it).
 	if pipelineErr == nil && cfg.AutoFill != nil {
+		// Erigon never reads the drawn Account's AddrHash/CodeHash (it keys
+		// stores by plain address and re-derives the code hash on the parallel
+		// encode workers — see encodeEntity), so skip those keccaks on this
+		// single-threaded draw loop. RNG-draw-sequence-neutral (pinned by
+		// TestFlavoredDrawRNGSequenceInvariant) → cross-client roots unchanged.
+		cfg.AutoFill.SkipDerivedHashes = true
 		rng := mrand.New(mrand.NewSource(cfg.Seed))
 		cfg.Progress.Stage("erigon: generating accounts")
 		for i := 0; i < cfg.AutoFill.NumEOAs && pipelineErr == nil; i++ {

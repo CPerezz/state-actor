@@ -118,15 +118,20 @@ func EncodeStorageUpdate(value []byte) []byte {
 // commitmentChunkKeys, when > 0, bounds how many keys each incremental
 // commitment chunk Touches before a Process flush (A0), so one chunk's
 // Updates.keys dedup map + etl working set are ~O(commitmentChunkKeys)
-// instead of O(total-keys) (~tens of GB across a 100 GB alloc). When > 0 the
-// chunked path uses the SERIAL incremental Process (bounded RAM, correct
-// per-block engine); 0 uses the single concurrent Process (fast, full
-// t.keys in RAM — fine when RAM is ample, e.g. the 240 GB bench).
+// instead of O(total-keys) (upstream's dedup map holds every touched
+// plainKey in RAM at ~100 B/key, never spilled — ~50-67 GB across a 100 GB
+// alloc). When > 0, chunk 0 runs on the SERIAL engine and every later chunk
+// on the CONCURRENT 16-way engine (see chunkConcurrent); 0 runs ONE
+// concurrent Process — no chunk barriers and no cross-chunk branch
+// re-reads, but the full dedup map lives in RAM, so it is only viable when
+// total-keys × ~100 B fits the heap budget (e.g. ≤~25 GB allocs under
+// GOMEMLIMIT=20GiB).
 //
 // DEFAULT 0 (single concurrent Process). Override at runtime with
-// STATE_ACTOR_COMMITMENT_CHUNK_KEYS (e.g. 5000000) to bound RAM on
-// memory-constrained / low-memory-validation runs at the cost of a serial
-// commitment walk. setCommitmentChunkKeys overrides it in tests.
+// STATE_ACTOR_COMMITMENT_CHUNK_KEYS to bound RAM at big-alloc scale; bigger
+// chunks mean fewer chunk barriers + fewer spine re-descents, so pick the
+// largest chunk whose dedup map fits the budget (~32M keys ≈ 3.5 GB under
+// GOMEMLIMIT=20GiB). setCommitmentChunkKeys overrides it in tests.
 var commitmentChunkKeys = func() int {
 	if v := os.Getenv("STATE_ACTOR_COMMITMENT_CHUNK_KEYS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {

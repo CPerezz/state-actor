@@ -19,6 +19,16 @@ type Plan struct {
 	EOAFlavors     EOAFlavors
 	StorageSampler Sampler
 	CodeSampler    Sampler
+
+	// SkipDerivedHashes elides the RNG-neutral derived-hash work on the
+	// single-threaded draw goroutine (the AddrHash keccak and the ~30%
+	// delegation CodeHash keccak — neither consumes RNG draws, so the drawn
+	// byte-sequence and cross-client roots are identical either way). Safe
+	// ONLY for writers that never read Account.AddrHash/CodeHash and re-derive
+	// what they need off the draw goroutine (erigon: keys by plain address,
+	// re-hashes code on its encode workers). geth/reth/besu/nethermind/ethrex
+	// consume AddrHash and MUST leave this false (the default).
+	SkipDerivedHashes bool
 }
 
 // Profile selects the account/code/storage byte-split AutoFill targets.
@@ -137,19 +147,22 @@ func PlanForBudgetProfile(topUp uint64, profile Profile) (*Plan, error) {
 // entitygen.GenerateEOA draws plus 2 Bernoulli Float64s plus a conditional
 // 20-byte read (when the delegation Bernoulli fires).
 func (p *Plan) DrawEOA(rng *mrand.Rand) *entitygen.Account {
+	if p.SkipDerivedHashes {
+		return GenerateEOAFlavoredLean(rng, p.EOAFlavors)
+	}
 	return GenerateEOAFlavored(rng, p.EOAFlavors)
 }
 
 // DrawContract produces one synthetic contract with sampled code and
 // storage sizes, then forwards to entitygen.GenerateContract. RNG draw
 // order is fixed across all client emission sites:
-//   1. CodeSampler.Draw(rng)    — code size in bytes (truncated normal).
-//   2. StorageSampler.Draw(rng) — storage size in bytes; slot count =
-//      bytes / sizecal.BytesPerSlot.
-//   3. entitygen.GenerateContract(rng, codeSize*2/3, numSlots) — canonical
-//      contract draw sequence. The 2/3 factor compensates for the
-//      `codeSize + rng.Intn(codeSize)` doubling inside GenerateContract so
-//      the realized mean lands at MeanContractCode.
+//  1. CodeSampler.Draw(rng)    — code size in bytes (truncated normal).
+//  2. StorageSampler.Draw(rng) — storage size in bytes; slot count =
+//     bytes / sizecal.BytesPerSlot.
+//  3. entitygen.GenerateContract(rng, codeSize*2/3, numSlots) — canonical
+//     contract draw sequence. The 2/3 factor compensates for the
+//     `codeSize + rng.Intn(codeSize)` doubling inside GenerateContract so
+//     the realized mean lands at MeanContractCode.
 func (p *Plan) DrawContract(rng *mrand.Rand) *entitygen.Account {
 	codeBytes := p.CodeSampler.Draw(rng)
 	codeSize := max(int(codeBytes*2/3), 1)
