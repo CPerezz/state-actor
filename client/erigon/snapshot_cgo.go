@@ -126,14 +126,91 @@ type domainWrite struct {
 	part uint8
 }
 
-// perDomainChans is the 4 per-domain channels — one dedicated writer
-// goroutine drains each. The 4096 buffer absorbs a single
-// 615-slot-contract burst without blocking the encoder.
+// perDomainChans is the 4 per-domain BATCH channels — one dedicated writer
+// goroutine drains each. Elements are []domainWrite batches (domainBatchSize
+// rows) built by worker-local batchedSenders; the 256-batch buffer holds the
+// same order of in-flight rows as the old 4096 per-item buffer at ~1/128th
+// the channel operations.
 type perDomainChans struct {
-	accounts chan domainWrite
-	storage  chan domainWrite
-	code     chan domainWrite
-	commitIn chan domainWrite
+	accounts chan []domainWrite
+	storage  chan []domainWrite
+	code     chan []domainWrite
+	commitIn chan []domainWrite
+}
+
+// domainBatchSize is how many domainWrites accumulate in a worker-local
+// buffer before ONE batched channel send. Batching exists because the
+// profiled generation cost was NOT the writers' pebble Puts (arenaskl ~4%)
+// but the per-item channel machinery itself: sendDomainWrite 10.15% cum +
+// runtime.selectgo 30% cum + futex/steal churn across 48 producers —
+// ~1.5-2B channel ops at 613M entities × 2-3 sends each. 128/batch cuts
+// the op count ~99% without materially raising memory (the row payloads
+// are allocated either way; a batch is ~128 slice headers).
+const domainBatchSize = 128
+
+// batchedSender accumulates domainWrites worker-locally and ships them as
+// []domainWrite batches. NOT goroutine-safe — one per (worker, domain).
+type batchedSender struct {
+	ctx context.Context
+	ch  chan<- []domainWrite
+	buf []domainWrite
+}
+
+func newBatchedSender(ctx context.Context, ch chan<- []domainWrite) *batchedSender {
+	return &batchedSender{ctx: ctx, ch: ch, buf: make([]domainWrite, 0, domainBatchSize)}
+}
+
+func (s *batchedSender) send(dw domainWrite) error {
+	s.buf = append(s.buf, dw)
+	if len(s.buf) >= domainBatchSize {
+		return s.flush()
+	}
+	return nil
+}
+
+// flush ships the buffered batch (no-op when empty). The buffer is handed
+// off to the writer goroutine; a fresh one backs the next batch.
+func (s *batchedSender) flush() error {
+	if len(s.buf) == 0 {
+		return nil
+	}
+	batch := s.buf
+	s.buf = make([]domainWrite, 0, domainBatchSize)
+	select {
+	case s.ch <- batch:
+		return nil
+	case <-s.ctx.Done():
+		return s.ctx.Err()
+	}
+}
+
+// domainSenders is one producer goroutine's set of per-domain batched
+// senders. Every producer (each encode worker; the main-goroutine PreAlloc
+// drain) owns its own instance and MUST flushAll before finishing so no
+// buffered rows are dropped.
+type domainSenders struct {
+	accounts *batchedSender
+	storage  *batchedSender
+	code     *batchedSender
+	commitIn *batchedSender
+}
+
+func newDomainSenders(ctx context.Context, chans *perDomainChans) *domainSenders {
+	return &domainSenders{
+		accounts: newBatchedSender(ctx, chans.accounts),
+		storage:  newBatchedSender(ctx, chans.storage),
+		code:     newBatchedSender(ctx, chans.code),
+		commitIn: newBatchedSender(ctx, chans.commitIn),
+	}
+}
+
+func (s *domainSenders) flushAll() error {
+	for _, b := range []*batchedSender{s.accounts, s.storage, s.code, s.commitIn} {
+		if err := b.flush(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // domainCounts tracks per-domain entry counts. Workers increment via
@@ -247,11 +324,14 @@ func writeSnapshots(
 	pipelineCtx, cancelPipeline := context.WithCancel(ctx)
 	defer cancelPipeline()
 
+	// 256 in-flight BATCHES (× domainBatchSize rows) per domain — same
+	// order of buffered rows as the old 4096 per-item buffer, ~1/128th the
+	// channel operations.
 	chans := &perDomainChans{
-		accounts: make(chan domainWrite, 4096),
-		storage:  make(chan domainWrite, 4096),
-		code:     make(chan domainWrite, 4096),
-		commitIn: make(chan domainWrite, 4096),
+		accounts: make(chan []domainWrite, 256),
+		storage:  make(chan []domainWrite, 256),
+		code:     make(chan []domainWrite, 256),
+		commitIn: make(chan []domainWrite, 256),
 	}
 
 	N := erigonWorkers
@@ -420,6 +500,9 @@ func writeSnapshots(
 		// "building snapshots & commitment" banner above. Single goroutine here,
 		// so one SlotWorker; nil-safe when progress is unwired.
 		slotW := cfg.Progress.SlotMeter().Worker()
+		// This main-goroutine producer gets its own batched senders —
+		// flushed after the drain, BEFORE the channels close below.
+		drainSenders := newDomainSenders(pipelineCtx, chans)
 		for i := range cfg.PreAlloc {
 			pe := &cfg.PreAlloc[i]
 			if pe.Storage == nil {
@@ -427,7 +510,7 @@ func writeSnapshots(
 			}
 			part := uint8(internalcommitment.InputPart(pe.Address[:]))
 			pe.Storage(func(slot, value common.Hash) bool {
-				if err := encodeStorageSlot(pipelineCtx, pe.Address, slot, value, part, chans, &counts); err != nil {
+				if err := encodeStorageSlot(pipelineCtx, pe.Address, slot, value, part, drainSenders, &counts); err != nil {
 					pipelineErr = err
 					return false
 				}
@@ -442,6 +525,13 @@ func writeSnapshots(
 			})
 			if pipelineErr != nil {
 				break
+			}
+		}
+		// Ship the drain's partially-filled batches before the channels
+		// close below — dropping them would silently lose rows.
+		if pipelineErr == nil {
+			if err := drainSenders.flushAll(); err != nil {
+				pipelineErr = err
 			}
 		}
 		stats.TotalBytes = stats.StorageBytes + stats.CodeBytes
@@ -660,7 +750,7 @@ func runDomainWriter(
 	wg *sync.WaitGroup,
 	errCh chan<- error,
 	cancel context.CancelFunc,
-	in <-chan domainWrite,
+	in <-chan []domainWrite,
 	store *streamsort.Store,
 	label string,
 ) {
@@ -684,15 +774,18 @@ func autofillEncodeWorker(
 	out *perDomainChans,
 	counts *domainCounts,
 ) error {
+	senders := newDomainSenders(ctx, out)
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case ew, ok := <-in:
 			if !ok {
-				return nil
+				// Ship the partially-filled batches before exiting —
+				// dropping them would silently lose rows.
+				return senders.flushAll()
 			}
-			if err := encodeEntity(ctx, ew, out, counts); err != nil {
+			if err := encodeEntity(ctx, ew, senders, counts); err != nil {
 				return err
 			}
 		}
@@ -710,7 +803,7 @@ func autofillEncodeWorker(
 func encodeEntity(
 	ctx context.Context,
 	ew entityWork,
-	out *perDomainChans,
+	out *domainSenders,
 	counts *domainCounts,
 ) error {
 	// Snapshot keys are plain addr (20 bytes) — no rangeIdx prefix in
@@ -741,14 +834,14 @@ func encodeEntity(
 		copy(acct.CodeHash[:], h[:])
 		codeHash = &h
 	}
-	if err := sendDomainWrite(ctx, out.accounts, domainWrite{key: addrKey, value: account.SerialiseV3(acct)}); err != nil {
+	if err := out.accounts.send(domainWrite{key: addrKey, value: account.SerialiseV3(acct)}); err != nil {
 		return err
 	}
 	atomic.AddUint64(&counts.accounts, 1)
 
 	// Code snapshot value: raw bytecode keyed by addr.
 	if len(ew.entry.Code) > 0 {
-		if err := sendDomainWrite(ctx, out.code, domainWrite{key: addrKey, value: ew.entry.Code}); err != nil {
+		if err := out.code.send(domainWrite{key: addrKey, value: ew.entry.Code}); err != nil {
 			return err
 		}
 		atomic.AddUint64(&counts.code, 1)
@@ -768,7 +861,7 @@ func encodeEntity(
 	// Commitment input: account-level Update keyed by plain addr. Reuse the
 	// code hash computed above (no second keccak).
 	commitBytes := internalcommitment.EncodeAccountUpdateCodeHash(ew.entry.Nonce, balance, codeHash)
-	return sendDomainWrite(ctx, out.commitIn, domainWrite{key: addrKey, value: commitBytes, part: part})
+	return out.commitIn.send(domainWrite{key: addrKey, value: commitBytes, part: part})
 }
 
 // encodeStorageSlot encodes one (addr, slot, value) tuple. Skip on
@@ -780,7 +873,7 @@ func encodeStorageSlot(
 	slotKey common.Hash,
 	slotValue common.Hash,
 	part uint8, // commit-input sub-store = the owning account's part
-	out *perDomainChans,
+	out *domainSenders,
 	counts *domainCounts,
 ) error {
 	trimmed := trimLeadingZeros(slotValue[:])
@@ -793,23 +886,13 @@ func encodeStorageSlot(
 	plainKey := make([]byte, 0, 20+32)
 	plainKey = append(plainKey, addr[:]...)
 	plainKey = append(plainKey, slotKey[:]...)
-	if err := sendDomainWrite(ctx, out.storage, domainWrite{key: plainKey, value: trimmed}); err != nil {
+	if err := out.storage.send(domainWrite{key: plainKey, value: trimmed}); err != nil {
 		return err
 	}
 	atomic.AddUint64(&counts.storage, 1)
 
 	commitBytes := internalcommitment.EncodeStorageUpdate(slotValue[:])
-	return sendDomainWrite(ctx, out.commitIn, domainWrite{key: plainKey, value: commitBytes, part: part})
-}
-
-// sendDomainWrite is the cancel-aware channel send used by encoders.
-func sendDomainWrite(ctx context.Context, ch chan<- domainWrite, dw domainWrite) error {
-	select {
-	case ch <- dw:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	return out.commitIn.send(domainWrite{key: plainKey, value: commitBytes, part: part})
 }
 
 // domainWriter drains a single per-domain channel into the
@@ -825,7 +908,7 @@ func runCommitInWriter(
 	wg *sync.WaitGroup,
 	errCh chan<- error,
 	cancel context.CancelFunc,
-	in <-chan domainWrite,
+	in <-chan []domainWrite,
 	stores []*streamsort.Store,
 ) {
 	defer wg.Done()
@@ -838,17 +921,19 @@ func runCommitInWriter(
 	}
 }
 
-func commitInWriter(ctx context.Context, in <-chan domainWrite, stores []*streamsort.Store) error {
+func commitInWriter(ctx context.Context, in <-chan []domainWrite, stores []*streamsort.Store) error {
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case dw, ok := <-in:
+		case batch, ok := <-in:
 			if !ok {
 				return nil
 			}
-			if err := stores[dw.part].Put(dw.key, dw.value); err != nil {
-				return fmt.Errorf("commitInWriter[part=%d]: %w", dw.part, err)
+			for _, dw := range batch {
+				if err := stores[dw.part].Put(dw.key, dw.value); err != nil {
+					return fmt.Errorf("commitInWriter[part=%d]: %w", dw.part, err)
+				}
 			}
 		}
 	}
@@ -856,7 +941,7 @@ func commitInWriter(ctx context.Context, in <-chan domainWrite, stores []*stream
 
 func domainWriter(
 	ctx context.Context,
-	in <-chan domainWrite,
+	in <-chan []domainWrite,
 	store *streamsort.Store,
 	label string,
 ) error {
@@ -864,12 +949,14 @@ func domainWriter(
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case dw, ok := <-in:
+		case batch, ok := <-in:
 			if !ok {
 				return nil
 			}
-			if err := store.Put(dw.key, dw.value); err != nil {
-				return fmt.Errorf("domainWriter[%s]: %w", label, err)
+			for _, dw := range batch {
+				if err := store.Put(dw.key, dw.value); err != nil {
+					return fmt.Errorf("domainWriter[%s]: %w", label, err)
+				}
 			}
 		}
 	}
