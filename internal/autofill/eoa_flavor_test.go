@@ -5,6 +5,7 @@ import (
 	mrand "math/rand"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/ethereum/state-actor/internal/entitygen"
@@ -105,4 +106,62 @@ func TestGenerateEOAFlavored_CanonicalEOAFirst(t *testing.T) {
 	if plain.Address != flav.Address {
 		t.Errorf("address divergence: plain=%s flav=%s", plain.Address.Hex(), flav.Address.Hex())
 	}
+}
+
+// TestFlavoredDrawRNGSequenceInvariant pins the SkipDerivedHashes safety
+// argument: the lean draw path must consume the EXACT same RNG sequence as the
+// full path (the elided keccaks consume no draws), produce identical drawn
+// content (Address/Nonce/Balance/Code), and leave the RNG in an identical
+// post-draw state. If this holds, cross-client state-root invariance is
+// unaffected by the flag. AddrHash/CodeHash are the EXPECTED delta (zero on
+// the lean path).
+func TestFlavoredDrawRNGSequenceInvariant(t *testing.T) {
+	const n = 2000 // enough to fire the ~30% delegation branch hundreds of times
+	flavors := DefaultEOAFlavors()
+	rngFull := mrand.New(mrand.NewSource(4242))
+	rngLean := mrand.New(mrand.NewSource(4242))
+
+	delegated := 0
+	for i := 0; i < n; i++ {
+		full := GenerateEOAFlavored(rngFull, flavors)
+		lean := GenerateEOAFlavoredLean(rngLean, flavors)
+
+		if full.Address != lean.Address {
+			t.Fatalf("draw %d: address diverged: full=%s lean=%s", i, full.Address.Hex(), lean.Address.Hex())
+		}
+		if full.StateAccount.Nonce != lean.StateAccount.Nonce {
+			t.Fatalf("draw %d: nonce diverged: full=%d lean=%d", i, full.StateAccount.Nonce, lean.StateAccount.Nonce)
+		}
+		if full.StateAccount.Balance.Cmp(lean.StateAccount.Balance) != 0 {
+			t.Fatalf("draw %d: balance diverged: full=%s lean=%s", i, full.StateAccount.Balance, lean.StateAccount.Balance)
+		}
+		if !bytes.Equal(full.Code, lean.Code) {
+			t.Fatalf("draw %d: code diverged: full=%x lean=%x", i, full.Code, lean.Code)
+		}
+		if len(full.Code) > 0 {
+			delegated++
+		}
+		// The expected delta: lean leaves derived hashes zero.
+		if lean.AddrHash != (common.Hash{}) {
+			t.Fatalf("draw %d: lean AddrHash not zero: %s", i, lean.AddrHash.Hex())
+		}
+		if lean.CodeHash != (common.Hash{}) {
+			t.Fatalf("draw %d: lean CodeHash not zero: %s", i, lean.CodeHash.Hex())
+		}
+		// And the full path's hashes are the true derivations.
+		if full.AddrHash != crypto.Keccak256Hash(full.Address[:]) {
+			t.Fatalf("draw %d: full AddrHash wrong", i)
+		}
+	}
+	if delegated == 0 {
+		t.Fatal("fixture never fired the delegation branch — test is vacuous")
+	}
+
+	// Post-draw RNG state must be byte-identical: the next draws agree.
+	for i := 0; i < 8; i++ {
+		if a, b := rngFull.Int63(), rngLean.Int63(); a != b {
+			t.Fatalf("post-draw RNG state diverged at extra draw %d: %d vs %d", i, a, b)
+		}
+	}
+	t.Logf("%d draws identical (%d delegated), post-draw RNG state aligned", n, delegated)
 }

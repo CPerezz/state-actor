@@ -29,17 +29,13 @@
 //     readers WaitGroup tracks active readers.
 //   - Close is idempotent and safe to call from any state.
 //
-// The package exists because the natural Pebble idiom (one batched
-// write phase then concurrent reads) doesn't compose cleanly without
-// an explicit transition — a shared *pebble.Batch is NOT safe for
-// concurrent commit (batch.committing is a non-atomic bool with an
-// explicit "violations may cause memory safety issues" comment at
-// batch.go:305-312). Finalize is the transition that lets us reuse
-// the batched fast path for writes while opening up Pebble's
-// thread-safe read path for parallel HPH commitment walks.
+// The package exists because a shared *pebble.Batch is not safe for
+// concurrent commit; Finalize is the explicit transition from the batched
+// write path to Pebble's thread-safe read path.
 package streamsort
 
 import (
+	"bytes"
 	"fmt"
 	"log"
 	"math"
@@ -70,20 +66,18 @@ const (
 // Options is the optional configuration for NewWithOptions. Zero-value
 // fields fall back to package defaults.
 type Options struct {
-	// BlockCacheBytes overrides the Pebble block cache size. Pebble's
-	// block cache is the primary in-memory hot-data store for random
-	// reads; for read-heavy workloads against multi-GiB Stores the
-	// default 8 MiB cache yields very low hit rates and the LSM SST
-	// disk reads dominate wall time. Set this to a value sized to the
-	// expected working set (e.g. 1-4 GiB for a 12-25 GiB store under
-	// HPH commitment walks). Default: 8 MiB.
-	//
-	// Tuning guidance from upstream Pebble: the cache holds compressed
-	// data blocks (~64 KiB each by default). A 4 GiB cache holds ~65k
-	// blocks. For an HPH walk that touches every entry once in
-	// keccak-sorted order, expect ~30-50% hit rate at this size against
-	// a 12 GiB store — enough to drop most cold disk reads.
+	// BlockCacheBytes overrides the Pebble block cache size (default
+	// 8 MiB — sized for sequential scans). Random-read workloads against
+	// multi-GiB stores need a cache sized to their working set.
 	BlockCacheBytes int64
+
+	// MemTableBytes overrides the per-memtable arena size (default
+	// MemTableSize, 256 MiB). Arenas are C-malloc'd under cgo — off the Go
+	// heap, invisible to GOMEMLIMIT — and up to 2 are live per store, so
+	// this is the store's main committed-RSS knob. Write-once stores
+	// drained by one sequential scan tolerate small arenas (more L0 SSTs
+	// under a single merging iterator).
+	MemTableBytes int64
 }
 
 // Store is a sorted-by-key spill buffer backed by a temp Pebble LSM with
@@ -139,10 +133,14 @@ func NewWithOptions(workDir string, opts Options) (*Store, error) {
 	if opts.BlockCacheBytes > 0 {
 		cacheSize = opts.BlockCacheBytes
 	}
+	memTableSize := uint64(MemTableSize)
+	if opts.MemTableBytes > 0 {
+		memTableSize = uint64(opts.MemTableBytes)
+	}
 	cache := pebble.NewCache(cacheSize)
 	pebbleOpts := &pebble.Options{
 		DisableWAL:                  true,
-		MemTableSize:                MemTableSize,
+		MemTableSize:                memTableSize,
 		MemTableStopWritesThreshold: 2,
 		L0CompactionThreshold:       math.MaxInt32,
 		L0StopWritesThreshold:       math.MaxInt32,
@@ -328,6 +326,122 @@ func (s *Store) Iterate(yield func(key, value []byte) error) error {
 		return fmt.Errorf("streamsort: iter.Error: %w", err)
 	}
 	return nil
+}
+
+// Cursor is a forward pull-iterator over a finalized Store. Unlike Iterate
+// (callback-driven, one store at a time), the CALLER drives advancement, so
+// several Cursors over different Stores can be interleaved — e.g. a
+// deterministic round-robin merge across the 16 nibble-partitioned commitment
+// sub-stores, where every chunk must span all first-nibbles. Not goroutine-safe
+// (one Cursor per goroutine); Close exactly once (holds a reader ref meanwhile).
+type Cursor struct {
+	s    *Store
+	iter *pebble.Iterator
+}
+
+// NewCursor finalizes the store if needed and returns a Cursor positioned at
+// the first key (Valid()==true iff the store is non-empty).
+func (s *Store) NewCursor() (*Cursor, error) {
+	if s.closed.Load() {
+		return nil, fmt.Errorf("streamsort: NewCursor after Close")
+	}
+	if !s.finalized.Load() {
+		if err := s.Finalize(); err != nil {
+			return nil, err
+		}
+	}
+	s.readers.Add(1)
+	iter, err := s.db.NewIter(nil)
+	if err != nil {
+		s.readers.Done()
+		return nil, fmt.Errorf("streamsort: NewCursor NewIter: %w", err)
+	}
+	iter.First()
+	return &Cursor{s: s, iter: iter}, nil
+}
+
+// Valid reports whether Key/Value are positioned on a live entry.
+func (c *Cursor) Valid() bool { return c.iter.Valid() }
+
+// Next advances one entry and reports whether the new position is valid.
+func (c *Cursor) Next() bool { return c.iter.Next() }
+
+// Key / Value return the current entry. They alias Pebble's buffers and are
+// only valid until the next Next/Close — copy if retained.
+func (c *Cursor) Key() []byte   { return c.iter.Key() }
+func (c *Cursor) Value() []byte { return c.iter.Value() }
+
+// Err returns any accumulated iteration error.
+func (c *Cursor) Err() error { return c.iter.Error() }
+
+// Close releases the iterator and the reader ref. Idempotent.
+func (c *Cursor) Close() error {
+	if c.iter == nil {
+		return nil
+	}
+	err := c.iter.Close()
+	c.iter = nil
+	c.s.readers.Done()
+	return err
+}
+
+// Getter is a reusable point-lookup over a finalized Store backed by ONE
+// long-lived pebble.Iterator. For a caller that Gets keys in ASCENDING order —
+// the engine-fallback commitment walk over a hashed-key-sorted sub-store
+// (the default Direct-Drive Fold uses Cursor streams instead) — SeekGE
+// stays within the currently-open sstable and skips the
+// per-call iterator construction (the profiled newIters cost) that Store.Get
+// (db.Get) pays on every call. Not goroutine-safe (one Getter per goroutine);
+// Close exactly once (holds a reader ref meanwhile).
+type Getter struct {
+	s    *Store
+	iter *pebble.Iterator
+}
+
+// NewGetter finalizes the store if needed and returns a reusable Getter.
+func (s *Store) NewGetter() (*Getter, error) {
+	if s.closed.Load() {
+		return nil, fmt.Errorf("streamsort: NewGetter after Close")
+	}
+	if !s.finalized.Load() {
+		if err := s.Finalize(); err != nil {
+			return nil, err
+		}
+	}
+	s.readers.Add(1)
+	iter, err := s.db.NewIter(nil)
+	if err != nil {
+		s.readers.Done()
+		return nil, fmt.Errorf("streamsort: NewGetter NewIter: %w", err)
+	}
+	return &Getter{s: s, iter: iter}, nil
+}
+
+// Get returns the value for key, or (nil, nil) if the key is absent. The
+// returned slice is copied out of Pebble's buffer. Callers that issue keys in
+// ascending order get the reused-iterator fast path.
+func (g *Getter) Get(key []byte) ([]byte, error) {
+	if !g.iter.SeekGE(key) {
+		return nil, g.iter.Error()
+	}
+	if !bytes.Equal(g.iter.Key(), key) {
+		return nil, g.iter.Error()
+	}
+	v := g.iter.Value()
+	out := make([]byte, len(v))
+	copy(out, v)
+	return out, g.iter.Error()
+}
+
+// Close releases the iterator and the reader ref. Idempotent.
+func (g *Getter) Close() error {
+	if g.iter == nil {
+		return nil
+	}
+	err := g.iter.Close()
+	g.iter = nil
+	g.s.readers.Done()
+	return err
 }
 
 // Close flushes any pending batch (if Finalize was not called), waits

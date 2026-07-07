@@ -21,6 +21,18 @@ import (
 // function until the result's Address is unique. Each retry consumes a fresh
 // 23-byte RNG window.
 func GenerateEOA(rng *mrand.Rand) *Account {
+	acc := GenerateEOALean(rng)
+	acc.AddrHash = crypto.Keccak256Hash(acc.Address[:])
+	return acc
+}
+
+// GenerateEOALean is GenerateEOA without the AddrHash keccak — the RNG draw
+// sequence is byte-identical (the keccak consumes no draws), only the derived
+// AddrHash field is left zero. For writers that key by plain address and never
+// read AddrHash (erigon), the keccak is dead work on the single-threaded draw
+// goroutine; clients that consume AddrHash (geth/reth/besu/nethermind/ethrex)
+// must use GenerateEOA.
+func GenerateEOALean(rng *mrand.Rand) *Account {
 	var addr common.Address
 	rng.Read(addr[:])
 
@@ -31,8 +43,7 @@ func GenerateEOA(rng *mrand.Rand) *Account {
 	)
 
 	return &Account{
-		Address:  addr,
-		AddrHash: crypto.Keccak256Hash(addr[:]),
+		Address: addr,
 		StateAccount: &types.StateAccount{
 			Nonce:    uint64(rng.Intn(1000)),
 			Balance:  balance,

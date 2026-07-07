@@ -10,7 +10,23 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/holiman/uint256"
+
+	"github.com/ethereum/state-actor/internal/streamsort"
 )
+
+// collectBranches drains res.BranchIterate into a map for byte-level test
+// assertions (production streams BranchIterate; it never materializes this).
+func collectBranches(t *testing.T, res *Result) map[string][]byte {
+	t.Helper()
+	m := make(map[string][]byte)
+	if err := res.BranchIterate(func(k, v []byte) error {
+		m[string(k)] = append([]byte(nil), v...)
+		return nil
+	}); err != nil {
+		t.Fatalf("collectBranches: %v", err)
+	}
+	return m
+}
 
 // TestEmptyAllocReturnsEmptyTrieRoot pins the canonical empty-trie
 // root and verifies ComputeGenesisRoot bottoms out cleanly when fed no
@@ -21,12 +37,13 @@ func TestEmptyAllocReturnsEmptyTrieRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ComputeGenesisRootFromAccounts([]): %v", err)
 	}
+	defer res.CloseBranches()
 	emptyTrieRoot := common.HexToHash("0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421")
 	if res.Root != emptyTrieRoot {
 		t.Errorf("empty alloc root mismatch:\n  got:  %s\n  want: %s", res.Root.Hex(), emptyTrieRoot.Hex())
 	}
-	if len(res.BranchNodes) != 0 {
-		t.Errorf("empty alloc emitted %d branch nodes; expected 0", len(res.BranchNodes))
+	if n := len(collectBranches(t, &res)); n != 0 {
+		t.Errorf("empty alloc emitted %d branch nodes; expected 0", n)
 	}
 }
 
@@ -45,22 +62,25 @@ func TestSingleEOAProducesDeterministicRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ComputeGenesisRoot: %v", err)
 	}
+	defer res.CloseBranches()
+	branches := collectBranches(t, &res)
 
 	// Two invocations with identical input must agree.
 	res2, err := ComputeGenesisRootFromAccounts(accounts)
 	if err != nil {
 		t.Fatalf("ComputeGenesisRoot (2nd): %v", err)
 	}
+	defer res2.CloseBranches()
 	if res.Root != res2.Root {
 		t.Errorf("non-deterministic: %s vs %s", res.Root.Hex(), res2.Root.Hex())
 	}
-	if !bytes.Equal(branchNodesBytes(res.BranchNodes), branchNodesBytes(res2.BranchNodes)) {
+	if !bytes.Equal(branchNodesBytes(branches), branchNodesBytes(collectBranches(t, &res2))) {
 		t.Error("non-deterministic branch nodes")
 	}
 	if (res.Root == common.Hash{}) {
 		t.Error("got zero hash for non-empty alloc")
 	}
-	t.Logf("single-EOA root: %s (%d branch nodes)", res.Root.Hex(), len(res.BranchNodes))
+	t.Logf("single-EOA root: %s (%d branch nodes)", res.Root.Hex(), len(branches))
 }
 
 // TestContractWithStorageProducesRoot exercises the storage-touch path:
@@ -72,9 +92,9 @@ func TestContractWithStorageProducesRoot(t *testing.T) {
 	bal := uint256.NewInt(42)
 	code := []byte{0x60, 0x80, 0x60, 0x40, 0x52, 0x60, 0x05, 0x60, 0x00, 0x55} // PUSH1 5 PUSH1 0 SSTORE
 	storage := map[common.Hash]common.Hash{
-		common.BigToHash(uint256.NewInt(0).ToBig()):       common.BigToHash(uint256.NewInt(100).ToBig()),
-		common.BigToHash(uint256.NewInt(1).ToBig()):       common.BigToHash(uint256.NewInt(200).ToBig()),
-		common.BigToHash(uint256.NewInt(0x1000).ToBig()):  common.BigToHash(uint256.NewInt(0xdeadbeef).ToBig()),
+		common.BigToHash(uint256.NewInt(0).ToBig()):      common.BigToHash(uint256.NewInt(100).ToBig()),
+		common.BigToHash(uint256.NewInt(1).ToBig()):      common.BigToHash(uint256.NewInt(200).ToBig()),
+		common.BigToHash(uint256.NewInt(0x1000).ToBig()): common.BigToHash(uint256.NewInt(0xdeadbeef).ToBig()),
 	}
 	accounts := []Account{{
 		Address: addr,
@@ -90,17 +110,19 @@ func TestContractWithStorageProducesRoot(t *testing.T) {
 	if (res.Root == common.Hash{}) {
 		t.Error("got zero hash for non-empty alloc with storage")
 	}
-	if len(res.BranchNodes) == 0 {
+	defer res.CloseBranches()
+	if n := len(collectBranches(t, &res)); n == 0 {
 		t.Error("expected at least one branch node for contract+storage alloc")
+	} else {
+		t.Logf("contract+3slots root: %s (%d branch nodes)", res.Root.Hex(), n)
 	}
-	t.Logf("contract+3slots root: %s (%d branch nodes)", res.Root.Hex(), len(res.BranchNodes))
 }
 
 // TestComputeGenesisRoot_IncludesRootBranch is the regression gate for
 // the bug where ParallelHashSort returned the root hash without
 // flushing the root HexPatriciaHashed's deferred branch updates.
 // Without the explicit ApplyAndClearInlineDeferredUpdates call in
-// ComputeGenesisRoot, the resulting BranchNodes map would be missing
+// ComputeGenesisRoot, the branch row set would be missing
 // the root-level (depth-0) branch entry, producing silent state-root
 // divergence at any alloc that lands in 16+ distinct first nibbles.
 //
@@ -109,7 +131,7 @@ func TestContractWithStorageProducesRoot(t *testing.T) {
 // branch — exactly the structure that exposes the bug. The leaves of
 // a single-leaf-per-nibble trie are stored inline in the root branch
 // (no extra branch nodes), so a missing root branch means
-// len(BranchNodes) == 0.
+// zero branch rows.
 func TestComputeGenesisRoot_IncludesRootBranch(t *testing.T) {
 	accounts := generateAccountsSpanningAllFirstNibbles(t)
 	if len(accounts) != 16 {
@@ -119,13 +141,15 @@ func TestComputeGenesisRoot_IncludesRootBranch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ComputeGenesisRootFromAccounts: %v", err)
 	}
+	defer res.CloseBranches()
 	if (res.Root == common.Hash{}) {
 		t.Fatal("expected non-zero root for 16-account alloc")
 	}
-	if len(res.BranchNodes) == 0 {
+	branches := collectBranches(t, &res)
+	if len(branches) == 0 {
 		t.Fatalf("expected ≥ 1 branch node for 16-account alloc spanning all first nibbles; got 0 — root-level branch was not flushed (Bug 2 regression: ApplyAndClearInlineDeferredUpdates not called after pph.Process)")
 	}
-	t.Logf("16-account root: %s (%d branch nodes)", res.Root.Hex(), len(res.BranchNodes))
+	t.Logf("16-account root: %s (%d branch nodes)", res.Root.Hex(), len(branches))
 }
 
 // generateAccountsSpanningAllFirstNibbles produces 16 Accounts whose
@@ -174,4 +198,82 @@ func branchNodesBytes(m map[string][]byte) []byte {
 		out = append(out, m[k]...)
 	}
 	return out
+}
+
+// TestResultBranchLifetime pins the M1c ownership contract: the branch store
+// RETAINED on Result survives ComputeGenesisRoot's return, BranchIterate
+// yields the identical row set (repeatably), and CloseBranches is idempotent
+// with BranchIterate failing loudly afterwards.
+func TestResultBranchLifetime(t *testing.T) {
+	accounts := make([]Account, 0, 64)
+	for i := 0; i < 64; i++ {
+		var addr common.Address
+		addr[0], addr[19] = byte(i+1), byte(i)
+		accounts = append(accounts, Account{
+			Address: addr,
+			Nonce:   uint64(i + 1),
+			Balance: uint256.NewInt(uint64(1000 * (i + 1))),
+		})
+	}
+	// Build the 16-store partition + call ComputeGenesisRoot DIRECTLY (not
+	// the FromAccounts wrapper, which closes the branches itself).
+	stores := make([]*streamsort.Store, 0, NumInputParts)
+	defer func() {
+		for _, s := range stores {
+			s.Close()
+		}
+	}()
+	for i := 0; i < NumInputParts; i++ {
+		s, err := streamsort.New("")
+		if err != nil {
+			t.Fatalf("streamsort.New[%d]: %v", i, err)
+		}
+		stores = append(stores, s)
+	}
+	for _, a := range accounts {
+		acctBytes := EncodeAccountUpdate(a.Nonce, a.Balance, nil)
+		if err := stores[InputPart(a.Address[:])].Put(a.Address[:], acctBytes); err != nil {
+			t.Fatalf("put: %v", err)
+		}
+	}
+	for i := range stores {
+		if err := stores[i].Finalize(); err != nil {
+			t.Fatalf("finalize[%d]: %v", i, err)
+		}
+	}
+
+	res, err := ComputeGenesisRoot(stores, "", KeyingPlain)
+	if err != nil {
+		t.Fatalf("ComputeGenesisRoot: %v", err)
+	}
+
+	collect := func() (map[string][]byte, uint64) {
+		m := make(map[string][]byte)
+		var n uint64
+		if err := res.BranchIterate(func(k, v []byte) error {
+			m[string(k)] = append([]byte(nil), v...)
+			n++
+			return nil
+		}); err != nil {
+			t.Fatalf("BranchIterate: %v", err)
+		}
+		return m, n
+	}
+	first, n1 := collect()
+	second, n2 := collect() // repeatable until CloseBranches
+	if n1 != res.BranchCount || n2 != res.BranchCount {
+		t.Fatalf("BranchIterate row counts %d/%d != BranchCount %d", n1, n2, res.BranchCount)
+	}
+	if len(first) == 0 {
+		t.Fatal("no branches retained — Result.branches lost")
+	}
+	if !bytes.Equal(branchNodesBytes(first), branchNodesBytes(second)) {
+		t.Fatal("BranchIterate not repeatable: byte sets differ across calls")
+	}
+
+	res.CloseBranches()
+	res.CloseBranches() // idempotent
+	if err := res.BranchIterate(func(k, v []byte) error { return nil }); err == nil {
+		t.Fatal("BranchIterate after CloseBranches should error")
+	}
 }

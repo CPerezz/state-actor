@@ -585,3 +585,105 @@ func TestCloseDrainsReaders(t *testing.T) {
 		t.Errorf("Close returned err=%v", err)
 	}
 }
+
+// TestCursorRoundRobin verifies the pull Cursor: round-robining several
+// cursors yields every key, each store still in sorted order, and interleaves
+// them — the property the commitment Touch relies on so chunk 0 spans all
+// 16 nibble sub-stores.
+func TestCursorRoundRobin(t *testing.T) {
+	mk := func(keys ...string) *Store {
+		s, err := New(t.TempDir())
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		for _, k := range keys {
+			if err := s.Put([]byte(k), []byte("v-"+k)); err != nil {
+				t.Fatalf("Put: %v", err)
+			}
+		}
+		if err := s.Finalize(); err != nil {
+			t.Fatalf("Finalize: %v", err)
+		}
+		return s
+	}
+	a := mk("a1", "a2", "a3")
+	defer a.Close()
+	b := mk("b1", "b2")
+	defer b.Close()
+
+	ca, err := a.NewCursor()
+	if err != nil {
+		t.Fatalf("NewCursor a: %v", err)
+	}
+	defer ca.Close()
+	cb, err := b.NewCursor()
+	if err != nil {
+		t.Fatalf("NewCursor b: %v", err)
+	}
+	defer cb.Close()
+
+	var order []string
+	for {
+		advanced := false
+		for _, c := range []*Cursor{ca, cb} {
+			if c.Valid() {
+				order = append(order, string(c.Key()))
+				c.Next()
+				advanced = true
+			}
+		}
+		if !advanced {
+			break
+		}
+	}
+	if got, want := strings.Join(order, ","), "a1,b1,a2,b2,a3"; got != want {
+		t.Fatalf("round-robin order = %q, want %q", got, want)
+	}
+	for _, c := range []*Cursor{ca, cb} {
+		if err := c.Err(); err != nil {
+			t.Fatalf("cursor err: %v", err)
+		}
+	}
+}
+
+// TestGetter verifies the reusable SeekGE Getter: present keys (ascending
+// fast path) return their value; absent keys return nil.
+func TestGetter(t *testing.T) {
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+	keys := []string{"a", "c", "e", "g"}
+	for _, k := range keys {
+		if err := s.Put([]byte(k), []byte("v-"+k)); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+	}
+	if err := s.Finalize(); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	g, err := s.NewGetter()
+	if err != nil {
+		t.Fatalf("NewGetter: %v", err)
+	}
+	defer g.Close()
+	for _, k := range keys { // ascending → reused-iterator fast path
+		v, err := g.Get([]byte(k))
+		if err != nil {
+			t.Fatalf("Get(%s): %v", k, err)
+		}
+		if string(v) != "v-"+k {
+			t.Fatalf("Get(%s) = %q, want v-%s", k, v, k)
+		}
+	}
+	for _, k := range []string{"b", "z"} { // absent
+		v, err := g.Get([]byte(k))
+		if err != nil {
+			t.Fatalf("Get(%s): %v", k, err)
+		}
+		if v != nil {
+			t.Fatalf("Get(absent %s) = %q, want nil", k, v)
+		}
+	}
+}
