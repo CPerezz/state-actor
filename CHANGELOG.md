@@ -31,6 +31,9 @@
   not removed). Boot a flat datadir with `--FlatDb.Enabled=true` (the bloatnet
   bench and the e2e suite pass it). The legacy patricia (`state`-DB) layout is
   no longer written.
+- **`scripts/probe-sst-geom`** — read-only RocksDB probe: per-CF/per-level SST
+  geometry from table properties plus sampled account/code composition (Besu
+  Bonsai `06`/`07` by default).
 
 ### Changed
 - **ethrex `account_codes` values carry a JUMPDEST bitmap** rather than an
