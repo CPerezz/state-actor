@@ -1,6 +1,7 @@
 package autofill
 
 import (
+	"encoding/binary"
 	mrand "math/rand"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -20,11 +21,12 @@ type EOAFlavors struct {
 }
 
 // DefaultEOAFlavors returns the mainnet-shaped defaults: 90 % non-0 balance,
-// 30 % EIP-7702 delegation marker.
+// 2 % EIP-7702 delegation. 2 % is a deliberate floor, not a measured rate:
+// 30 % made designators 94.6 % of Besu's code CF (mainnet 4.2 %).
 func DefaultEOAFlavors() EOAFlavors {
 	return EOAFlavors{
 		HasBalance:    0.90,
-		HasDelegation: 0.30,
+		HasDelegation: 0.02,
 	}
 }
 
@@ -32,15 +34,28 @@ func DefaultEOAFlavors() EOAFlavors {
 // code is delegationPrefix || target20.
 var delegationPrefix = []byte{0xef, 0x01, 0x00}
 
+// DelegationTargetPoolSize caps distinct designators: real 7702 authorities
+// cluster on a few wallet implementations.
+const DelegationTargetPoolSize = 256
+
+// delegationTargets is fixed (not --seed-derived) so every client draws
+// identical targets.
+var delegationTargets = func() (t [DelegationTargetPoolSize]common.Address) {
+	for i := range t {
+		copy(t[i][:], crypto.Keccak256(binary.BigEndian.AppendUint64([]byte("state-actor/eip7702-target/v1"), uint64(i)))[12:])
+	}
+	return t
+}()
+
 // GenerateEOAFlavored returns an EOA produced by entitygen.GenerateEOA
 // post-processed according to flavors.
 //
-// RNG draw order (matters — all 5 client emission sites consume the same
+// RNG draw order (matters — all client emission sites consume the same
 // sequence for the cross-client root invariant):
-//  1. entitygen.GenerateEOA(rng)     — canonical 3 draws.
-//  2. rng.Float64()                  — HasBalance Bernoulli.
-//  3. rng.Float64()                  — HasDelegation Bernoulli.
-//  4. (conditional) rng.Read(target) — only when HasDelegation fires.
+//  1. entitygen.GenerateEOA(rng)  — canonical 3 draws.
+//  2. rng.Float64()               — HasBalance Bernoulli.
+//  3. rng.Float64()               — HasDelegation Bernoulli.
+//  4. (conditional) rng.Intn(DelegationTargetPoolSize) — pool index, only when 3 fires.
 //
 // The nonce-zero-to-one bump consumes no RNG draws.
 func GenerateEOAFlavored(rng *mrand.Rand, flavors EOAFlavors) *entitygen.Account {
@@ -78,8 +93,7 @@ func generateEOAFlavored(rng *mrand.Rand, flavors EOAFlavors, skipDerivedHashes 
 	}
 
 	if rng.Float64() < flavors.HasDelegation {
-		var target common.Address
-		rng.Read(target[:])
+		target := delegationTargets[rng.Intn(len(delegationTargets))]
 		code := make([]byte, 0, 23)
 		code = append(code, delegationPrefix...)
 		code = append(code, target[:]...)

@@ -67,7 +67,7 @@ func goldenBFixtures(t *testing.T) map[string][]Account {
 		}(),
 	}}
 	// Code-bearing shapes: the CodeUpdate flag changes the account leaf hash,
-	// so byte-identity must cover it (real allocs are ~30% delegated EOAs).
+	// so byte-identity must cover it (real allocs are ~2 % delegated EOAs).
 	delegated := []Account{{
 		Address: common.HexToAddress("0x4444444444444444444444444444444444444444"),
 		Nonce:   1, Balance: uint256.NewInt(5),

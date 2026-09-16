@@ -21,7 +21,7 @@ type Plan struct {
 	CodeSampler    Sampler
 
 	// SkipDerivedHashes elides the RNG-neutral derived-hash work on the
-	// single-threaded draw goroutine (the AddrHash keccak and the ~30%
+	// single-threaded draw goroutine (the AddrHash keccak and the
 	// delegation CodeHash keccak — neither consumes RNG draws, so the drawn
 	// byte-sequence and cross-client roots are identical either way). Safe
 	// ONLY for writers that never read Account.AddrHash/CodeHash and re-derive
@@ -145,7 +145,7 @@ func PlanForBudgetProfile(topUp uint64, profile Profile) (*Plan, error) {
 
 // DrawEOA produces one synthetic EOA, advancing rng by the canonical 3
 // entitygen.GenerateEOA draws plus 2 Bernoulli Float64s plus a conditional
-// 20-byte read (when the delegation Bernoulli fires).
+// pool-index draw (when the delegation Bernoulli fires).
 func (p *Plan) DrawEOA(rng *mrand.Rand) *entitygen.Account {
 	if p.SkipDerivedHashes {
 		return GenerateEOAFlavoredLean(rng, p.EOAFlavors)

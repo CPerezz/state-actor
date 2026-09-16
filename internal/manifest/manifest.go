@@ -105,6 +105,17 @@ type Result struct {
 	StorageSlots     uint64 `json:"storage_slots"`
 	TotalDBSizeBytes uint64 `json:"total_db_size_bytes"`
 	ElapsedMS        int64  `json:"elapsed_ms"`
+	// Composition is nil when no auto-fill ran.
+	Composition *Composition `json:"composition,omitempty"`
+}
+
+// Composition is the auto-fill Plan's planned entity mix — Plan inputs, not
+// a measurement of the written store (scripts/probe-sst-geom is that).
+type Composition struct {
+	NumEOAs      int `json:"num_eoas"`
+	NumContracts int `json:"num_contracts"`
+	// DelegationRate is autofill.EOAFlavors.HasDelegation.
+	DelegationRate float64 `json:"delegation_rate"`
 }
 
 // NewBuild assembles the Build record from the linked-in version and the

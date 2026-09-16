@@ -98,6 +98,8 @@ func TestWriteThenLoad(t *testing.T) {
 	assert.Equal(t, int64(99), got.Flags.Seed)
 	assert.Equal(t, "prague", got.Flags.Fork)
 	assert.Equal(t, "0xdead", got.Result.StateRoot)
+	data, _ := os.ReadFile(path)
+	assert.NotContains(t, string(data), "\"composition\"") // nil → omitted
 }
 
 func TestLoadMissingFile(t *testing.T) {
@@ -125,6 +127,7 @@ func TestWriteRoundTrips(t *testing.T) {
 			StateRoot:       "0xabc",
 			AccountsCreated: 10,
 			ElapsedMS:       1234,
+			Composition:     &Composition{NumEOAs: 3, NumContracts: 2, DelegationRate: 0.02},
 		},
 	}
 
@@ -142,6 +145,7 @@ func TestWriteRoundTrips(t *testing.T) {
 	assert.Equal(t, int64(0), got.Flags.SeedInput)
 	assert.Equal(t, "osaka", got.Flags.Fork)
 	assert.Equal(t, "0xabc", got.Result.StateRoot)
+	assert.Equal(t, m.Result.Composition, got.Result.Composition)
 	// Spec omitted → must not appear.
 	assert.NotContains(t, string(data), "\"spec\"")
 }

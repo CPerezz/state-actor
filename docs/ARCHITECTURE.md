@@ -292,7 +292,8 @@ Per-contract code is a truncated normal in `[1 KiB, 24 KiB]` centered at
 5 KiB (`MeanContractCode`); per-contract storage size is a truncated
 normal in `[1 KiB, 100 MiB]` whose mean is budget-derived — typically
 ~35 KiB at any target scale. EOAs randomize balance (90 % non-zero),
-nonce (always non-zero), and EIP-7702 delegation (30 %) independently.
+nonce (always non-zero), and EIP-7702 delegation (2 %, targets from a
+fixed 256-address pool) independently.
 
 Spec-loaded entities (`--spec`) are separate: their distribution comes
 from the YAML schema (per-entity `approximate_size_bytes` resolved via

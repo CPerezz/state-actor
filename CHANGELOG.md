@@ -17,6 +17,11 @@
   `SetFilterPolicy` transfers ownership of its native policy, so reusing one
   policy silently configured only the first CF. Each CF now receives its own
   full Bloom filter at 10 bits/key, matching Besu.
+- **Auto-fill EIP-7702 delegation: rate 30 % → 2 %, targets drawn from a fixed
+  256-address pool instead of fresh random bytes.** Unique designators were
+  94.6 % of Besu's code CF (mainnet 4.2 %). Writers put each shared code
+  once. Rotates the auto-fill goldens (`CanonicalOsakaMPTRoot`, binary-trie
+  golden).
 
 ### Added
 - **Nethermind flat-DB state generation (closes #111).** `--client=nethermind`
@@ -31,6 +36,8 @@
   not removed). Boot a flat datadir with `--FlatDb.Enabled=true` (the bloatnet
   bench and the e2e suite pass it). The legacy patricia (`state`-DB) layout is
   no longer written.
+- **Manifest `result.composition`** records the planned auto-fill mix (counts,
+  delegation rate).
 
 ### Changed
 - **ethrex `account_codes` values carry a JUMPDEST bitmap** rather than an

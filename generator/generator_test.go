@@ -194,9 +194,8 @@ func TestDatabaseContent(t *testing.T) {
 		t.Errorf("Expected %d storage slots in DB, got %d", stats.StorageSlotsCreated, storageCount)
 	}
 
-	// Count code entries. The auto-fill plan emits code for both contracts
-	// AND the ~30 % of EOAs that draw an EIP-7702 delegation marker, so the
-	// expected lower bound is plan.NumContracts (we accept >=).
+	// Count code entries: contracts plus the EOAs that draw an EIP-7702
+	// delegation marker, so the expected lower bound is plan.NumContracts.
 	iter = db.NewIterator([]byte("c"), nil)
 	codeCount := 0
 	for iter.Next() {
@@ -639,7 +638,7 @@ func TestBinaryTrieStateRootValue(t *testing.T) {
 		t.Fatalf("Failed to generate state: %v", err)
 	}
 
-	expected := common.HexToHash("0xb7acf92d82c2b932d1ca3f5f2e0560e6b9a6ec53a2b1611ca54baedb74b9b82e")
+	expected := common.HexToHash("0x95f298dddcbd13d088169fcaa5a14732fb80c121ebdf2e9f779d3f7b6aaaf0f0")
 	if stats.StateRoot != expected {
 		t.Errorf("Binary trie state root mismatch:\n  got:  %s\n  want: %s\nThis may indicate an upstream bintrie API change.",
 			stats.StateRoot.Hex(), expected.Hex())
@@ -746,7 +745,7 @@ func TestBinaryTrieCommitIntervalGoldenHash(t *testing.T) {
 	}
 
 	// Must match the same golden hash as TestBinaryTrieStateRootValue.
-	expected := common.HexToHash("0xb7acf92d82c2b932d1ca3f5f2e0560e6b9a6ec53a2b1611ca54baedb74b9b82e")
+	expected := common.HexToHash("0x95f298dddcbd13d088169fcaa5a14732fb80c121ebdf2e9f779d3f7b6aaaf0f0")
 	if stats.StateRoot != expected {
 		t.Errorf("CommitInterval golden hash mismatch:\n  got:  %s\n  want: %s",
 			stats.StateRoot.Hex(), expected.Hex())
