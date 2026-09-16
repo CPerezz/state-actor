@@ -20,8 +20,8 @@ import (
 //  3. rng.Read(code)                 — codeSize+extra bytes of code
 //  4. rng.Intn(100)                  — balance multiplier (×1e18 wei)
 //  5. for each of numSlots:
-//       a. rng.Read(key[:])           — 32 bytes
-//       b. rng.Read(value[:])         — 32 bytes (zero-valued bumped to 0x..01)
+//     a. rng.Read(key[:])           — 32 bytes
+//     b. rng.Read(value[:])         — 32 bytes (zero-valued bumped to 0x..01)
 //  6. rng.Intn(1000)                  — nonce (after the slot loop)
 //
 // The returned Account.Storage is sorted by Key so consumers can stream into a
@@ -38,11 +38,22 @@ func GenerateContract(rng *mrand.Rand, codeSize int, numSlots int) *Account {
 	rng.Read(addr[:])
 
 	// Generate random code
-	totalCodeSize := codeSize + rng.Intn(codeSize)
-	code := make([]byte, totalCodeSize)
+	code := make([]byte, codeSize+rng.Intn(codeSize))
 	rng.Read(code)
-	codeHash := crypto.Keccak256Hash(code)
 
+	return finishContract(rng, addr, code, crypto.Keccak256Hash(code), numSlots)
+}
+
+// GenerateContractWithCode is GenerateContract with caller-supplied code
+// (skips draws 2–3).
+func GenerateContractWithCode(rng *mrand.Rand, code []byte, codeHash common.Hash, numSlots int) *Account {
+	var addr common.Address
+	rng.Read(addr[:])
+	return finishContract(rng, addr, code, codeHash, numSlots)
+}
+
+// finishContract draws GenerateContract steps 4–6: balance, slots, nonce.
+func finishContract(rng *mrand.Rand, addr common.Address, code []byte, codeHash common.Hash, numSlots int) *Account {
 	// Random balance
 	balance := new(uint256.Int).Mul(
 		uint256.NewInt(uint64(rng.Intn(100))),

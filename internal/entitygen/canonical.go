@@ -32,5 +32,6 @@ import "github.com/ethereum/go-ethereum/common"
 // capture the new hash from the failure message, paste here. Then
 // all 4 client tests + canonical_mpt_test will agree on the new value.
 //
-// Last rotated: 2 % EIP-7702 delegation pool (see CHANGELOG).
-var CanonicalOsakaMPTRoot = common.HexToHash("0x8acf92a1374fa59d8e57ca81dc2a382c6227b4cb21b0af598db614a2a2b2cab6")
+// Last rotated: 2 % EIP-7702 delegation pool + shared bytecode pool (see
+// CHANGELOG).
+var CanonicalOsakaMPTRoot = common.HexToHash("0xf9416d906896102e417645f18a2c75df139ed594fe0aafe10e1ed97d09a151bc")
