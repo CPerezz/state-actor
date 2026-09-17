@@ -19,6 +19,9 @@ type Plan struct {
 	EOAFlavors     EOAFlavors
 	StorageSampler Sampler
 	CodeSampler    Sampler
+	// DistinctBytecodes is the code-pool size: each contract draws one of
+	// these shared blobs (see poolCode).
+	DistinctBytecodes int
 
 	// SkipDerivedHashes elides the RNG-neutral derived-hash work on the
 	// single-threaded draw goroutine (the AddrHash keccak and the
@@ -129,17 +132,20 @@ func PlanForBudgetProfile(topUp uint64, profile Profile) (*Plan, error) {
 	}
 
 	codeMean := float64(sizecal.MeanContractCode)
+	codeSampler := Sampler{
+		Mean:   codeMean,
+		Stddev: codeMean / 3,
+		Min:    sizecal.MinContractCode,
+		Max:    sizecal.MaxContractCode,
+	}
+
 	return &Plan{
-		NumEOAs:      numEOAs,
-		NumContracts: numContracts,
-		EOAFlavors:   DefaultEOAFlavors(),
-		CodeSampler: Sampler{
-			Mean:   codeMean,
-			Stddev: codeMean / 3,
-			Min:    sizecal.MinContractCode,
-			Max:    sizecal.MaxContractCode,
-		},
-		StorageSampler: storageSampler,
+		NumEOAs:           numEOAs,
+		NumContracts:      numContracts,
+		EOAFlavors:        DefaultEOAFlavors(),
+		CodeSampler:       codeSampler,
+		StorageSampler:    storageSampler,
+		DistinctBytecodes: max(numContracts/sizecal.MainnetAccountsPerDistinctBytecode, 1),
 	}, nil
 }
 
@@ -153,22 +159,13 @@ func (p *Plan) DrawEOA(rng *mrand.Rand) *entitygen.Account {
 	return GenerateEOAFlavored(rng, p.EOAFlavors)
 }
 
-// DrawContract produces one synthetic contract with sampled code and
-// storage sizes, then forwards to entitygen.GenerateContract. RNG draw
-// order is fixed across all client emission sites:
-//  1. CodeSampler.Draw(rng)    — code size in bytes (truncated normal).
-//  2. StorageSampler.Draw(rng) — storage size in bytes; slot count =
-//     bytes / sizecal.BytesPerSlot.
-//  3. entitygen.GenerateContract(rng, codeSize*2/3, numSlots) — canonical
-//     contract draw sequence. The 2/3 factor compensates for the
-//     `codeSize + rng.Intn(codeSize)` doubling inside GenerateContract so
-//     the realized mean lands at MeanContractCode.
+// DrawContract produces one synthetic contract. RNG draw order is fixed
+// across all client emission sites:
+//  1. StorageSampler.Draw(rng) — storage bytes; slot count = bytes / sizecal.BytesPerSlot.
+//  2. rng.Intn(DistinctBytecodes) — code-pool index (see poolCode).
+//  3. entitygen.GenerateContractWithCode(rng, code, hash, numSlots).
 func (p *Plan) DrawContract(rng *mrand.Rand) *entitygen.Account {
-	codeBytes := p.CodeSampler.Draw(rng)
-	codeSize := max(int(codeBytes*2/3), 1)
-
-	storageBytes := p.StorageSampler.Draw(rng)
-	numSlots := max(int(storageBytes/sizecal.BytesPerSlot("")), 1)
-
-	return entitygen.GenerateContract(rng, codeSize, numSlots)
+	numSlots := max(int(p.StorageSampler.Draw(rng)/sizecal.BytesPerSlot("")), 1)
+	code, hash := poolCode(rng.Intn(p.DistinctBytecodes), p.CodeSampler)
+	return entitygen.GenerateContractWithCode(rng, code, hash, numSlots)
 }

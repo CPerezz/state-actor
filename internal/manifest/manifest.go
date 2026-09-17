@@ -116,6 +116,8 @@ type Composition struct {
 	NumContracts int `json:"num_contracts"`
 	// DelegationRate is autofill.EOAFlavors.HasDelegation.
 	DelegationRate float64 `json:"delegation_rate"`
+	// DistinctBytecodes is the code-pool size shared by NumContracts contracts.
+	DistinctBytecodes int `json:"distinct_bytecodes"`
 }
 
 // NewBuild assembles the Build record from the linked-in version and the

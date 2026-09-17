@@ -100,7 +100,7 @@ func writeState(
 	emptyTrieHash := common.HexToHash(ethrexinternal.EmptyTrieHashHex)
 
 	// seenCodeHash deduplicates account_codes + account_code_metadata writes:
-	// ≈ plan.NumContracts + 256 delegation targets. Owned by Stage C.
+	// ≈ plan.DistinctBytecodes + 256 delegation targets. Owned by Stage C.
 	seenCodeHash := make(map[common.Hash]struct{})
 
 	// writeCode writes code for a given codeHash if not already seen.

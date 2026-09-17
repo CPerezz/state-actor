@@ -10,7 +10,7 @@ import (
 // stream. Covers the load-bearing invariant: oracle tests rely on this
 // to know what the writer wrote.
 func TestReproduce_Determinism(t *testing.T) {
-	plan, err := autofill.PlanForBudget(512 << 10)
+	plan, err := autofill.PlanForBudget(10 << 20) // pool > 1 entry, so code reuse is exercised
 	if err != nil {
 		t.Fatalf("PlanForBudget: %v", err)
 	}

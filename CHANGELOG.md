@@ -22,6 +22,10 @@
   94.6 % of Besu's code CF (mainnet 4.2 %). Writers put each shared code
   once. Rotates the auto-fill goldens (`CanonicalOsakaMPTRoot`, binary-trie
   golden).
+- **Auto-fill contracts share bytecode from a deterministic pool** (~32
+  accounts per distinct code, mainnet 28.2; slices of the embedded OZ ERC20
+  runtime, not random bytes — real code reuses heavily and compresses under
+  LZ4). Rotates the auto-fill goldens.
 
 ### Added
 - **Nethermind flat-DB state generation (closes #111).** `--client=nethermind`
@@ -37,7 +41,7 @@
   bench and the e2e suite pass it). The legacy patricia (`state`-DB) layout is
   no longer written.
 - **Manifest `result.composition`** records the planned auto-fill mix (counts,
-  delegation rate).
+  delegation rate, distinct bytecodes).
 
 ### Changed
 - **ethrex `account_codes` values carry a JUMPDEST bitmap** rather than an

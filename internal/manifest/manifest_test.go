@@ -127,7 +127,7 @@ func TestWriteRoundTrips(t *testing.T) {
 			StateRoot:       "0xabc",
 			AccountsCreated: 10,
 			ElapsedMS:       1234,
-			Composition:     &Composition{NumEOAs: 3, NumContracts: 2, DelegationRate: 0.02},
+			Composition:     &Composition{NumEOAs: 3, NumContracts: 2, DelegationRate: 0.02, DistinctBytecodes: 1},
 		},
 	}
 

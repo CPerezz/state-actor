@@ -197,7 +197,12 @@ func (g *Generator) generateStreamingBinary() (retStats *Stats, retErr error) {
 	snapWg.Add(1)
 	go func() {
 		defer snapWg.Done()
+		codeSeen := map[common.Hash]struct{}{} // shared code is put once
 		for sw := range snapCh {
+			if _, dup := codeSeen[sw.acc.codeHash]; dup {
+				continue
+			}
+			codeSeen[sw.acc.codeHash] = struct{}{}
 			if err := g.writeCodeOnly(sw.acc); err != nil {
 				snapErr.Store(err)
 				for range snapCh {

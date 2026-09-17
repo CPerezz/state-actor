@@ -194,8 +194,8 @@ func TestDatabaseContent(t *testing.T) {
 		t.Errorf("Expected %d storage slots in DB, got %d", stats.StorageSlotsCreated, storageCount)
 	}
 
-	// Count code entries: contracts plus the EOAs that draw an EIP-7702
-	// delegation marker, so the expected lower bound is plan.NumContracts.
+	// Count code entries: >= distinct pool bytecodes (contracts share code;
+	// delegating EOAs add up to 256 designators).
 	iter = db.NewIterator([]byte("c"), nil)
 	codeCount := 0
 	for iter.Next() {
@@ -203,8 +203,8 @@ func TestDatabaseContent(t *testing.T) {
 	}
 	iter.Release()
 
-	if codeCount < plan.NumContracts {
-		t.Errorf("Expected at least %d code entries in DB, got %d", plan.NumContracts, codeCount)
+	if codeCount < plan.DistinctBytecodes {
+		t.Errorf("Expected at least %d code entries in DB, got %d", plan.DistinctBytecodes, codeCount)
 	}
 }
 
@@ -512,10 +512,8 @@ func TestDatabaseContentBinaryTrie(t *testing.T) {
 	}
 	iter.Release()
 
-	if codeCount < plan.NumContracts {
-		// Auto-fill EOAs may also carry EIP-7702 delegation code; codeCount is a
-		// lower-bound check against plan.NumContracts here.
-		t.Errorf("Expected at least %d code entries in DB, got %d", plan.NumContracts, codeCount)
+	if codeCount < plan.DistinctBytecodes {
+		t.Errorf("Expected at least %d code entries in DB, got %d", plan.DistinctBytecodes, codeCount)
 	}
 }
 
@@ -638,7 +636,7 @@ func TestBinaryTrieStateRootValue(t *testing.T) {
 		t.Fatalf("Failed to generate state: %v", err)
 	}
 
-	expected := common.HexToHash("0x95f298dddcbd13d088169fcaa5a14732fb80c121ebdf2e9f779d3f7b6aaaf0f0")
+	expected := common.HexToHash("0xcefbd4a61396d420760310cef4d73918ad8217cc949ebd88ca3b72103b905c37")
 	if stats.StateRoot != expected {
 		t.Errorf("Binary trie state root mismatch:\n  got:  %s\n  want: %s\nThis may indicate an upstream bintrie API change.",
 			stats.StateRoot.Hex(), expected.Hex())
@@ -745,7 +743,7 @@ func TestBinaryTrieCommitIntervalGoldenHash(t *testing.T) {
 	}
 
 	// Must match the same golden hash as TestBinaryTrieStateRootValue.
-	expected := common.HexToHash("0x95f298dddcbd13d088169fcaa5a14732fb80c121ebdf2e9f779d3f7b6aaaf0f0")
+	expected := common.HexToHash("0xcefbd4a61396d420760310cef4d73918ad8217cc949ebd88ca3b72103b905c37")
 	if stats.StateRoot != expected {
 		t.Errorf("CommitInterval golden hash mismatch:\n  got:  %s\n  want: %s",
 			stats.StateRoot.Hex(), expected.Hex())
@@ -870,12 +868,11 @@ func assertDBSizeWithin(t *testing.T, dbPath string, target uint64, tolerance fl
 	}
 }
 
-// TestTargetSizeStopsAccurately_Bintrie is the primary regression fence
-// for the factor-free bintrie stop. At a 50 MB target the calibrated
-// Pebble compression ratio lags behind the true value because SST
-// overhead at small scales continues to grow past the last milestone,
-// so we use ±40% here. At GB scale (TestTargetSizeStopsAccurately_Bintrie_1GB,
-// added below, -short skips it) the ratio stabilises and ±10% holds.
+// TestTargetSizeStopsAccurately_Bintrie is the regression fence for the
+// bintrie target-size stop. At 50 MB the Phase-1 raw-byte cap (64 B per
+// entry ≥ target) bounds the run before the calibrated Phase-2 stop can,
+// so the final DB is that entity set's on-disk footprint: ~0.55× raw with
+// shared, compressible contract code. ±50 % encodes that ratio.
 func TestTargetSizeStopsAccurately_Bintrie(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping long target-size test in -short mode")
@@ -909,7 +906,7 @@ func TestTargetSizeStopsAccurately_Bintrie(t *testing.T) {
 	t.Logf("bintrie target=%s: %d contracts, %d slots, root=%s",
 		fmtBytes(target), stats.ContractsCreated, stats.StorageSlotsCreated,
 		stats.StateRoot.Hex())
-	assertDBSizeWithin(t, dbPath, target, 0.40)
+	assertDBSizeWithin(t, dbPath, target, 0.50)
 }
 
 // TestTargetSizeEmitsFullPlan_MPT asserts that the MPT generator path

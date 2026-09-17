@@ -517,9 +517,10 @@ func compositionFromPlan(plan *autofill.Plan) *manifest.Composition {
 		return nil
 	}
 	return &manifest.Composition{
-		NumEOAs:        plan.NumEOAs,
-		NumContracts:   plan.NumContracts,
-		DelegationRate: plan.EOAFlavors.HasDelegation,
+		NumEOAs:           plan.NumEOAs,
+		NumContracts:      plan.NumContracts,
+		DelegationRate:    plan.EOAFlavors.HasDelegation,
+		DistinctBytecodes: plan.DistinctBytecodes,
 	}
 }
 
