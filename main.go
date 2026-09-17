@@ -465,6 +465,7 @@ func generate(reproducedFrom string) *generator.Stats {
 			ContractsCreated: uint64(stats.ContractsCreated),
 			StorageSlots:     uint64(stats.StorageSlotsCreated),
 			ElapsedMS:        elapsed.Milliseconds(),
+			Composition:      compositionFromPlan(config.AutoFill),
 		},
 		ReproducedFrom: reproducedFrom,
 	}
@@ -508,6 +509,18 @@ func generate(reproducedFrom string) *generator.Stats {
 	}
 
 	return stats
+}
+
+// compositionFromPlan is nil when no auto-fill ran.
+func compositionFromPlan(plan *autofill.Plan) *manifest.Composition {
+	if plan == nil {
+		return nil
+	}
+	return &manifest.Composition{
+		NumEOAs:        plan.NumEOAs,
+		NumContracts:   plan.NumContracts,
+		DelegationRate: plan.EOAFlavors.HasDelegation,
+	}
 }
 
 // reproduce regenerates a prior run from its state-actor-manifest.json into a

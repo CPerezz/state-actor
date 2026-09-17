@@ -32,7 +32,5 @@ import "github.com/ethereum/go-ethereum/common"
 // capture the new hash from the failure message, paste here. Then
 // all 4 client tests + canonical_mpt_test will agree on the new value.
 //
-// Last rotated when --accounts / --contracts were replaced by the
-// internal/autofill.Plan (256 KiB target budget, seed 12345 — see
-// internal/e2e_testing/golden.go for the canonical writer config).
-var CanonicalOsakaMPTRoot = common.HexToHash("0x486046517db3d8c72665fd29b0c2c9067b563cada8aca57c02fd502526cd7e8f")
+// Last rotated: 2 % EIP-7702 delegation pool (see CHANGELOG).
+var CanonicalOsakaMPTRoot = common.HexToHash("0x8acf92a1374fa59d8e57ca81dc2a382c6227b4cb21b0af598db614a2a2b2cab6")

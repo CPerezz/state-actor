@@ -421,15 +421,8 @@ func writeSnapshots(
 			if acc.StateAccount.Balance != nil {
 				entry.Balance = acc.StateAccount.Balance.ToBig()
 			}
-			// EIP-7702 delegation marker: ~30% of EOAs from
-			// internal/autofill/eoa_flavor.go have HasDelegation set,
-			// which puts a 23-byte 0xef0100||target20 in acc.Code with
-			// CodeHash = keccak256(code). The geth writer honors this
-			// at state_writer.go:127-130; we MUST mirror it here or
-			// the resulting CodeHash diverges from MPT for ~30% of
-			// EOAs → wrong genesis state root vs cross-client peers.
-			// Bug surfaced by cross-client bench on 2026-06-03:
-			// geth+reth 0x7fa5f44... vs erigon 0xcbab49... at SEED=42.
+			// EIP-7702 designator (2 % of autofill EOAs): mirror geth state_writer.go or
+			// CodeHash diverges from the MPT root (cross-client bench 2026-06-03, SEED=42).
 			if len(acc.Code) > 0 {
 				entry.Code = acc.Code
 				stats.CodeBytes += uint64(len(acc.Code))

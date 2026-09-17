@@ -3,6 +3,7 @@ package autofill
 import (
 	"bytes"
 	mrand "math/rand"
+	"slices"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -62,6 +63,9 @@ func TestGenerateEOAFlavored_DelegationMarkerFormat(t *testing.T) {
 		if acc.Code[0] != 0xef || acc.Code[1] != 0x01 || acc.Code[2] != 0x00 {
 			t.Errorf("EOA[%d]: prefix got %x, want ef0100", i, acc.Code[:3])
 		}
+		if !slices.Contains(delegationTargets[:], common.BytesToAddress(acc.Code[3:])) {
+			t.Errorf("EOA[%d]: target %x not in pool", i, acc.Code[3:])
+		}
 	}
 }
 
@@ -116,7 +120,7 @@ func TestGenerateEOAFlavored_CanonicalEOAFirst(t *testing.T) {
 // unaffected by the flag. AddrHash/CodeHash are the EXPECTED delta (zero on
 // the lean path).
 func TestFlavoredDrawRNGSequenceInvariant(t *testing.T) {
-	const n = 2000 // enough to fire the ~30% delegation branch hundreds of times
+	const n = 2000 // ~40 delegation fires at the 2 % default; the delegated==0 guard keeps this non-vacuous
 	flavors := DefaultEOAFlavors()
 	rngFull := mrand.New(mrand.NewSource(4242))
 	rngLean := mrand.New(mrand.NewSource(4242))

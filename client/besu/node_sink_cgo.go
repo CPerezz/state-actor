@@ -42,9 +42,10 @@ const flushThresholdBytes = 64 * 1024 * 1024
 //      direct putSync calls to guarantee chainHeadHash lands LAST and
 //      durably.
 type nodeSink struct {
-	db    *besuDB
-	batch *grocksdb.WriteBatch
-	bytes int
+	db       *besuDB
+	batch    *grocksdb.WriteBatch
+	bytes    int
+	codeSeen map[common.Hash]struct{} // shared code is put once
 }
 
 // newNodeSink constructs a sink backed by the given DB. Caller must call
@@ -52,7 +53,7 @@ type nodeSink struct {
 // out of scope; otherwise pending writes are silently dropped AND the
 // underlying WriteBatch leaks C++ memory.
 func newNodeSink(db *besuDB) *nodeSink {
-	return &nodeSink{db: db, batch: grocksdb.NewWriteBatch()}
+	return &nodeSink{db: db, batch: grocksdb.NewWriteBatch(), codeSeen: map[common.Hash]struct{}{}}
 }
 
 // PutAccountStateTrieNode writes a Bonsai account-trie node at TRIE_BRANCH_STORAGE[location].
@@ -123,9 +124,10 @@ func (s *nodeSink) PutFlatStorage(addrHash, slotHash common.Hash, valueRLP []byt
 // PutCode writes CODE_STORAGE[codeHash] = code (code-hash-keyed default).
 // Skip empty code per BonsaiWorldStateKeyValueStorage.java:248-255.
 func (s *nodeSink) PutCode(codeHash common.Hash, code []byte) error {
-	if len(code) == 0 {
+	if _, seen := s.codeSeen[codeHash]; seen || len(code) == 0 {
 		return nil
 	}
+	s.codeSeen[codeHash] = struct{}{}
 	s.batch.PutCF(s.db.cfs[cfIdxCodeStorage], codeHash[:], code)
 	s.bytes += 32 + len(code)
 	return s.maybeFlush()

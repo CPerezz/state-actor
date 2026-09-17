@@ -22,6 +22,7 @@ type codeDBSink struct {
 	wb           *grocksdb.WriteBatch
 	mu           sync.Mutex
 	pendingBytes int
+	seen         map[[32]byte]struct{} // shared code is put once
 }
 
 func newCodeDBSink(db *grocksdb.DB) *codeDBSink {
@@ -30,15 +31,20 @@ func newCodeDBSink(db *grocksdb.DB) *codeDBSink {
 	// CompactRange + Close (same rationale as the flat sink).
 	wo.DisableWAL(true)
 	return &codeDBSink{
-		db: db,
-		wo: wo,
-		wb: grocksdb.NewWriteBatch(),
+		db:   db,
+		wo:   wo,
+		wb:   grocksdb.NewWriteBatch(),
+		seen: map[[32]byte]struct{}{},
 	}
 }
 
 func (s *codeDBSink) put(key, value []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, dup := s.seen[[32]byte(key)]; dup {
+		return nil
+	}
+	s.seen[[32]byte(key)] = struct{}{}
 	s.wb.Put(key, value)
 	s.pendingBytes += len(key) + len(value)
 	if s.pendingBytes >= stateBatchFlushBytes {

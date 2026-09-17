@@ -190,7 +190,7 @@ type Stats struct {
 	// StorageBytes is the number of bytes for storage data.
 	StorageBytes uint64
 
-	// CodeBytes is the number of bytes for contract code.
+	// CodeBytes is the number of bytes for contract code (logical: shared code counted per account).
 	CodeBytes uint64
 
 	// TrieNodeBytes is the number of bytes written for trie nodes (Phase 2).
