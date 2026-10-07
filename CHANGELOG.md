@@ -25,6 +25,16 @@
   `tree_mask | hash_mask != 0`, as alloy_trie and reth's own genesis init do.
   Roots are unchanged. On a 1 GB store, AccountsTrie went from 441,257 to
   96,198 rows.
+- **Erigon domain files now written with Erigon's own compressor.** The
+  `.kv` writer encoded every word raw, with no pattern dictionary, where
+  Erigon compresses each domain per `statecfg.Schema` (code values; storage
+  and commitment keys) at `DomainCompressCfg`. A 24,576-byte EEST test
+  contract took 24,577 B and seven 4 KB pages per uncached read instead of
+  ~200 B and one, so distinct-contract calls benchmarked at 0.64 of a
+  mainnet-derived store; re-encoded, 0.98. The cgo build now hands each
+  domain to erigon's `seg.Compressor` (`internal/erigon/erigonseg`); the
+  untagged build keeps the raw codec. State root and RPC answers are
+  unchanged; generation takes longer (one dictionary worker per domain).
 - **Besu DB now created with all 17 mainnet Bonsai column families.**
   A fresh mainnet Besu init creates every `KeyValueSegmentIdentifier`
   segment with `BONSAI` in its format set, including `CHAIN_PRUNER_STATE`

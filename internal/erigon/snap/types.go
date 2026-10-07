@@ -106,6 +106,10 @@ type Settings struct {
 	// (e.g. "v1.0"). Defaults to the value of
 	// erigon.SnapshotFormatVersion if empty.
 	SnapshotVersion string
+
+	// Codec writes and re-reads each domain's .kv. nil is state-actor's own
+	// seg, which stores every word raw; see KVCodec.
+	Codec KVCodec
 }
 
 // DefaultAccessorMask returns the production accessor mix for d per

@@ -14,7 +14,6 @@ import (
 	"github.com/ethereum/state-actor/internal/erigon/btindex"
 	"github.com/ethereum/state-actor/internal/erigon/existence"
 	"github.com/ethereum/state-actor/internal/erigon/recsplit"
-	"github.com/ethereum/state-actor/internal/erigon/seg"
 )
 
 // Writer composes seg + btindex + existence into Erigon's per-domain
@@ -135,10 +134,9 @@ func contains(s, sub string) bool {
 func (w *Writer) Salt() uint32 { return w.settings.Salt }
 
 // WriteDomain emits the per-domain file set (.kv data + accessors) for
-// (d, r). entries MUST yield ascending keys and MUST be repeatable —
-// pass 1 drives it twice (seg.CompressFromSource count + encode);
-// behaviour is undefined otherwise. The .kv is written first, then
-// re-iterated via seg.Decompressor to feed the accessor builders —
+// (d, r). entries MUST yield ascending keys and MUST be repeatable (the
+// default codec drives it twice). The .kv is written first through
+// Settings.Codec, then re-iterated to feed the accessor builders —
 // matching the two-pass pattern from Erigon's
 // simple_accessor_builder.go:194-216 (Verifier B's Correction 2).
 //
@@ -162,42 +160,29 @@ func (w *Writer) WriteDomain(ctx context.Context, d Domain, r StepRange, keyCoun
 	}
 
 	domainDir := DomainDir(w.datadir)
-	tmpDir := domainDir // seg.Compressor writes its own .tmp files under tmpDir
+	tmpDir := domainDir // the compressor writes its own temp files under tmpDir
 	dataPath := BuildDataFilename(domainDir, w.settings.SnapshotVersion, d, r)
+	codec := w.settings.Codec
+	if codec == nil {
+		codec = rawCodec{}
+	}
 
-	// Pass 1: write the .kv straight from the (repeatable) entries source —
-	// CompressFromSource drives it twice (count, then encode), skipping the
-	// .idt intermediate that used to cost a full extra write+read of the
-	// domain (up to ~44 GB) and the matching transient disk peak.
+	// Pass 1: write the .kv.
 	timing := os.Getenv("STATE_ACTOR_SNAP_TIMING") != ""
 	pass1Start := time.Now()
-	cfg := seg.DefaultConfig()
-	comp, err := seg.NewCompressor(dataPath, tmpDir, cfg)
-	if err != nil {
-		return fmt.Errorf("snap.WriteDomain: seg.NewCompressor: %w", err)
-	}
-	src := seg.WordSource(func(yield func(word []byte) bool) {
-		entries(func(e DomainEntry) bool {
-			return yield(e.Key) && yield(e.Value)
-		})
-	})
-	if err := comp.CompressFromSource(src); err != nil {
-		_ = comp.Close()
-		return fmt.Errorf("snap.WriteDomain: seg.CompressFromSource: %w", err)
-	}
-	if err := comp.Close(); err != nil {
-		return fmt.Errorf("snap.WriteDomain: seg.Close: %w", err)
+	if err := codec.Write(ctx, d, dataPath, tmpDir, entries); err != nil {
+		return fmt.Errorf("snap.WriteDomain: write %s: %w", dataPath, err)
 	}
 	if timing {
-		fmt.Printf("snap: timing %v pass-1 (count+encode) %s\n", d, time.Since(pass1Start).Round(time.Second))
+		fmt.Printf("snap: timing %v pass-1 (encode) %s\n", d, time.Since(pass1Start).Round(time.Second))
 	}
 
 	// Pass 2: re-open the .kv, iterate (key, val, keyOff, valOff), feed
 	// the accessor builders.
 	mask := w.settings.Accessors[d]
-	dec, err := seg.NewDecompressor(dataPath)
+	dec, err := codec.Open(d, dataPath)
 	if err != nil {
-		return fmt.Errorf("snap.WriteDomain: seg.NewDecompressor: %w", err)
+		return fmt.Errorf("snap.WriteDomain: open %s: %w", dataPath, err)
 	}
 	defer dec.Close()
 	// A pass-2 failure would otherwise leave a final-named .kv with no
