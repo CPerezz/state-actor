@@ -41,7 +41,7 @@ func GenerateContract(rng *mrand.Rand, codeSize int, numSlots int) *Account {
 	code := make([]byte, codeSize+rng.Intn(codeSize))
 	rng.Read(code)
 
-	return finishContract(rng, addr, code, crypto.Keccak256Hash(code), numSlots)
+	return finishContract(rng, addr, code, crypto.Keccak256Hash(code), numSlots, nil)
 }
 
 // GenerateContractWithCode is GenerateContract with caller-supplied code
@@ -49,11 +49,21 @@ func GenerateContract(rng *mrand.Rand, codeSize int, numSlots int) *Account {
 func GenerateContractWithCode(rng *mrand.Rand, code []byte, codeHash common.Hash, numSlots int) *Account {
 	var addr common.Address
 	rng.Read(addr[:])
-	return finishContract(rng, addr, code, codeHash, numSlots)
+	return finishContract(rng, addr, code, codeHash, numSlots, nil)
+}
+
+// GenerateContractWithValues is GenerateContractWithCode with each slot value
+// holding valueLen(rng) significant bytes (1..32) instead of 32 random bytes.
+// Per slot it draws the key, then the length, then the value bytes.
+func GenerateContractWithValues(rng *mrand.Rand, code []byte, codeHash common.Hash, numSlots int, valueLen func(*mrand.Rand) int) *Account {
+	var addr common.Address
+	rng.Read(addr[:])
+	return finishContract(rng, addr, code, codeHash, numSlots, valueLen)
 }
 
 // finishContract draws GenerateContract steps 4–6: balance, slots, nonce.
-func finishContract(rng *mrand.Rand, addr common.Address, code []byte, codeHash common.Hash, numSlots int) *Account {
+// valueLen nil keeps 32 random bytes per value.
+func finishContract(rng *mrand.Rand, addr common.Address, code []byte, codeHash common.Hash, numSlots int, valueLen func(*mrand.Rand) int) *Account {
 	// Random balance
 	balance := new(uint256.Int).Mul(
 		uint256.NewInt(uint64(rng.Intn(100))),
@@ -65,10 +75,19 @@ func finishContract(rng *mrand.Rand, addr common.Address, code []byte, codeHash 
 	for j := 0; j < numSlots; j++ {
 		var key, value common.Hash
 		rng.Read(key[:])
-		rng.Read(value[:])
-		// Ensure value is non-zero (zero values are deletions)
-		if value == (common.Hash{}) {
-			value[31] = 1
+		if valueLen == nil {
+			rng.Read(value[:])
+			// Ensure value is non-zero (zero values are deletions)
+			if value == (common.Hash{}) {
+				value[31] = 1
+			}
+		} else {
+			n := valueLen(rng)
+			rng.Read(value[32-n:])
+			// A non-zero leading byte keeps exactly n significant bytes (and the value non-zero).
+			if value[32-n] == 0 {
+				value[32-n] = 1
+			}
 		}
 		storage = append(storage, StorageSlot{Key: key, Value: value})
 	}

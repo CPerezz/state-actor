@@ -67,6 +67,20 @@
   `--archive`).
 
 ### Added
+- **`--storage-model=mainnet` draws auto-fill contract storage from a mainnet
+  shape.** `normal` (default) gives every contract ~35 KiB of 32-byte random
+  values, so a mainnet-sized store holds a few million mid-size contracts.
+  `mainnet` draws each contract's slot count and each value's length from a
+  full walk of a mainnet-derived reth store (25.2M storage accounts, 1.49B
+  slots, the bloated test contract excluded): 55 % of contracts hold one slot,
+  97 % hold at most 28, a few hold millions (capped at 2^24), and values are
+  stored at their significant length (20 bytes for half of them). The contract
+  count follows from the storage budget and the mean slot count; contracts come
+  out of the account budget, so the total account count is unchanged. On a 1 GB
+  store: 99,751 contracts (normal: 20,972), slots per contract p50/p90/p99
+  1/10/152 (reference 1/10/154). Changes the state root; recorded in the
+  manifest and restored by `reproduce`.
+
 - **reth: `--mdbx-fill-profile` and `--mdbx-fill` control MDBX B-tree page
   fill.** `migrated` and `aged` target a reference node's measured leaf fill
   per table via `MDBX_opt_split_reserve`, switched right before each
