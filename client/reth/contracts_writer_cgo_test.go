@@ -69,9 +69,10 @@ func TestWriteContractsSmall(t *testing.T) {
 
 // TestWriteContractsPopulatesStats is the per-writer companion to
 // main_test.go:TestMainBenchmarkPrintsStats — it pins the byte accounting
-// for the contracts path (Account + Storage + Code) so a future refactor
-// dropping any of the three increments fails fast at unit-test level
-// instead of silently in --benchmark output. See issue #70.
+// for the contracts path (Storage + Code) so a future refactor dropping
+// either increment fails fast at unit-test level instead of silently in
+// --benchmark output. See issue #70. AccountBytes is no longer accumulated
+// here — it moved to RunCgo's sorter-put helper, see TestRunCgoHashedAccountsSortedAppend.
 func TestWriteContractsPopulatesStats(t *testing.T) {
 	tmp := t.TempDir()
 	envs, err := OpenEnvs(tmp, true)
@@ -94,9 +95,6 @@ func TestWriteContractsPopulatesStats(t *testing.T) {
 		t.Fatalf("WriteContracts: %v", err)
 	}
 
-	if stats.AccountBytes == 0 {
-		t.Errorf("stats.AccountBytes == 0 after writing %d contracts", n)
-	}
 	if stats.StorageBytes == 0 {
 		t.Errorf("stats.StorageBytes == 0 after writing %d contracts with storage", n)
 	}
