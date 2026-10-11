@@ -10,6 +10,13 @@
   trie is built from, which fills pages densely. Table contents (every k/v) and
   the state root are unchanged. On a 1 GB store, HashedAccounts leaf pages went
   from 33,272 to 16,880.
+- **reth: trie cache rows follow alloy_trie's rule.** AccountsTrie and
+  StoragesTrie stored a row for every hashed branch ("full emissions"),
+  including bottom branches whose children are all leaves. reth never stores
+  those; their hash lives in the parent row. A row is now stored iff
+  `tree_mask | hash_mask != 0`, as alloy_trie and reth's own genesis init do.
+  Roots are unchanged. On a 1 GB store, AccountsTrie went from 441,257 to
+  96,198 rows.
 - **Besu DB now created with all 17 mainnet Bonsai column families.**
   A fresh mainnet Besu init creates every `KeyValueSegmentIdentifier`
   segment with `BONSAI` in its format set, including `CHAIN_PRUNER_STATE`
