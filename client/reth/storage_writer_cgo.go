@@ -5,8 +5,10 @@ package reth
 import (
 	"bytes"
 	"fmt"
+	"sort"
 
 	"github.com/erigontech/mdbx-go/mdbx"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/holiman/uint256"
 
@@ -44,14 +46,31 @@ func WriteContractStorage(
 	blockKey.EncodeKey(&blockKeyBuf)
 	blockKeyBytes := blockKeyBuf.Bytes()
 
+	// Hash every slot key up front and process in ascending hashed-key
+	// order, so HashedStorages (DupSort, sub-sorted by this same key)
+	// fills pages densely instead of the RNG order contract.Storage
+	// arrives in. Archive tables are keyed by the raw slot key, not the
+	// hash, so this only reorders their writes — content is unchanged.
+	type hashedSlot struct {
+		slot    entitygen.StorageSlot
+		keyHash common.Hash
+	}
+	hashed := make([]hashedSlot, len(contract.Storage))
+	for i, slot := range contract.Storage {
+		hashed[i] = hashedSlot{slot: slot, keyHash: crypto.Keccak256Hash(slot.Key[:])}
+	}
+	sort.Slice(hashed, func(i, j int) bool {
+		return bytes.Compare(hashed[i].keyHash[:], hashed[j].keyHash[:]) < 0
+	})
+
 	var storageBytes uint64
-	for _, slot := range contract.Storage {
+	for _, hs := range hashed {
+		slot := hs.slot
 		slotValueU256 := uint256.NewInt(0).SetBytes(slot.Value[:])
 
 		// HashedStorages: keccak(Address) → StorageEntry{keccak(slot_key), slot_value}.
 		// Canonical v2 storage table.
-		hashedSlotKey := crypto.Keccak256Hash(slot.Key[:])
-		hashedEntry := iReth.StorageEntry{Key: hashedSlotKey, Value: slotValueU256}
+		hashedEntry := iReth.StorageEntry{Key: hs.keyHash, Value: slotValueU256}
 		var hashedBuf bytes.Buffer
 		hashedEntry.EncodeCompact(&hashedBuf)
 		hashedEntryBytes := hashedBuf.Bytes()

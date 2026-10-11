@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"sort"
 	"sync"
 
 	"github.com/erigontech/mdbx-go/mdbx"
@@ -365,12 +366,16 @@ func consumeEntity(
 			}
 		}
 		// Drain pre-encoded trie rows into StoragesTrie keyed by
-		// keccak(address). Plain Put (not AppendDup): entities are
-		// processed in PreAlloc index order (not addrHash-sorted), so
-		// AppendDup would trip MDBX_EKEYMISMATCH on cross-entity
-		// boundaries. Sub-key ordering is preserved by MDBX's per-key
-		// dup-sort regardless.
+		// keccak(address). Sorted bytewise first (HashBuilder's post-order
+		// emission is not key-ascending) so libmdbx packs the dup-sort
+		// subtree densely instead of splitting on out-of-order inserts.
+		// Plain Put (not AppendDup): entities are processed in PreAlloc
+		// index order (not addrHash-sorted), so AppendDup would trip
+		// MDBX_EKEYMISMATCH on cross-entity boundaries.
 		if len(ent.trieRows) > 0 {
+			sort.Slice(ent.trieRows, func(i, j int) bool {
+				return bytes.Compare(ent.trieRows[i], ent.trieRows[j]) < 0
+			})
 			for _, row := range ent.trieRows {
 				if err := txn.Put(envs.MdbxDBIs["StoragesTrie"], ent.addrHash[:], row, 0); err != nil {
 					return fmt.Errorf("StoragesTrie %s: %w", ent.addr.Hex(), err)

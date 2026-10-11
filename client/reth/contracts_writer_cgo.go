@@ -5,6 +5,7 @@ package reth
 import (
 	"bytes"
 	"fmt"
+	"sort"
 
 	"github.com/erigontech/mdbx-go/mdbx"
 	"github.com/ethereum/go-ethereum/common"
@@ -52,11 +53,14 @@ func WriteContracts(envs *Envs, contracts []*entitygen.Account, blockNum uint64,
 				// Per-contract StoragesTrie emit: writes the intermediate-node
 				// cache reth's payload builder reads during state-root
 				// computation. DupSort main key = AddrHash; SubKey + BNC are
-				// co-encoded into the value via StorageTrieEntry. Plain Put
-				// (not AppendDup) — contracts in this batch aren't
-				// addrHash-sorted, so AppendDup's monotonic-main-key
-				// precondition would fail on cross-contract boundaries.
-				contractAddrHash := contract.AddrHash
+				// co-encoded into the value via StorageTrieEntry. Rows are
+				// buffered and sorted bytewise before Put (HashBuilder's
+				// post-order emission is not key-ascending) so libmdbx packs
+				// the dup-sort subtree densely. Plain Put (not AppendDup) —
+				// contracts in this batch aren't addrHash-sorted, so
+				// AppendDup's monotonic-main-key precondition would fail on
+				// cross-contract boundaries.
+				var rows [][]byte
 				emit := func(path iReth.StoredNibbles, node iReth.BranchNodeCompact) error {
 					if path.Length == 0 {
 						// Skip root branch — see TestNoRootCacheRows.
@@ -66,13 +70,20 @@ func WriteContracts(envs *Envs, contracts []*entitygen.Account, blockNum uint64,
 					entry := iReth.StorageTrieEntry{SubKey: path, Node: node}
 					// v2: 33-byte PackedStoredNibblesSubKey + BNC.
 					entry.EncodePackedCompact(&valBuf)
-					// DupSort: main key = keccak(address); value = packed SubKey || BNC.
-					return txn.Put(envs.MdbxDBIs["StoragesTrie"], contractAddrHash[:], valBuf.Bytes(), 0)
+					rows = append(rows, valBuf.Bytes())
+					return nil
 				}
 				var err error
 				storageRoot, err = computeStorageRoot(contract.Storage, emit)
 				if err != nil {
 					return fmt.Errorf("WriteContracts: computeStorageRoot %s: %w", contract.Address.Hex(), err)
+				}
+				sort.Slice(rows, func(i, j int) bool { return bytes.Compare(rows[i], rows[j]) < 0 })
+				for _, row := range rows {
+					// DupSort: main key = keccak(address); value = packed SubKey || BNC.
+					if err := txn.Put(envs.MdbxDBIs["StoragesTrie"], contract.AddrHash[:], row, 0); err != nil {
+						return fmt.Errorf("WriteContracts: StoragesTrie %s: %w", contract.Address.Hex(), err)
+					}
 				}
 			} else {
 				storageRoot = contract.StateAccount.Root
