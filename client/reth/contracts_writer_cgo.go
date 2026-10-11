@@ -79,6 +79,9 @@ func WriteContracts(envs *Envs, contracts []*entitygen.Account, blockNum uint64,
 					return fmt.Errorf("WriteContracts: computeStorageRoot %s: %w", contract.Address.Hex(), err)
 				}
 				sort.Slice(rows, func(i, j int) bool { return bytes.Compare(rows[i], rows[j]) < 0 })
+				if err := envs.useFill("StoragesTrie"); err != nil {
+					return fmt.Errorf("WriteContracts: useFill(StoragesTrie): %w", err)
+				}
 				for _, row := range rows {
 					// DupSort: main key = keccak(address); value = packed SubKey || BNC.
 					if err := txn.Put(envs.MdbxDBIs["StoragesTrie"], contract.AddrHash[:], row, 0); err != nil {
@@ -94,6 +97,9 @@ func WriteContracts(envs *Envs, contracts []*entitygen.Account, blockNum uint64,
 				}
 			}
 
+			if err := envs.useFill("Bytecodes"); err != nil {
+				return fmt.Errorf("WriteContracts: useFill(Bytecodes): %w", err)
+			}
 			codeHash, wrote, err := bw.Write(contract.Code)
 			if err != nil {
 				return fmt.Errorf("WriteContracts: bytecode write %s: %w", contract.Address.Hex(), err)
@@ -119,6 +125,9 @@ func WriteContracts(envs *Envs, contracts []*entitygen.Account, blockNum uint64,
 				}
 			}
 
+			if err := envs.useFill("HashedStorages"); err != nil {
+				return fmt.Errorf("WriteContracts: useFill(HashedStorages): %w", err)
+			}
 			storBytes, err := WriteContractStorage(envs, txn, contract, blockNum, archive)
 			if err != nil {
 				return fmt.Errorf("WriteContracts: WriteContractStorage %s: %w", contract.Address.Hex(), err)

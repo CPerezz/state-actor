@@ -60,6 +60,12 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 	}
 	defer envs.Close()
 
+	fc, err := newFillController(envs.Mdbx, opts.FillTargets)
+	if err != nil {
+		return nil, fmt.Errorf("RunCgo: newFillController: %w", err)
+	}
+	envs.Fill = fc
+
 	if err := WriteDatabaseVersion(filepath.Join(cfg.DBPath, "db")); err != nil {
 		return nil, fmt.Errorf("RunCgo: WriteDatabaseVersion: %w", err)
 	}
@@ -67,7 +73,15 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 	stateRoot := emptyMPTRoot
 	accountsCreated := 0
 	contractsCreated := 0
-	stats := &generator.Stats{}
+	stats := &generator.Stats{
+		MdbxFill: &generator.MdbxFillReport{
+			Profile:        opts.FillProfileName,
+			TableFill:      opts.FillTargets,
+			TableReserve:   fc.reserves,
+			PreferWAF:      false,
+			LibmdbxVersion: mdbx.Version(),
+		},
+	}
 
 	// Sorter is colocated with the datadir so its disk budget is shared.
 	sorter, err := streamsort.New(cfg.DBPath)
@@ -242,11 +256,20 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 				return fmt.Errorf("open AccountsTrie cursor: %w", cerr)
 			}
 			defer cur.Close()
+			if ferr := envs.useFill("HashedAccounts"); ferr != nil {
+				return fmt.Errorf("RunCgo: useFill(HashedAccounts): %w", ferr)
+			}
 			gw := &trieGroupWriter{put: func(rows []trieRow) error {
+				if ferr := envs.useFill("AccountsTrie"); ferr != nil {
+					return fmt.Errorf("useFill(AccountsTrie): %w", ferr)
+				}
 				for _, r := range rows {
 					if err := cur.Put(r.key, r.val, 0); err != nil {
 						return err
 					}
+				}
+				if ferr := envs.useFill("HashedAccounts"); ferr != nil {
+					return fmt.Errorf("useFill(HashedAccounts): %w", ferr)
 				}
 				return nil
 			}}

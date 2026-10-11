@@ -79,6 +79,10 @@ type Flags struct {
 	GroupDepth int    `json:"group_depth"`
 	Archive    bool   `json:"archive"`
 	SpecPath   string `json:"spec_path,omitempty"`
+	// MdbxFillProfile / MdbxFill are reth-only (--mdbx-fill-profile,
+	// --mdbx-fill); empty/"fresh" for every other client.
+	MdbxFillProfile string `json:"mdbx_fill_profile,omitempty"`
+	MdbxFill        string `json:"mdbx_fill,omitempty"`
 }
 
 // SpecFile references the --spec config used for the run. The raw spec is
@@ -107,6 +111,23 @@ type Result struct {
 	ElapsedMS        int64  `json:"elapsed_ms"`
 	// Composition is nil when no auto-fill ran.
 	Composition *Composition `json:"composition,omitempty"`
+	// MdbxFill is reth's realized MDBX page-fill profile; nil for every
+	// other client.
+	MdbxFill *MdbxFillReport `json:"mdbx_fill,omitempty"`
+}
+
+// MdbxFillReport records reth's realized MDBX page-fill profile for this
+// run: the resolved per-table split_reserve values set via
+// mdbx_env_set_option(21, …) at write time (see --mdbx-fill-profile /
+// --mdbx-fill), the always-on prefer_waf_insteadof_balance override, and
+// the libmdbx version the DB was actually written with — so the manifest
+// fully describes a profile whose interpolation curve may later be refit.
+type MdbxFillReport struct {
+	Profile        string             `json:"profile"`
+	TableFill      map[string]float64 `json:"table_fill,omitempty"`
+	TableReserve   map[string]uint64  `json:"table_reserve,omitempty"`
+	PreferWAF      bool               `json:"prefer_waf_insteadof_balance"`
+	LibmdbxVersion string             `json:"libmdbx_version,omitempty"`
 }
 
 // Composition is the auto-fill Plan's planned entity mix — Plan inputs, not

@@ -350,6 +350,9 @@ func consumeEntity(
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		if err := envs.useFill("HashedStorages"); err != nil {
+			return fmt.Errorf("useFill(HashedStorages): %w", err)
+		}
 		for chunk := range ent.chunkCh {
 			for _, prep := range chunk {
 				if err := txn.Put(envs.MdbxDBIs["HashedStorages"], ent.addrHash[:], prep.hashedEntry, 0); err != nil {
@@ -375,6 +378,9 @@ func consumeEntity(
 		// index order (not addrHash-sorted), so AppendDup would trip
 		// MDBX_EKEYMISMATCH on cross-entity boundaries.
 		if len(ent.trieRows) > 0 {
+			if err := envs.useFill("StoragesTrie"); err != nil {
+				return fmt.Errorf("useFill(StoragesTrie): %w", err)
+			}
 			for _, row := range ent.trieRows {
 				if err := txn.Put(envs.MdbxDBIs["StoragesTrie"], ent.addrHash[:], row, 0); err != nil {
 					return fmt.Errorf("StoragesTrie %s: %w", ent.addr.Hex(), err)

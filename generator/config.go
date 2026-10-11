@@ -215,4 +215,20 @@ type Stats struct {
 
 	// GenerationTime is the time spent generating data.
 	GenerationTime time.Duration
+
+	// MdbxFill records reth's realized MDBX page-fill profile for this run
+	// (see --mdbx-fill-profile / --mdbx-fill). nil for every other client.
+	MdbxFill *MdbxFillReport
+}
+
+// MdbxFillReport is the realized reth MDBX page-fill profile: the resolved
+// per-table split_reserve values set via mdbx_env_set_option(21, …), the
+// always-on prefer_waf_insteadof_balance override, and the libmdbx version
+// the DB was actually written with. Copied verbatim into the run manifest.
+type MdbxFillReport struct {
+	Profile        string
+	TableFill      map[string]float64
+	TableReserve   map[string]uint64
+	PreferWAF      bool
+	LibmdbxVersion string
 }

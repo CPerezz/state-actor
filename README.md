@@ -197,6 +197,8 @@ Full schema: [`docs/SPEC.md`](docs/SPEC.md). Curated examples: [`examples/README
 | `--timestamp` | uint | 0 | Genesis block timestamp (unix seconds) |
 | `--extra-data` | string | (empty) | Genesis block extraData (hex) |
 | `--archive` | bool | false | Archive-mode metadata; geth + reth only |
+| `--mdbx-fill-profile` | string | `fresh` | reth only: MDBX B-tree page-fill profile — `fresh` (dense), `migrated`, or `aged`. Sets `MDBX_opt_split_reserve` per table to reproduce a reference node's page fill. |
+| `--mdbx-fill` | string | (none) | reth only: per-table fill overrides on top of `--mdbx-fill-profile`, e.g. `HashedAccounts=0.59,HashedStorages=0.70`. Values in `(0.5, 1.0]`. |
 | `--binary-trie` | bool | false | EIP-7864 binary trie; geth only |
 | `--group-depth` | int | 8 | Binary-trie group depth (1-8) |
 | `--list-forks` | bool | false | Print accepted `--fork` values and exit |
