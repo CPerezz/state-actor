@@ -77,12 +77,9 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 	defer sorter.Close()
 
 	// putAccountRLP sorter-keys each account by AddrHash with a framed value:
-	// [1-byte len(compact)] [compact HashedAccounts row] [account RLP]. Phase 2
-	// splits the frame per sorted entry: the compact bytes get cursor.Append'd
-	// into HashedAccounts (addrHash order ⇒ dense pages), the RLP feeds the
-	// HashBuilder unchanged. isContract selects the same BytecodeHash shape
-	// the caller's WriteEOAs/WriteContracts dispatch used for this account
-	// (WriteContracts must have already run so StateAccount.CodeHash is set).
+	// [1-byte len(compact)] [compact HashedAccounts row] [account RLP], split
+	// again in phase 2. isContract must match the WriteEOAs/WriteContracts
+	// dispatch (WriteContracts must have run so StateAccount.CodeHash is set).
 	putAccountRLP := func(acc *entitygen.Account, isContract bool) error {
 		rlpBytes, err := rlp.EncodeToBytes(acc.StateAccount)
 		if err != nil {
@@ -106,9 +103,9 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 		return nil, fmt.Errorf("RunCgo: streamSpecStorage: %w", err)
 	}
 
-	// Alloc dispatch by shape: plain EOAs (empty Code AND Storage) go to
-	// WriteEOAs (BytecodeHash=nil); contracts and 7702-delegating EOAs
-	// (with 23-byte 0xef0100<addr> code) go to WriteContracts.
+	// Alloc dispatch by shape: plain EOAs (empty Code AND Storage) are
+	// sorter-keyed with isContract=false; contracts and 7702-delegating EOAs
+	// (23-byte 0xef0100<addr> code) go to WriteContracts.
 	if len(cfg.GenesisAccounts) > 0 {
 		allocAccounts := buildAllocAccounts(cfg)
 		var allocEOAs, allocContracts []*entitygen.Account
@@ -119,8 +116,8 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 				allocContracts = append(allocContracts, acc)
 			}
 		}
-		if len(allocEOAs) > 0 {
-			if err := WriteEOAs(envs, allocEOAs, 0, cfg.Archive); err != nil {
+		if cfg.Archive && len(allocEOAs) > 0 {
+			if err := WriteEOAs(envs, allocEOAs, 0); err != nil {
 				return nil, fmt.Errorf("RunCgo: WriteEOAs(alloc): %w", err)
 			}
 		}
@@ -158,14 +155,11 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 			for i := 0; i < b; i++ {
 				batch[i] = plan.DrawEOA(rng)
 			}
-			// plan.DrawEOA can return 7702-delegating EOAs carrying a 23-byte
-			// 0xef0100<addr> code. Those must go through WriteContracts so their
-			// CodeHash lands in HashedAccounts — WriteEOAs writes BytecodeHash=nil,
-			// which would store them code-less and make reth's HashedAccounts
-			// leaves diverge from the committed state root (the streamsort uses
-			// acc.StateAccount.CodeHash, so the root would include the delegation
-			// while the leaf would not). Dispatch by shape, exactly like the alloc
-			// path above.
+			// plan.DrawEOA can return 7702-delegating EOAs carrying 23-byte
+			// 0xef0100<addr> code. They go through WriteContracts (Bytecodes
+			// row, CodeHash set in place) and are sorter-keyed with
+			// isContract=true so their HashedAccounts row carries the code
+			// hash the state root commits to.
 			var plainEOAs, codeEOAs []*entitygen.Account
 			for _, acc := range batch {
 				if len(acc.Code) == 0 {
@@ -174,8 +168,8 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 					codeEOAs = append(codeEOAs, acc)
 				}
 			}
-			if len(plainEOAs) > 0 {
-				if err := WriteEOAs(envs, plainEOAs, 0, cfg.Archive); err != nil {
+			if cfg.Archive && len(plainEOAs) > 0 {
+				if err := WriteEOAs(envs, plainEOAs, 0); err != nil {
 					return nil, fmt.Errorf("RunCgo: WriteEOAs: %w", err)
 				}
 			}
@@ -235,12 +229,9 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 		// cursor.Put is correct regardless of emission order.
 		//
 		// HashedAccounts rows are also written here, via cursor.Append in
-		// the same addrHash-sorted order the sorter yields: Append requires
-		// strictly increasing keys, so it both packs MDBX's leaf pages
-		// densely (libmdbx >= v0.10.0 fully packs key-ordered inserts,
-		// unlike the ~0.50 fill from the old per-writer RNG-order tx.Put)
-		// and turns any duplicate/out-of-order AddrHash into a hard error
-		// instead of a silent overwrite.
+		// the addrHash-sorted order the sorter yields. Append requires
+		// ascending keys, so it packs MDBX's leaf pages densely (libmdbx
+		// >= v0.10.0) and fails on out-of-order input.
 		cfg.Progress.Stage("reth: phase 2/2 — building account trie")
 		phase2Total := int64(accountsCreated + contractsCreated)
 		var phase2Count int64
@@ -270,30 +261,28 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 			}
 			defer hashedCur.Close()
 			if _, _, err := hashedCur.Get(nil, nil, mdbx.First); err == nil {
-				return fmt.Errorf("RunCgo: HashedAccounts is not empty before phase 2 — every row must come from the sorted Append path")
+				return fmt.Errorf("HashedAccounts is not empty before phase 2 — every row must come from the sorted Append path")
 			} else if !mdbx.IsNotFound(err) {
-				return fmt.Errorf("RunCgo: HashedAccounts empty-check: %w", err)
+				return fmt.Errorf("HashedAccounts empty-check: %w", err)
 			}
 
 			// Count-and-tick wrapper around the sorted account stream so the
 			// pure-Go account-trie build shows live progress. Single-goroutine
 			// (HashBuilder consumes the yield sequentially), so phase2Count is
-			// race-free. Each sorter entry is the putAccountRLP framing
-			// [1-byte len(compact)][compact HashedAccounts row][account RLP];
-			// the compact slice is Append'd here and the RLP forwarded to
-			// yield unchanged, so the resulting root is identical.
+			// race-free. Splits each putAccountRLP frame: compact → Append,
+			// RLP → yield unchanged.
 			countingIter := func(yield func(addrHash, accountRLP []byte) error) error {
 				return sorter.Iterate(func(addrHash, frame []byte) error {
 					if len(frame) < 1 {
-						return fmt.Errorf("RunCgo: sorter frame for %x has no length prefix", addrHash)
+						return fmt.Errorf("sorter frame for %x has no length prefix", addrHash)
 					}
 					n := int(frame[0])
 					if len(frame) < 1+n {
-						return fmt.Errorf("RunCgo: sorter frame for %x truncated compact value (want %d bytes)", addrHash, n)
+						return fmt.Errorf("sorter frame for %x truncated compact value (want %d bytes)", addrHash, n)
 					}
 					compact, accountRLP := frame[1:1+n], frame[1+n:]
 					if err := hashedCur.Put(addrHash, compact, mdbx.Append); err != nil {
-						return fmt.Errorf("RunCgo: HashedAccounts append %x: %w", addrHash, err)
+						return fmt.Errorf("HashedAccounts append %x: %w", addrHash, err)
 					}
 					phase2Count++
 					cfg.Progress.Tick(phase2Count, phase2Total, "accounts")
@@ -346,16 +335,8 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 	return stats, nil
 }
 
-// hashedAccountValue returns the Compact-encoded HashedAccounts row for acc,
-// byte-identical to what the old per-writer tx.Put would have produced:
-// isContract=false (EOA dispatch, matching WriteEOAs) encodes
-// BytecodeHash=nil regardless of acc.StateAccount.CodeHash; isContract=true
-// (contract/7702-EOA dispatch, matching WriteContracts) encodes
-// BytecodeHash=&acc.StateAccount.CodeHash — callers must invoke this only
-// after WriteContracts has mutated that field in place for isContract=true.
-// Panics if the Compact encoding doesn't fit the sorter frame's 1-byte
-// length prefix — the real wire format tops out well under that (2-byte
-// header + ≤8 nonce + ≤32 balance + ≤32 bytecode hash = 74 bytes max).
+// hashedAccountValue returns the Compact-encoded HashedAccounts row for acc:
+// BytecodeHash=nil for isContract=false, else &acc.StateAccount.CodeHash.
 func hashedAccountValue(acc *entitygen.Account, isContract bool) []byte {
 	ethAccount := iReth.Account{
 		Nonce:   acc.StateAccount.Nonce,
@@ -368,9 +349,5 @@ func hashedAccountValue(acc *entitygen.Account, isContract bool) []byte {
 	}
 	var buf bytes.Buffer
 	ethAccount.EncodeCompact(&buf)
-	compact := buf.Bytes()
-	if len(compact) >= 256 {
-		panic(fmt.Sprintf("hashedAccountValue: compact encoding is %d bytes — exceeds the sorter frame's 1-byte length prefix", len(compact)))
-	}
-	return compact
+	return buf.Bytes()
 }

@@ -8,28 +8,16 @@ import (
 
 	"github.com/erigontech/mdbx-go/mdbx"
 
-	iReth "github.com/ethereum/state-actor/internal/reth"
-
 	"github.com/ethereum/state-actor/internal/entitygen"
+	iReth "github.com/ethereum/state-actor/internal/reth"
 )
 
-// WriteEOAs writes the archive-mode rows for each EOA inside one atomic
-// MDBX write transaction:
-//   - AccountChangeSets (DupSort: BE_u64(block) → AccountBeforeTx{addr, nil}).
-//   - AccountsHistory (ShardedKey(addr, u64::MAX) → IntegerList([blockNum]));
-//     routed to the RocksDB CF via envs.HistorySink().
-//
-// HashedAccounts is not written here: RunCgo appends every account's row
-// in addrHash order during phase 2 instead, so the table packs densely
-// rather than filling pages in RNG draw order. Callers with archive=false
-// and no other per-EOA side effect have nothing left to write — RunCgo
-// skips calling WriteEOAs in that case.
+// WriteEOAs writes the archive-mode rows for each EOA (AccountChangeSets,
+// AccountsHistory) inside one atomic MDBX write transaction. Archive-only:
+// callers must gate on cfg.Archive before calling.
 //
 // Accounts are written in input order (caller controls ordering).
-func WriteEOAs(envs *Envs, accounts []*entitygen.Account, blockNum uint64, archive bool) error {
-	if !archive {
-		return nil
-	}
+func WriteEOAs(envs *Envs, accounts []*entitygen.Account, blockNum uint64) error {
 	return envs.Mdbx.Update(func(txn *mdbx.Txn) error {
 		blockKey := beU64(blockNum)
 

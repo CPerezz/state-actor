@@ -19,10 +19,8 @@ import (
 // AccountsHistory + StoragesHistory rows (archive) are routed to the
 // RocksDB CFs via envs.HistorySink().
 //
-// HashedAccounts is not written here: RunCgo appends every account's row
-// in addrHash order during phase 2 instead (see putAccountRLP /
-// hashedAccountValue in run_cgo.go), so the table packs densely rather
-// than filling pages in RNG draw order.
+// HashedAccounts is written by RunCgo's phase 2, not here (see
+// hashedAccountValue in run_cgo.go).
 //
 // SIDE EFFECT: each contract's StateAccount.Root and .CodeHash are
 // mutated in place from the supplied Storage + Code. With empty Storage

@@ -162,12 +162,11 @@ func TestRunCgoContractsDeterminism(t *testing.T) {
 	}
 }
 
-// oldStyleCompact re-implements the pre-migration WriteEOAs/WriteContracts
-// HashedAccounts encoding directly (independent of hashedAccountValue, so
-// it can catch a regression there): BytecodeHash=nil for EOA-shaped
-// entities, &keccak(code) for contract-shaped ones (code may be empty,
-// hashing to EmptyCodeHash).
-func oldStyleCompact(nonce uint64, balance *uint256.Int, isContract bool, code []byte) []byte {
+// compactRow re-implements the HashedAccounts compact encoding directly
+// (independent of hashedAccountValue, so it can catch a regression there):
+// BytecodeHash=nil for EOA-shaped entities, &keccak(code) for
+// contract-shaped ones (code may be empty, hashing to EmptyCodeHash).
+func compactRow(nonce uint64, balance *uint256.Int, isContract bool, code []byte) []byte {
 	acc := iReth.Account{Nonce: nonce, Balance: balance}
 	if isContract {
 		h := crypto.Keccak256Hash(code)
@@ -178,12 +177,11 @@ func oldStyleCompact(nonce uint64, balance *uint256.Int, isContract bool, code [
 	return buf.Bytes()
 }
 
-// TestRunCgoHashedAccountsSortedAppend pins the PR1 migration: HashedAccounts
-// rows now come exclusively from RunCgo's phase-2 cursor.Append over the
-// addrHash-sorted stream (hashedAccountValue / putAccountRLP in run_cgo.go),
-// not from WriteEOAs/WriteContracts's old per-batch tx.Put. Covers an alloc
-// plain EOA, an alloc 7702-delegating EOA, an alloc storage-only contract,
-// and an AutoFill mix of plain EOAs + 7702 EOAs + contracts.
+// TestRunCgoHashedAccountsSortedAppend checks that HashedAccounts rows come
+// from RunCgo's phase-2 cursor.Append over the addrHash-sorted stream
+// (hashedAccountValue / putAccountRLP in run_cgo.go). Covers an alloc plain
+// EOA, an alloc 7702-delegating EOA, an alloc storage-only contract, and an
+// AutoFill mix of plain EOAs + 7702 EOAs + contracts.
 func TestRunCgoHashedAccountsSortedAppend(t *testing.T) {
 	tmp := t.TempDir()
 
@@ -226,7 +224,7 @@ func TestRunCgoHashedAccountsSortedAppend(t *testing.T) {
 	want := make(map[common.Hash][]byte)
 	var wantAccountBytes uint64
 	addWant := func(addrHash common.Hash, nonce uint64, balance *uint256.Int, isContract bool, code []byte) {
-		c := oldStyleCompact(nonce, balance, isContract, code)
+		c := compactRow(nonce, balance, isContract, code)
 		want[addrHash] = c
 		wantAccountBytes += uint64(len(c))
 	}
@@ -277,14 +275,7 @@ func TestRunCgoHashedAccountsSortedAppend(t *testing.T) {
 			return err
 		}
 		defer cur.Close()
-		var prevKey []byte
 		for k, v, err := cur.Get(nil, nil, mdbx.First); err == nil; k, v, err = cur.Get(nil, nil, mdbx.Next) {
-			// (b) strictly ascending key order — Append enforces this at
-			// write time, but assert it again on read-back.
-			if prevKey != nil && bytes.Compare(prevKey, k) >= 0 {
-				t.Errorf("HashedAccounts keys out of order: %x then %x", prevKey, k)
-			}
-			prevKey = append([]byte(nil), k...)
 			got[common.BytesToHash(k)] = append([]byte(nil), v...)
 			rowCount++
 		}

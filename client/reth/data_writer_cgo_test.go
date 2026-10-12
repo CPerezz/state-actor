@@ -29,7 +29,7 @@ func TestWriteEOAsRoundtrip(t *testing.T) {
 		accounts[i] = entitygen.GenerateEOA(rng)
 	}
 
-	if err := WriteEOAs(envs, accounts, 0, true /* archive */); err != nil {
+	if err := WriteEOAs(envs, accounts, 0); err != nil {
 		t.Fatalf("WriteEOAs: %v", err)
 	}
 
@@ -87,43 +87,5 @@ func TestWriteEOAsRoundtrip(t *testing.T) {
 			t.Errorf("AccountsHistory for %s: got %v, want [0]", acc.Address.Hex(), list)
 		}
 		val.Free()
-	}
-}
-
-// TestWriteEOAsArchiveFalseIsNoop pins the new no-op contract: with
-// HashedAccounts moved to RunCgo's phase-2 Append and no other per-EOA
-// side effect left for archive=false, WriteEOAs must leave AccountChangeSets
-// (and the RocksDB AccountsHistory CF) untouched when archive is off.
-func TestWriteEOAsArchiveFalseIsNoop(t *testing.T) {
-	tmp := t.TempDir()
-	envs, err := OpenEnvs(tmp, true)
-	if err != nil {
-		t.Fatalf("OpenEnvs: %v", err)
-	}
-	defer envs.Close()
-
-	rng := rand.New(rand.NewSource(0xfeed))
-	const n = 10
-	accounts := make([]*entitygen.Account, n)
-	for i := range n {
-		accounts[i] = entitygen.GenerateEOA(rng)
-	}
-
-	if err := WriteEOAs(envs, accounts, 0, false /* archive */); err != nil {
-		t.Fatalf("WriteEOAs: %v", err)
-	}
-
-	if err := envs.Mdbx.View(func(txn *mdbx.Txn) error {
-		cur, err := txn.OpenCursor(envs.MdbxDBIs["AccountChangeSets"])
-		if err != nil {
-			return err
-		}
-		defer cur.Close()
-		if k, _, err := cur.Get(nil, nil, mdbx.First); err == nil {
-			t.Errorf("AccountChangeSets should stay empty with archive=false, first key = %x", k)
-		}
-		return nil
-	}); err != nil {
-		t.Errorf("AccountChangeSets empty check: %v", err)
 	}
 }
