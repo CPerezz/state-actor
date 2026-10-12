@@ -296,6 +296,11 @@ size is a truncated normal in `[1 KiB, 100 MiB]` whose mean is budget-derived
 non-zero), nonce (always non-zero), and EIP-7702 delegation (2 %, targets
 from a fixed 256-address pool) independently.
 
+The truncated-normal storage sizing above is the `normal` storage model
+(default). `--storage-model=mainnet` instead draws each contract's slot
+count and value length from calibrated mainnet distributions in
+[`internal/autofill/mainnet_storage_table.go`](../internal/autofill/mainnet_storage_table.go).
+
 Spec-loaded entities (`--spec`) are separate: their distribution comes
 from the YAML schema (per-entity `approximate_size_bytes` resolved via
 `internal/sizecal.SlotsForBytes`) and is independent of the auto-fill

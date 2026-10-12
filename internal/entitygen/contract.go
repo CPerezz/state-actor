@@ -45,17 +45,10 @@ func GenerateContract(rng *mrand.Rand, codeSize int, numSlots int) *Account {
 }
 
 // GenerateContractWithCode is GenerateContract with caller-supplied code
-// (skips draws 2–3).
-func GenerateContractWithCode(rng *mrand.Rand, code []byte, codeHash common.Hash, numSlots int) *Account {
-	var addr common.Address
-	rng.Read(addr[:])
-	return finishContract(rng, addr, code, codeHash, numSlots, nil)
-}
-
-// GenerateContractWithValues is GenerateContractWithCode with each slot value
-// holding valueLen(rng) significant bytes (1..32) instead of 32 random bytes.
-// Per slot it draws the key, then the length, then the value bytes.
-func GenerateContractWithValues(rng *mrand.Rand, code []byte, codeHash common.Hash, numSlots int, valueLen func(*mrand.Rand) int) *Account {
+// (skips draws 2–3). A non-nil valueLen gives each slot value valueLen(rng)
+// significant bytes (1..32) instead of 32 random bytes; nil keeps the normal
+// 32-random-byte draw, byte-identical to the original RNG stream.
+func GenerateContractWithCode(rng *mrand.Rand, code []byte, codeHash common.Hash, numSlots int, valueLen func(*mrand.Rand) int) *Account {
 	var addr common.Address
 	rng.Read(addr[:])
 	return finishContract(rng, addr, code, codeHash, numSlots, valueLen)

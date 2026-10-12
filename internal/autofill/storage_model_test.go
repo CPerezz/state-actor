@@ -1,6 +1,9 @@
 package autofill
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
+	"fmt"
 	mrand "math/rand"
 	"testing"
 
@@ -86,5 +89,36 @@ func TestMainnetDrawsMatchCalibration(t *testing.T) {
 	}
 	if got := float64(twenty) / float64(vals); got < 0.47 || got > 0.53 {
 		t.Errorf("share of 20-byte values = %.4f over %d values, want ≈0.498", got, vals)
+	}
+}
+
+// storageMainnetDrawDigest pins the first 1000 StorageMainnet plan.DrawContract outputs for a fixed
+// seed: sha256 over each contract's address, slot count and every slot's key+value, in draw order.
+// Catches any accidental drift in the mainnet draw stream (table edits, RNG reordering).
+//
+// To update (when intentional): change t.Logf to t.Fatalf below, run the test, copy the printed
+// digest here.
+const storageMainnetDrawDigest = "aca919efa9f0ba36256b79eaf1955887dba3c187961af272ccd0bba16ce40089"
+
+func TestMainnetDrawStreamGolden(t *testing.T) {
+	plan, err := PlanForBudgetProfile(1<<30, ProfileMainnet, StorageMainnet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rng := mrand.New(mrand.NewSource(7))
+	h := sha256.New()
+	var buf [8]byte
+	for range 1000 {
+		acc := plan.DrawContract(rng)
+		h.Write(acc.Address[:])
+		binary.BigEndian.PutUint64(buf[:], uint64(len(acc.Storage)))
+		h.Write(buf[:])
+		for _, s := range acc.Storage {
+			h.Write(s.Key[:])
+			h.Write(s.Value[:])
+		}
+	}
+	if got := fmt.Sprintf("%x", h.Sum(nil)); got != storageMainnetDrawDigest {
+		t.Errorf("StorageMainnet draw stream digest = %s, want %s (table or draw order changed)", got, storageMainnetDrawDigest)
 	}
 }

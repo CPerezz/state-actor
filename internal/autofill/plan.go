@@ -174,15 +174,16 @@ func (p *Plan) DrawEOA(rng *mrand.Rand) *entitygen.Account {
 //  1. the slot count: StorageSampler.Draw(rng) bytes / sizecal.BytesPerSlot, or one
 //     rng.Float64 under StorageMainnet;
 //  2. rng.Intn(DistinctBytecodes) — code-pool index (see poolCode);
-//  3. entitygen.GenerateContractWithCode(rng, code, hash, numSlots), or under StorageMainnet
-//     entitygen.GenerateContractWithValues with mainnet value lengths.
+//  3. entitygen.GenerateContractWithCode(rng, code, hash, numSlots, valueLen), valueLen
+//     non-nil (mainnet value lengths) only under StorageMainnet.
 func (p *Plan) DrawContract(rng *mrand.Rand) *entitygen.Account {
+	var numSlots int
+	var valueLen func(*mrand.Rand) int
 	if p.StorageModel == StorageMainnet {
-		numSlots := drawMainnetSlots(rng)
-		code, hash := poolCode(rng.Intn(p.DistinctBytecodes), p.CodeSampler)
-		return entitygen.GenerateContractWithValues(rng, code, hash, numSlots, drawMainnetValueLen)
+		numSlots, valueLen = drawMainnetSlots(rng), drawMainnetValueLen
+	} else {
+		numSlots = max(int(p.StorageSampler.Draw(rng)/sizecal.BytesPerSlot("")), 1)
 	}
-	numSlots := max(int(p.StorageSampler.Draw(rng)/sizecal.BytesPerSlot("")), 1)
 	code, hash := poolCode(rng.Intn(p.DistinctBytecodes), p.CodeSampler)
-	return entitygen.GenerateContractWithCode(rng, code, hash, numSlots)
+	return entitygen.GenerateContractWithCode(rng, code, hash, numSlots, valueLen)
 }

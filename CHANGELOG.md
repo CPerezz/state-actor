@@ -78,8 +78,10 @@
   count follows from the storage budget and the mean slot count; contracts come
   out of the account budget, so the total account count is unchanged. On a 1 GB
   store: 99,751 contracts (normal: 20,972), slots per contract p50/p90/p99
-  1/10/152 (reference 1/10/154). Changes the state root; recorded in the
-  manifest and restored by `reproduce`.
+  1/10/152 (reference 1/10/154). The heavy tail means realized storage tracks
+  the budget only at large targets (100 GB: 1.28x seed-to-seed spread); small
+  targets (1 GB) vary up to ~9x by seed. Changes the state root; recorded in
+  the manifest and restored by `reproduce`.
 
 - **reth: `--mdbx-fill-profile` and `--mdbx-fill` control MDBX B-tree page
   fill.** `migrated` and `aged` target a reference node's measured leaf fill

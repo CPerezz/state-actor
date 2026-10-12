@@ -1,9 +1,12 @@
 package autofill
 
 // Mainnet storage calibration for --storage-model=mainnet, from a full walk of jochemnet's HashedStorages
-// main tree (reth storage v2, block 24,410,463, 2026-10-09): 25,166,497 storage-bearing accounts after
-// dropping the 335,545,082-slot EEST 10GB contract, which specs plant themselves. The 4 jochemnet
-// accounts above mainnetMaxSlots are folded into the last knot.
+// main tree (reth storage v2, block 24,410,463, 2026-10-09): 25,166,497 storage-bearing accounts, 1.49B
+// slots total, after dropping the 335,545,082-slot EEST 10GB contract, which specs plant themselves. The
+// 4 jochemnet accounts above mainnetMaxSlots are folded into the last knot.
+//
+// To regenerate: rebuild mainnetSmallSlotCDF, mainnetSlotTail and mainnetValueLenCDF from a fresh walk's
+// empirical CDFs, keeping the last mainnetSlotTail knot at {1.0, mainnetMaxSlots}.
 
 // mainnetSmallSlotCDF[k-1] = P(slots <= k), k = 1..28. Small counts are drawn exactly: they decide
 // whether a contract's storage stays inline in the HashedStorages leaf or gets its own nested tree.
@@ -13,6 +16,10 @@ var mainnetSmallSlotCDF = [28]float64{
 	0.948659283, 0.952209876, 0.955232069, 0.958837497, 0.961102493, 0.962333335, 0.963515026,
 	0.964900638, 0.966081612, 0.967305025, 0.968445152, 0.969369356, 0.970296780, 0.971167501,
 }
+
+// mainnetMaxSlots caps one contract's storage draw, so the largest draw stays near 1 GB in memory. It is
+// also the slot count of the last mainnetSlotTail knot below.
+const mainnetMaxSlots = 16777216
 
 // mainnetSlotTail are (P(slots <= n), n) knots above 28; draws are uniform between adjacent knots.
 var mainnetSlotTail = []struct {
@@ -115,14 +122,12 @@ var mainnetSlotTail = []struct {
 	{0.999999682, 12361102},
 	{0.999999762, 14215267},
 	{0.999999841, 16347557},
-	{1.000000000, 16777216},
+	{1.000000000, mainnetMaxSlots},
 }
 
-// mainnetMaxSlots caps one contract's storage, so the largest draw stays near 1 GB in memory.
-const mainnetMaxSlots = 16777216
-
-// mainnetMeanSlotsMilli is the mean of the slot-count distribution above, x1000, kept as an integer so
-// the contract count derived from it is identical on every platform (cross-client root invariance).
+// mainnetMeanSlotsMilli is the knot-model mean of the slot-count distribution above, x1000, kept as an
+// integer so the contract count derived from it is identical on every platform (cross-client root
+// invariance).
 const mainnetMeanSlotsMilli = 53821
 
 // mainnetValueLenCDF[L-1] = P(len <= L): significant bytes of a slot value (sampled from 1% of
