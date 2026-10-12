@@ -3,6 +3,13 @@
 ## Unreleased
 
 ### Changed
+- **reth: HashedAccounts is written in hashed-key order.** Rows were `Put` in
+  RNG draw order, so every insert landed inside the key range and libmdbx split
+  pages in the middle: leaf fill ~0.50 and one level deeper than needed. They
+  are now `cursor.Append`ed in AddrHash order from the sorted stream the account
+  trie is built from, which fills pages densely. Table contents (every k/v) and
+  the state root are unchanged. On a 1 GB store, HashedAccounts leaf pages went
+  from 33,272 to 16,880.
 - **Besu DB now created with all 17 mainnet Bonsai column families.**
   A fresh mainnet Besu init creates every `KeyValueSegmentIdentifier`
   segment with `BONSAI` in its format set, including `CHAIN_PRUNER_STATE`

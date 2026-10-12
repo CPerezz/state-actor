@@ -15,22 +15,24 @@ import (
 )
 
 // WriteContracts writes the v2 contract tables: Bytecodes (deduped),
-// HashedAccounts, AccountChangeSets (archive), HashedStorages,
-// StorageChangeSets (archive). AccountsHistory + StoragesHistory rows
-// (archive) are routed to the RocksDB CFs via envs.HistorySink().
+// AccountChangeSets (archive), HashedStorages, StorageChangeSets (archive).
+// AccountsHistory + StoragesHistory rows (archive) are routed to the
+// RocksDB CFs via envs.HistorySink().
+//
+// HashedAccounts is written by RunCgo's phase 2, not here (see
+// hashedAccountValue in run_cgo.go).
 //
 // SIDE EFFECT: each contract's StateAccount.Root and .CodeHash are
 // mutated in place from the supplied Storage + Code. With empty Storage
 // the existing Root is preserved (the spec-storage streaming phase sets
 // it ahead of time); a zero Root in that case is rejected.
 //
-// stats (optional) accumulates AccountBytes, CodeBytes (deduped — only
-// counts code that actually got written), and StorageBytes (sum of
-// HashedStorages compact-encoded entries). Increments are applied only
-// after the MDBX transaction commits.
+// stats (optional) accumulates CodeBytes (deduped — only counts code
+// that actually got written) and StorageBytes (sum of HashedStorages
+// compact-encoded entries). Increments are applied only after the MDBX
+// transaction commits.
 func WriteContracts(envs *Envs, contracts []*entitygen.Account, blockNum uint64, archive bool, stats *generator.Stats) error {
 	var (
-		localAccountBytes uint64
 		localStorageBytes uint64
 		localCodeBytes    uint64
 	)
@@ -92,19 +94,6 @@ func WriteContracts(envs *Envs, contracts []*entitygen.Account, blockNum uint64,
 			contract.StateAccount.Root = storageRoot
 			contract.StateAccount.CodeHash = codeHash.Bytes()
 
-			ethAccount := iReth.Account{
-				Nonce:        contract.StateAccount.Nonce,
-				Balance:      contract.StateAccount.Balance,
-				BytecodeHash: &codeHash,
-			}
-			var accBuf bytes.Buffer
-			ethAccount.EncodeCompact(&accBuf)
-			accountBytes := accBuf.Bytes()
-
-			// HashedAccounts: keccak(addr) → Account (canonical v2 state).
-			if err := txn.Put(envs.MdbxDBIs["HashedAccounts"], contract.AddrHash[:], accountBytes, 0); err != nil {
-				return fmt.Errorf("HashedAccounts %s: %w", contract.Address.Hex(), err)
-			}
 			if archive {
 				// AccountChangeSets: DupSort BE_u64(block) → AccountBeforeTx{addr, nil}
 				abt := iReth.AccountBeforeTx{Address: contract.Address, Info: nil}
@@ -124,7 +113,6 @@ func WriteContracts(envs *Envs, contracts []*entitygen.Account, blockNum uint64,
 				return fmt.Errorf("WriteContracts: WriteContractStorage %s: %w", contract.Address.Hex(), err)
 			}
 
-			localAccountBytes += uint64(len(accountBytes))
 			localStorageBytes += storBytes
 		}
 		return nil
@@ -133,7 +121,6 @@ func WriteContracts(envs *Envs, contracts []*entitygen.Account, blockNum uint64,
 		return err
 	}
 	if stats != nil {
-		stats.AccountBytes += localAccountBytes
 		stats.StorageBytes += localStorageBytes
 		stats.CodeBytes += localCodeBytes
 	}
