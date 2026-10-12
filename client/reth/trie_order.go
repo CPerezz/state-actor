@@ -16,7 +16,8 @@ type trieRow struct{ key, val []byte }
 // starts. Rows above that depth (at most 16, emitted after their subtrees)
 // cannot be ordered without buffering the whole trie and go straight through
 // as single-row batches; that is also why the table takes plain Put, not
-// cursor Append.
+// cursor Append. Under the alloy_trie branching rule, a group buffers at
+// most ~N/3800 of the N stored rows at a time, not the whole trie.
 type trieGroupWriter struct {
 	put   func(rows []trieRow) error
 	group int

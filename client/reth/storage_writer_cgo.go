@@ -79,7 +79,13 @@ func WriteContractStorage(
 				contract.AddrHash.Hex(), slot.Key.Hex(), err)
 		}
 
-		if archive {
+		// Stats: bank HashedStorages compact-encoded entry bytes.
+		storageBytes += uint64(len(hashedEntryBytes))
+	}
+
+	// Archive tables are keyed by the raw slot key; contract.Storage arrives pre-sorted by it.
+	if archive {
+		for _, slot := range contract.Storage {
 			// StorageChangeSets: BlockNumberAddress → StorageEntry{slot_key, prev_value=0}
 			// For genesis (block 0), the "before" value is 0 — slot was newly set.
 			changeEntry := iReth.StorageEntry{Key: slot.Key, Value: uint256.NewInt(0)}
@@ -98,8 +104,6 @@ func WriteContractStorage(
 					contract.Address.Hex(), slot.Key.Hex(), err)
 			}
 		}
-		// Stats: bank HashedStorages compact-encoded entry bytes.
-		storageBytes += uint64(len(hashedEntryBytes))
 	}
 	return storageBytes, nil
 }

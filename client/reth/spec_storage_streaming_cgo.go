@@ -50,10 +50,10 @@ type slotPrepared struct {
 // then sends the computed root via rootCh and closes chunkCh. errCh
 // carries any IterateRoot failure surfacing on the worker side. trieRows
 // are pre-encoded StoragesTrie DupSort values (each entry = packed
-// SubKey(33 bytes) || BranchNodeCompact bytes); the consumer writes them
-// under the DupSort main key ent.addrHash after the per-slot rows land,
-// one txn.Put per row (HashBuilder's emission order is post-order, not a
-// global sort — see its "Path emission order" doc).
+// SubKey(33 bytes) || BranchNodeCompact bytes), sorted bytewise by the
+// worker (HashBuilder's emission order is post-order, not a global sort —
+// see its "Path emission order" doc); the consumer writes them under the
+// DupSort main key ent.addrHash after the per-slot rows land.
 type preparedEntity struct {
 	idx      int
 	addr     common.Address
@@ -252,10 +252,10 @@ func drainAndEncodeEntity(
 	// Per-entity trie emissions: HashBuilder emits in post-order as it
 	// walks the sorted slots (see HashBuilder's "Path emission order" doc —
 	// not a global sort). Worker pre-encodes each emission as a packed
-	// StorageTrieEntry value (33-byte SubKey || BNC; v2 format) and
-	// accumulates into trieRows. The consumer drains trieRows into
-	// StoragesTrie within the same per-entity Mdbx.Update txn AFTER the
-	// slot rows land, one txn.Put per row.
+	// StorageTrieEntry value (33-byte SubKey || BNC; v2 format), accumulates
+	// into trieRows, then sorts it bytewise before handing it to the
+	// consumer, which drains it into StoragesTrie within the same
+	// per-entity Mdbx.Update txn AFTER the slot rows land.
 	// Memory per entity: O(trie nodes) ≈ small multiple of slot count.
 	trieRows := make([][]byte, 0, 64)
 	emit := func(path iReth.StoredNibbles, node iReth.BranchNodeCompact) error {
@@ -324,8 +324,12 @@ func drainAndEncodeEntity(
 		close(ent.chunkCh)
 		return nil
 	}
-	// Stash trie emissions on the preparedEntity BEFORE closing chunkCh
-	// so the consumer sees them when the for-range loop exits.
+	// Sort trie rows bytewise (HashBuilder's post-order emission is not
+	// key-ascending) before stashing them, sequenced before close(ent.chunkCh)
+	// so the consumer's AFTER-drain read is race-free.
+	sort.Slice(trieRows, func(i, j int) bool {
+		return bytes.Compare(trieRows[i], trieRows[j]) < 0
+	})
 	ent.trieRows = trieRows
 	close(ent.chunkCh)
 	ent.rootCh <- root
@@ -365,17 +369,12 @@ func consumeEntity(
 				localBytes += uint64(len(prep.hashedEntry))
 			}
 		}
-		// Drain pre-encoded trie rows into StoragesTrie keyed by
-		// keccak(address). Sorted bytewise first (HashBuilder's post-order
-		// emission is not key-ascending) so libmdbx packs the dup-sort
-		// subtree densely instead of splitting on out-of-order inserts.
+		// Drain pre-encoded trie rows (already sorted bytewise by the
+		// worker) into StoragesTrie keyed by keccak(address).
 		// Plain Put (not AppendDup): entities are processed in PreAlloc
 		// index order (not addrHash-sorted), so AppendDup would trip
 		// MDBX_EKEYMISMATCH on cross-entity boundaries.
 		if len(ent.trieRows) > 0 {
-			sort.Slice(ent.trieRows, func(i, j int) bool {
-				return bytes.Compare(ent.trieRows[i], ent.trieRows[j]) < 0
-			})
 			for _, row := range ent.trieRows {
 				if err := txn.Put(envs.MdbxDBIs["StoragesTrie"], ent.addrHash[:], row, 0); err != nil {
 					return fmt.Errorf("StoragesTrie %s: %w", ent.addr.Hex(), err)

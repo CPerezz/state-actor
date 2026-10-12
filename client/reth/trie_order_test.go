@@ -3,6 +3,7 @@ package reth
 import (
 	"bytes"
 	"math/rand/v2"
+	"sort"
 	"testing"
 
 	iReth "github.com/ethereum/state-actor/internal/reth"
@@ -15,7 +16,7 @@ import (
 func TestTrieGroupWriter_AscendingOutput(t *testing.T) {
 	rng := rand.New(rand.NewPCG(1, 2))
 
-	const n = 4000
+	const n = 65536
 	seen := map[[32]byte]bool{}
 	keys := make([][32]byte, 0, n)
 	for len(keys) < n {
@@ -29,7 +30,7 @@ func TestTrieGroupWriter_AscendingOutput(t *testing.T) {
 		seen[k] = true
 		keys = append(keys, k)
 	}
-	sortBy32(keys)
+	sort.Slice(keys, func(i, j int) bool { return bytes.Compare(keys[i][:], keys[j][:]) < 0 })
 
 	// Unsorted emission set, captured independently for the equality check.
 	wantRows := map[string][]byte{}
@@ -89,24 +90,19 @@ func TestTrieGroupWriter_AscendingOutput(t *testing.T) {
 		}
 	}
 
-	// Ascending except rows with path length < 2 (<= 16 bytes[32]==0xNN
-	// encoded as a 33rd length byte < 2) — those are ancestors, Put
-	// immediately and may precede a later, smaller sibling-group key.
-	for i := 1; i < len(puts); i++ {
-		prevLen, curLen := puts[i-1][32], puts[i][32]
-		if curLen < 2 || prevLen < 2 {
+	// Ancestor rows (path length < 2) are Put immediately, out of band
+	// with group buffering, and may land anywhere relative to their
+	// neighbors. Skip them and compare each group row only against the
+	// last group row seen, so an ancestor in between doesn't hide a
+	// real ordering break.
+	var lastKey []byte
+	for _, p := range puts {
+		if p[32] < 2 {
 			continue
 		}
-		if bytes.Compare(puts[i-1], puts[i]) >= 0 {
-			t.Fatalf("non-ascending Put at %d: %x >= %x", i, puts[i-1], puts[i])
+		if lastKey != nil && bytes.Compare(lastKey, p) >= 0 {
+			t.Fatalf("non-ascending Put: %x >= %x", lastKey, p)
 		}
-	}
-}
-
-func sortBy32(keys [][32]byte) {
-	for i := 1; i < len(keys); i++ {
-		for j := i; j > 0 && bytes.Compare(keys[j-1][:], keys[j][:]) > 0; j-- {
-			keys[j-1], keys[j] = keys[j], keys[j-1]
-		}
+		lastKey = p
 	}
 }
