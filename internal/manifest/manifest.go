@@ -83,6 +83,8 @@ type Flags struct {
 	// --mdbx-fill); empty/"fresh" for every other client.
 	MdbxFillProfile string `json:"mdbx_fill_profile,omitempty"`
 	MdbxFill        string `json:"mdbx_fill,omitempty"`
+	// StorageModel is --storage-model ("normal" when empty, i.e. before the flag existed).
+	StorageModel string `json:"storage_model,omitempty"`
 }
 
 // SpecFile references the --spec config used for the run. The raw spec is

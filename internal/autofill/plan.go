@@ -22,6 +22,8 @@ type Plan struct {
 	// DistinctBytecodes is the code-pool size: each contract draws one of
 	// these shared blobs (see poolCode).
 	DistinctBytecodes int
+	// StorageModel selects how DrawContract sizes and fills a contract's storage.
+	StorageModel StorageModel
 
 	// SkipDerivedHashes elides the RNG-neutral derived-hash work on the
 	// single-threaded draw goroutine (the AddrHash keccak and the
@@ -70,10 +72,10 @@ func ParseProfile(s string) (Profile, error) {
 	}
 }
 
-// PlanForBudget builds a mainnet-shaped (20/10/70) Plan. Thin wrapper over
-// PlanForBudgetProfile(topUp, ProfileMainnet).
+// PlanForBudget builds a mainnet-shaped (20/10/70) Plan with the default storage model. Thin wrapper
+// over PlanForBudgetProfile(topUp, ProfileMainnet, StorageNormal).
 func PlanForBudget(topUp uint64) (*Plan, error) {
-	return PlanForBudgetProfile(topUp, ProfileMainnet)
+	return PlanForBudgetProfile(topUp, ProfileMainnet, StorageNormal)
 }
 
 // PlanForBudgetProfile builds a Plan that, if fully consumed, would emit
@@ -90,7 +92,11 @@ func PlanForBudget(topUp uint64) (*Plan, error) {
 // Returns an error when topUp is below the account-trie cost of a single
 // EOA (175 B). A non-nil Plan is safe to consume even when NumContracts is
 // zero (e.g. when bytecode budget is below the minimum code size).
-func PlanForBudgetProfile(topUp uint64, profile Profile) (*Plan, error) {
+//
+// StorageMainnet instead derives the contract count from the storage budget and the mainnet mean
+// slot count. Contracts are drawn out of the account budget, so the total account count is the
+// same under both models.
+func PlanForBudgetProfile(topUp uint64, profile Profile, model StorageModel) (*Plan, error) {
 	bytesPerAccount := sizecal.BytesPerAccount("")
 	if topUp < bytesPerAccount {
 		return nil, fmt.Errorf("autofill: target_size %d B below one account (%d B)", topUp, bytesPerAccount)
@@ -109,7 +115,10 @@ func PlanForBudgetProfile(topUp uint64, profile Profile) (*Plan, error) {
 	}
 
 	bytesPerSlot := sizecal.BytesPerSlot("")
-	if bCode >= sizecal.MinContractCode && bStorage >= bytesPerSlot {
+	switch {
+	case model == StorageMainnet && bStorage >= bytesPerSlot:
+		numContracts = int(bStorage / bytesPerSlot * 1000 / mainnetMeanSlotsMilli)
+	case bCode >= sizecal.MinContractCode && bStorage >= bytesPerSlot:
 		// Round bCode / MeanContractCode → contract count.
 		numContracts = int((bCode + sizecal.MeanContractCode/2) / sizecal.MeanContractCode)
 		if numContracts > 0 {
@@ -146,6 +155,7 @@ func PlanForBudgetProfile(topUp uint64, profile Profile) (*Plan, error) {
 		CodeSampler:       codeSampler,
 		StorageSampler:    storageSampler,
 		DistinctBytecodes: max(numContracts/sizecal.MainnetAccountsPerDistinctBytecode, 1),
+		StorageModel:      model,
 	}, nil
 }
 
@@ -161,11 +171,19 @@ func (p *Plan) DrawEOA(rng *mrand.Rand) *entitygen.Account {
 
 // DrawContract produces one synthetic contract. RNG draw order is fixed
 // across all client emission sites:
-//  1. StorageSampler.Draw(rng) — storage bytes; slot count = bytes / sizecal.BytesPerSlot.
-//  2. rng.Intn(DistinctBytecodes) — code-pool index (see poolCode).
-//  3. entitygen.GenerateContractWithCode(rng, code, hash, numSlots).
+//  1. the slot count: StorageSampler.Draw(rng) bytes / sizecal.BytesPerSlot, or one
+//     rng.Float64 under StorageMainnet;
+//  2. rng.Intn(DistinctBytecodes) — code-pool index (see poolCode);
+//  3. entitygen.GenerateContractWithCode(rng, code, hash, numSlots, valueLen), valueLen
+//     non-nil (mainnet value lengths) only under StorageMainnet.
 func (p *Plan) DrawContract(rng *mrand.Rand) *entitygen.Account {
-	numSlots := max(int(p.StorageSampler.Draw(rng)/sizecal.BytesPerSlot("")), 1)
+	var numSlots int
+	var valueLen func(*mrand.Rand) int
+	if p.StorageModel == StorageMainnet {
+		numSlots, valueLen = drawMainnetSlots(rng), drawMainnetValueLen
+	} else {
+		numSlots = max(int(p.StorageSampler.Draw(rng)/sizecal.BytesPerSlot("")), 1)
+	}
 	code, hash := poolCode(rng.Intn(p.DistinctBytecodes), p.CodeSampler)
-	return entitygen.GenerateContractWithCode(rng, code, hash, numSlots)
+	return entitygen.GenerateContractWithCode(rng, code, hash, numSlots, valueLen)
 }

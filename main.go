@@ -51,6 +51,7 @@ var (
 	targetSize = flag.String("target-size", "", "Advisory budget (e.g. '5GB', '500MB') that sizes the auto-fill of 20/10/70 mainnet-shaped synthetic state. Required unless --spec is set. With --spec, fills the headroom after the spec's projected cost; if the spec already meets the target, no auto-fill runs. Not a hard on-disk cap — actual size may vary per client. Honored by geth, besu, nethermind, reth, ethrex, and erigon.")
 
 	autofillProfile = flag.String("autofill-profile", "mainnet", "Auto-fill byte-split profile: 'mainnet' (20/10/70 account/code/storage, default) or 'accounts' (account-trie only — all EOAs, no contracts/storage). 'accounts' generates account-dominated tries for low-memory big-trie validation; it stays on the streaming DrawEOA path, so all clients must use the same value + --seed for cross-client state-root invariance.")
+	storageModel    = flag.String("storage-model", "normal", "Auto-fill contract storage: 'normal' (default: every contract ~35 KiB of 32-byte random values) or 'mainnet' (slot counts and value lengths calibrated on a mainnet-derived reth store: most contracts hold 1-3 slots, a few hold millions, values are compact; the contract count follows from the storage budget). Changes the state root; all clients must use the same value + --seed for cross-client state-root invariance.")
 
 	fork      = flag.String("fork", "", "Hard fork active at genesis. Empty (default) resolves to the latest fork the chosen --client can write. Use --list-forks to see all values.")
 	listForks = flag.Bool("list-forks", false, "Print the list of accepted --fork values and exit.")
@@ -288,7 +289,11 @@ func generate(reproducedFrom string) *generator.Stats {
 			if err != nil {
 				log.Fatalf("auto-fill: %v", err)
 			}
-			plan, err := autofill.PlanForBudgetProfile(topUp, profile)
+			model, err := autofill.ParseStorageModel(*storageModel)
+			if err != nil {
+				log.Fatalf("auto-fill: %v", err)
+			}
+			plan, err := autofill.PlanForBudgetProfile(topUp, profile, model)
 			if err != nil {
 				log.Fatalf("auto-fill: %v", err)
 			}
@@ -481,6 +486,7 @@ func generate(reproducedFrom string) *generator.Stats {
 			SpecPath:        *specFile,
 			MdbxFillProfile: *mdbxFillProfile,
 			MdbxFill:        *mdbxFill,
+			StorageModel:    *storageModel,
 		},
 		Spec: specFileEntry,
 		Result: &manifest.Result{
@@ -622,6 +628,11 @@ func reproduce(args []string) {
 		*mdbxFillProfile = "fresh"
 	}
 	*mdbxFill = m.Flags.MdbxFill
+	// Empty in manifests from before --storage-model existed; "normal" is that era's only behavior.
+	*storageModel = m.Flags.StorageModel
+	if *storageModel == "" {
+		*storageModel = "normal"
+	}
 	*dbPath = *outDB
 
 	// Reproduce from the content-addressed spec sidecar next to the manifest —

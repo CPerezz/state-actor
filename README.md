@@ -199,6 +199,7 @@ Full schema: [`docs/SPEC.md`](docs/SPEC.md). Curated examples: [`examples/README
 | `--archive` | bool | false | Archive-mode metadata; geth + reth only |
 | `--mdbx-fill-profile` | string | `fresh` | MDBX page-fill profile (`fresh`/`migrated`/`aged`); reth only |
 | `--mdbx-fill` | string | (none) | Per-table page-fill overrides; reth only |
+| `--storage-model` | string | `normal` | Auto-fill contract storage: `normal` (every contract ~35 KiB of 32-byte values) or `mainnet` (slot counts and value lengths drawn from a mainnet-derived reth store: most contracts hold 1-3 slots, a few hold millions; the contract count follows from the storage budget). Changes the state root. |
 | `--binary-trie` | bool | false | EIP-7864 binary trie; geth only |
 | `--group-depth` | int | 8 | Binary-trie group depth (1-8) |
 | `--list-forks` | bool | false | Print accepted `--fork` values and exit |
