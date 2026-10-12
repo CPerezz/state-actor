@@ -22,7 +22,7 @@ import (
 	internalerigon "github.com/ethereum/state-actor/internal/erigon"
 	"github.com/ethereum/state-actor/internal/erigon/account"
 	internalcommitment "github.com/ethereum/state-actor/internal/erigon/commitment"
-	"github.com/ethereum/state-actor/internal/erigon/erigonseg"
+	"github.com/ethereum/state-actor/internal/erigon/erigonfiles"
 	"github.com/ethereum/state-actor/internal/erigon/snap"
 	"github.com/ethereum/state-actor/internal/streamsort"
 )
@@ -604,13 +604,10 @@ func writeSnapshots(
 		Seed:              cfg.Seed,
 		StepSize:          internalerigon.StepSize,
 		StepsInFrozenFile: internalerigon.StepsInFrozenFile,
-		SnapshotVersion:   internalerigon.SnapshotFormatVersion,
-		// Parallel .kvi Build (byte-identical at any count). Default
-		// min(NumCPU, 8): it runs at the very tail when the value-domain
-		// writers have drained. STATE_ACTOR_RECSPLIT_WORKERS overrides.
-		RecSplitWorkers: recsplitWorkers(),
-		// Encode every .kv the way Erigon encodes its own files; see erigonseg.
-		Codec: erigonseg.Codec{},
+		// Every file in Erigon's own format, at the pinned Erigon's versions; see erigonfiles.
+		// Parallel .kvi build, default min(NumCPU, 8): it runs at the very tail when the
+		// value-domain writers have drained. STATE_ACTOR_RECSPLIT_WORKERS overrides.
+		Files: erigonfiles.Files{RecSplitWorkers: recsplitWorkers()},
 	}
 	w, err := snap.NewWriter(cfg.DBPath, settings)
 	if err != nil {

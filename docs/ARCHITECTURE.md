@@ -236,7 +236,8 @@ configurable worker pool / batch size at the generator level.
   commitment lib. Runs stock upstream erigon as a CLI (`erigon init`,
   then the daemon — no upstream patch). Bulk state (accounts / storage
   / code / commitment) streams into Erigon v3 flat snapshot `.kv` files
-  (plus `.bt` / `.kvi` / `.kvei` accessors) via `internal/erigon`; the
+  and their accessors, each written by the pinned Erigon's own writers
+  (`internal/erigon/erigonfiles`) at that Erigon's file versions; the
   MDBX stays minimal (genesis header with a patched `stateRoot` + chain
   config). The "fat genesis" construction (`MaxTxNum[0]=StepSize-1`,
   genesis `BodyForStorage.TxCount=StepSize` + `Sequence[EthTx]=StepSize`
@@ -373,7 +374,8 @@ Today's client adapters:
   build tag.
 - `client/erigon/` — cgo + mdbx-go writer producing Erigon v3 flat
   snapshot `.kv` files (accounts / storage / code / commitment) plus
-  their `.bt` / `.kvi` / `.kvei` accessors (built via `internal/erigon/`),
+  their accessors, written by the pinned Erigon's own code
+  (`internal/erigon/erigonfiles`),
   alongside a minimal MDBX (genesis header with a patched `stateRoot` +
   chain config) laid down by the pinned `erigon init` CLI. The "fat
   genesis" construction (`MaxTxNum[0]=StepSize-1`, genesis
@@ -424,7 +426,7 @@ state-actor/
 │   ├── reth/                        # Reth-side codec (MDBX wire format)
 │   ├── neth/                        # Nethermind-side helpers
 │   ├── ethrex/                      # ethrex path-keyed trie codec + RocksDB helpers
-│   ├── erigon/                      # erigon v3 snapshot codec (seg/btindex/recsplit) + helpers
+│   ├── erigon/                      # erigon snapshot layout (snap), Erigon-backed file writer (erigonfiles) + helpers
 │   ├── engineapi/                   # Mock CL engine-API driver (besu / nethermind boot)
 │   ├── e2e_testing/                 # Shared per-client TestE2ESuite phases + checks + RPC oracle
 │   ├── rpcprobe/                    # Waitfor-RPC + JSON-RPC helpers

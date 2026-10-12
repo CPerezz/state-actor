@@ -17,13 +17,6 @@ const (
 	// --format '{{index .RepoDigests 0}}'`.
 	PinnedErigonDigest = "sha256:bac6b266367ec59f82576cd8cef047171601fce3f0bbbef36e3e4db24727ff6e"
 
-	// SnapshotFormatVersion is the schema version we emit in snapshot
-	// filenames (the `v1.0-` prefix in `v1.0-accounts.0-256.kv`). Tracks
-	// db/state/statecfg/version_schema_gen.go — DataKV's MinSupported is
-	// v1.0 (Current is v2.0 as of v3.4.2). We pin to MinSupported so
-	// older Erigon binaries can also read the produced datadir.
-	SnapshotFormatVersion = "v1.0"
-
 	// StepSize is the default Erigon step size in txnums (per
 	// db/config3/config3.go:29). state-actor writes this exact value
 	// into erigondb.toml so step boundaries align with Erigon's
