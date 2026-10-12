@@ -350,17 +350,25 @@ func consumeEntity(
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := envs.useFill("HashedStorages"); err != nil {
-			return fmt.Errorf("useFill(HashedStorages): %w", err)
-		}
 		for chunk := range ent.chunkCh {
+			if err := envs.useFill("HashedStorages"); err != nil {
+				return fmt.Errorf("useFill(HashedStorages): %w", err)
+			}
 			for _, prep := range chunk {
 				if err := txn.Put(envs.MdbxDBIs["HashedStorages"], ent.addrHash[:], prep.hashedEntry, 0); err != nil {
 					return fmt.Errorf("HashedStorages %s: %w", ent.addrHash.Hex(), err)
 				}
-				if prep.changeEntry != nil {
-					// Archive mode: write StorageChangeSets (MDBX) + route
-					// StoragesHistory to RocksDB CF (v2).
+				// Stats: bank HashedStorages entry bytes.
+				localBytes += uint64(len(prep.hashedEntry))
+			}
+
+			if cfg.Archive {
+				// Archive mode: write StorageChangeSets (MDBX) + route
+				// StoragesHistory to RocksDB CF (v2).
+				if err := envs.useFill("StorageChangeSets"); err != nil {
+					return fmt.Errorf("useFill(StorageChangeSets): %w", err)
+				}
+				for _, prep := range chunk {
 					if err := txn.Put(envs.MdbxDBIs["StorageChangeSets"], ent.blockKey, prep.changeEntry, 0); err != nil {
 						return fmt.Errorf("StorageChangeSets %s: %w", ent.addr.Hex(), err)
 					}
@@ -368,8 +376,6 @@ func consumeEntity(
 						return fmt.Errorf("StoragesHistory %s: %w", ent.addr.Hex(), err)
 					}
 				}
-				// Stats: bank HashedStorages entry bytes.
-				localBytes += uint64(len(prep.hashedEntry))
 			}
 		}
 		// Drain pre-encoded trie rows (already sorted bytewise by the

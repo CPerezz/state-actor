@@ -185,11 +185,12 @@ func OpenEnvs(dataDir string, freshDir bool) (*Envs, error) {
 	envs.Mdbx = env
 
 	// reth vendors libmdbx 0.13.12, where prefer_waf_insteadof_balance
-	// defaults to false; mdbx-go's 0.14.2 defaults it to true, which packs
-	// random-order inserts to ~0.50 leaf fill instead of reth's ~0.66. Force
-	// reth's default explicitly and read it back so a libmdbx upgrade that
-	// changes the default (or drops the option) fails loudly instead of
-	// silently shifting every un-profiled table's fill.
+	// defaults to false; the vendored libmdbx 0.14.2 in mdbx-go 0.40.1
+	// defaults it to true, which packs random-order inserts to ~0.50 leaf
+	// fill instead of reth's ~0.66. Force reth's default explicitly and
+	// read it back so a libmdbx upgrade that changes the default (or
+	// drops the option) fails loudly instead of silently shifting every
+	// un-profiled table's fill.
 	if err := env.SetOption(mdbx.OptPreferWafInsteadofBalance, 0); err != nil {
 		env.Close()
 		return nil, fmt.Errorf("mdbx.SetOption(OptPreferWafInsteadofBalance): %w", err)

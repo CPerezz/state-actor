@@ -19,6 +19,9 @@ import (
 // Accounts are written in input order (caller controls ordering).
 func WriteEOAs(envs *Envs, accounts []*entitygen.Account, blockNum uint64) error {
 	return envs.Mdbx.Update(func(txn *mdbx.Txn) error {
+		if err := envs.useFill("AccountChangeSets"); err != nil {
+			return fmt.Errorf("WriteEOAs: useFill(AccountChangeSets): %w", err)
+		}
 		blockKey := beU64(blockNum)
 
 		for _, acc := range accounts {

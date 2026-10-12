@@ -48,7 +48,7 @@ func TestFillController_SwitchesReserveWithinTxn(t *testing.T) {
 		t.Fatal("test fixture picked equal reserves for the two tables; adjust the fills")
 	}
 
-	check := func(txn *mdbx.Txn, table string, want uint64) {
+	check := func(table string, want uint64) {
 		t.Helper()
 		if err := fc.use(table); err != nil {
 			t.Fatalf("use(%s): %v", table, err)
@@ -63,9 +63,9 @@ func TestFillController_SwitchesReserveWithinTxn(t *testing.T) {
 	}
 
 	err = envs.Mdbx.Update(func(txn *mdbx.Txn) error {
-		check(txn, "HashedAccounts", wantA)
-		check(txn, "AccountsTrie", wantB)
-		check(txn, "HashedAccounts", wantA) // switching back works too
+		check("HashedAccounts", wantA)
+		check("AccountsTrie", wantB)
+		check("HashedAccounts", wantA) // switching back works too
 		return nil
 	})
 	if err != nil {

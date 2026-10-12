@@ -17,6 +17,7 @@ import (
 	"github.com/ethereum/state-actor/generator"
 	"github.com/ethereum/state-actor/genesis"
 	"github.com/ethereum/state-actor/internal/entitygen"
+	"github.com/ethereum/state-actor/internal/manifest"
 	iReth "github.com/ethereum/state-actor/internal/reth"
 	"github.com/ethereum/state-actor/internal/streamsort"
 )
@@ -74,11 +75,10 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 	accountsCreated := 0
 	contractsCreated := 0
 	stats := &generator.Stats{
-		MdbxFill: &generator.MdbxFillReport{
+		MdbxFill: &manifest.MdbxFillReport{
 			Profile:        opts.FillProfileName,
 			TableFill:      opts.FillTargets,
 			TableReserve:   fc.reserves,
-			PreferWAF:      false,
 			LibmdbxVersion: mdbx.Version(),
 		},
 	}

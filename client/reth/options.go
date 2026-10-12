@@ -13,8 +13,11 @@ import (
 // Options carries optional knobs for RunCgo. The zero value is the
 // supported default (fresh fill profile, dense everywhere).
 type Options struct {
-	// FillProfileName is the resolved --mdbx-fill-profile name ("fresh" for
-	// the zero value), recorded verbatim into the run manifest.
+	// FillProfileName is the resolved --mdbx-fill-profile name, recorded
+	// verbatim into the run manifest — RunCgo does not substitute "fresh"
+	// for an empty string. main.go's flag defaults to "fresh" and always
+	// passes it, so callers other than tests constructing a zero Options
+	// never hit that case.
 	FillProfileName string
 	// FillTargets maps MDBX table name (see FillTables) -> target leaf fill
 	// in (0.5, 1.0], resolved from FillProfileName + --mdbx-fill overrides

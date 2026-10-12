@@ -148,10 +148,24 @@ func generate(reproducedFrom string) *generator.Stats {
 		*seed = time.Now().UnixNano()
 	}
 
+	// --mdbx-fill-profile / --mdbx-fill syntax (unknown profile name, bad
+	// Table=fill overrides) is checked here regardless of --client; the
+	// reth-only gate lives in clientpolicy.ValidateForClient.
+	mdbxFillOverrides, err := reth.ParseFillOverrides(*mdbxFill)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+	mdbxFillTargets, err := reth.ResolveFillProfile(*mdbxFillProfile, mdbxFillOverrides)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+
 	if err := clientpolicy.ValidateForClient(*client, clientpolicy.FlagValues{
-		BinaryTrie: *binaryTrie,
-		TargetSize: *targetSize,
-		Fork:       *fork,
+		BinaryTrie:         *binaryTrie,
+		TargetSize:         *targetSize,
+		Fork:               *fork,
+		MdbxFillProfile:    *mdbxFillProfile,
+		MdbxFillOverridden: len(mdbxFillOverrides) > 0,
 	}); err != nil {
 		log.Fatalf("%v", err)
 	}
@@ -184,21 +198,6 @@ func generate(reproducedFrom string) *generator.Stats {
 		default:
 			log.Fatalf("--archive is only supported on geth, reth, and erigon (no-op for erigon); got --client=%s. Re-run without --archive.", *client)
 		}
-	}
-
-	// --mdbx-fill-profile / --mdbx-fill are reth-only: every other client
-	// writes through a different store (or none) that split_reserve/
-	// prefer_waf don't apply to.
-	mdbxFillOverrides, err := reth.ParseFillOverrides(*mdbxFill)
-	if err != nil {
-		log.Fatalf("%v", err)
-	}
-	mdbxFillTargets, err := reth.ResolveFillProfile(*mdbxFillProfile, mdbxFillOverrides)
-	if err != nil {
-		log.Fatalf("%v", err)
-	}
-	if *client != "reth" && (*mdbxFillProfile != "fresh" || len(mdbxFillOverrides) > 0) {
-		log.Fatalf("--mdbx-fill-profile/--mdbx-fill are only supported with --client=reth; got --client=%s", *client)
 	}
 
 	// ethrex shares the common fork ceiling (osaka per MaxForkForClient).
@@ -491,7 +490,7 @@ func generate(reproducedFrom string) *generator.Stats {
 			StorageSlots:     uint64(stats.StorageSlotsCreated),
 			ElapsedMS:        elapsed.Milliseconds(),
 			Composition:      compositionFromPlan(config.AutoFill),
-			MdbxFill:         mdbxFillReportFromStats(stats.MdbxFill),
+			MdbxFill:         stats.MdbxFill,
 		},
 		ReproducedFrom: reproducedFrom,
 	}
@@ -547,20 +546,6 @@ func compositionFromPlan(plan *autofill.Plan) *manifest.Composition {
 		NumContracts:      plan.NumContracts,
 		DelegationRate:    plan.EOAFlavors.HasDelegation,
 		DistinctBytecodes: plan.DistinctBytecodes,
-	}
-}
-
-// mdbxFillReportFromStats is nil for every client other than reth.
-func mdbxFillReportFromStats(r *generator.MdbxFillReport) *manifest.MdbxFillReport {
-	if r == nil {
-		return nil
-	}
-	return &manifest.MdbxFillReport{
-		Profile:        r.Profile,
-		TableFill:      r.TableFill,
-		TableReserve:   r.TableReserve,
-		PreferWAF:      r.PreferWAF,
-		LibmdbxVersion: r.LibmdbxVersion,
 	}
 }
 

@@ -119,14 +119,15 @@ type Result struct {
 // MdbxFillReport records reth's realized MDBX page-fill profile for this
 // run: the resolved per-table split_reserve values set via
 // mdbx_env_set_option(21, …) at write time (see --mdbx-fill-profile /
-// --mdbx-fill), the always-on prefer_waf_insteadof_balance override, and
-// the libmdbx version the DB was actually written with — so the manifest
-// fully describes a profile whose interpolation curve may later be refit.
+// --mdbx-fill) and the libmdbx version the DB was actually written with —
+// so the manifest fully describes a profile whose interpolation curve may
+// later be refit. prefer_waf_insteadof_balance is forced false
+// unconditionally (OpenEnvs) and isn't a per-run variable, so it's not
+// recorded here.
 type MdbxFillReport struct {
 	Profile        string             `json:"profile"`
 	TableFill      map[string]float64 `json:"table_fill,omitempty"`
 	TableReserve   map[string]uint64  `json:"table_reserve,omitempty"`
-	PreferWAF      bool               `json:"prefer_waf_insteadof_balance"`
 	LibmdbxVersion string             `json:"libmdbx_version,omitempty"`
 }
 

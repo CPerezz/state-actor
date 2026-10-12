@@ -113,6 +113,9 @@ func WriteContracts(envs *Envs, contracts []*entitygen.Account, blockNum uint64,
 
 			if archive {
 				// AccountChangeSets: DupSort BE_u64(block) → AccountBeforeTx{addr, nil}
+				if err := envs.useFill("AccountChangeSets"); err != nil {
+					return fmt.Errorf("WriteContracts: useFill(AccountChangeSets): %w", err)
+				}
 				abt := iReth.AccountBeforeTx{Address: contract.Address, Info: nil}
 				var abtBuf bytes.Buffer
 				abt.EncodeCompact(&abtBuf)

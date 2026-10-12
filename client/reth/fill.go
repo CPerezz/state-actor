@@ -7,8 +7,7 @@ import (
 	"strings"
 )
 
-// FillTables lists the MDBX tables --mdbx-fill-profile / --mdbx-fill control,
-// in the order the writer touches them per run.
+// FillTables lists the MDBX tables --mdbx-fill-profile / --mdbx-fill control.
 var FillTables = []string{"HashedAccounts", "AccountsTrie", "HashedStorages", "StoragesTrie", "Bytecodes"}
 
 // FillProfiles maps a --mdbx-fill-profile name to its per-table target leaf
@@ -53,7 +52,7 @@ var fillReservePoints = []struct {
 // (range 0..32768, in 1/65536ths of a page) by piecewise-linear
 // interpolation over fillReservePoints. Rejects targets outside (0.5, 1.0].
 func reserveFor(fill float64) (uint64, error) {
-	if fill <= 0.5 || fill > 1.0 {
+	if !(fill > 0.5 && fill <= 1.0) {
 		return 0, fmt.Errorf("reth: fill target %.4f out of range (0.5, 1.0]", fill)
 	}
 	pts := fillReservePoints
@@ -103,7 +102,7 @@ func ParseFillOverrides(s string) (map[string]float64, error) {
 		if err != nil {
 			return nil, fmt.Errorf("reth: --mdbx-fill value %q for %s: %w", kv[1], table, err)
 		}
-		if v <= 0.5 || v > 1.0 {
+		if !(v > 0.5 && v <= 1.0) {
 			return nil, fmt.Errorf("reth: --mdbx-fill value %.4f for %s out of range (0.5, 1.0]", v, table)
 		}
 		out[table] = v

@@ -68,17 +68,15 @@
 
 ### Added
 - **reth: `--mdbx-fill-profile` and `--mdbx-fill` control MDBX B-tree page
-  fill.** `fresh` (default) stays dense, as before. `migrated` and `aged`
-  target a reference node's measured leaf fill per table (HashedAccounts,
-  AccountsTrie, HashedStorages, StoragesTrie, Bytecodes) by setting
-  `MDBX_opt_split_reserve` right before each table's writes; `--mdbx-fill`
-  overrides individual tables on top of a profile. Also forces
-  `prefer_waf_insteadof_balance=false` at env open (mdbx-go 0.40.1 defaults
-  it to true; reth's vendored libmdbx 0.13.12 defaults it to false, and the
-  difference alone roughly halves random-insert leaf fill), reading every
-  option back and failing generation on a mismatch. Both flags are rejected
-  for clients other than reth. The resolved profile, per-table target fill
-  and reserve, and the libmdbx version are recorded in the run manifest's
+  fill.** `migrated` and `aged` target a reference node's measured leaf fill
+  per table via `MDBX_opt_split_reserve`, switched right before each
+  table's writes; `--mdbx-fill` overrides individual tables on top of a
+  profile. Also forces libmdbx's `prefer_waf_insteadof_balance` to reth's
+  own default, which changes the page fill of every non-ascending insert
+  for every run — including the default `fresh` profile — reading the
+  option back and failing generation on a mismatch. Both flags are
+  rejected for clients other than reth; the resolved profile, per-table
+  fill/reserve, and libmdbx version land in the run manifest's
   `result.mdbx_fill`.
 
 - **Nethermind flat-DB state generation (closes #111).** `--client=nethermind`

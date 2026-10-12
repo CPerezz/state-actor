@@ -95,6 +95,11 @@ func TestParseFillOverrides(t *testing.T) {
 			t.Fatal("want error for value > 1.0")
 		}
 	})
+	t.Run("nan", func(t *testing.T) {
+		if _, err := ParseFillOverrides("HashedAccounts=NaN"); err == nil {
+			t.Fatal("want error for NaN value")
+		}
+	})
 	t.Run("malformed entry", func(t *testing.T) {
 		if _, err := ParseFillOverrides("HashedAccounts"); err == nil {
 			t.Fatal("want error for entry missing '='")

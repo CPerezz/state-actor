@@ -85,6 +85,9 @@ func WriteContractStorage(
 
 	// Archive tables are keyed by the raw slot key; contract.Storage arrives pre-sorted by it.
 	if archive {
+		if err := envs.useFill("StorageChangeSets"); err != nil {
+			return 0, fmt.Errorf("WriteContractStorage: useFill(StorageChangeSets): %w", err)
+		}
 		for _, slot := range contract.Storage {
 			// StorageChangeSets: BlockNumberAddress → StorageEntry{slot_key, prev_value=0}
 			// For genesis (block 0), the "before" value is 0 — slot was newly set.

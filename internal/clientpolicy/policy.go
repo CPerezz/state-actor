@@ -24,6 +24,9 @@ type FlagValues struct {
 	BinaryTrie bool   // --binary-trie
 	TargetSize string // --target-size (non-empty means active)
 	Fork       string // --fork (canonical fork name; "" means "auto")
+
+	MdbxFillProfile    string // --mdbx-fill-profile (non-"fresh" means active)
+	MdbxFillOverridden bool   // --mdbx-fill has at least one Table=fill override
 }
 
 // ValidateForClient returns nil when every flag in fv is compatible with
@@ -59,6 +62,14 @@ func ValidateForClient(client string, fv FlagValues) error {
 		case "ethrex":
 			return fmt.Errorf("--binary-trie is not supported with --client=ethrex (ethrex does not implement EIP-7864)")
 		}
+	}
+
+	// --mdbx-fill-profile / --mdbx-fill — reth-only: every other client
+	// writes through a different store (or none) that split_reserve/
+	// prefer_waf_insteadof_balance don't apply to. "" (zero value, same as
+	// unset) and "fresh" are both the inactive/default profile.
+	if client != "reth" && ((fv.MdbxFillProfile != "" && fv.MdbxFillProfile != "fresh") || fv.MdbxFillOverridden) {
+		return fmt.Errorf("--mdbx-fill-profile/--mdbx-fill are only supported with --client=reth; got --client=%s", client)
 	}
 
 	// Per-client fork ceiling. Empty means "auto"; the caller resolves
