@@ -50,8 +50,9 @@ type slotPrepared struct {
 // carries any IterateRoot failure surfacing on the worker side. trieRows
 // are pre-encoded StoragesTrie DupSort values (each entry = packed
 // SubKey(33 bytes) || BranchNodeCompact bytes); the consumer writes them
-// under the DupSort main key ent.addrHash after the per-slot rows land.
-// Emitted in path-lex order so cursor.AppendDup takes the fast path.
+// under the DupSort main key ent.addrHash after the per-slot rows land,
+// one txn.Put per row (HashBuilder's emission order is post-order, not a
+// global sort — see its "Path emission order" doc).
 type preparedEntity struct {
 	idx      int
 	addr     common.Address
@@ -247,12 +248,13 @@ func drainAndEncodeEntity(
 
 	archive := cfg.Archive
 
-	// Per-entity trie emissions: HashBuilder emits in path-lex order as
-	// it walks the sorted slots. Worker pre-encodes each emission as a
-	// packed StorageTrieEntry value (33-byte SubKey || BNC; v2 format)
-	// and accumulates into trieRows. The consumer drains trieRows into
+	// Per-entity trie emissions: HashBuilder emits in post-order as it
+	// walks the sorted slots (see HashBuilder's "Path emission order" doc —
+	// not a global sort). Worker pre-encodes each emission as a packed
+	// StorageTrieEntry value (33-byte SubKey || BNC; v2 format) and
+	// accumulates into trieRows. The consumer drains trieRows into
 	// StoragesTrie within the same per-entity Mdbx.Update txn AFTER the
-	// slot rows land — keeping the cursor.AppendDup fast path intact.
+	// slot rows land, one txn.Put per row.
 	// Memory per entity: O(trie nodes) ≈ small multiple of slot count.
 	trieRows := make([][]byte, 0, 64)
 	emit := func(path iReth.StoredNibbles, node iReth.BranchNodeCompact) error {
@@ -266,7 +268,7 @@ func drainAndEncodeEntity(
 		trieRows = append(trieRows, valBuf.Bytes())
 		return nil
 	}
-	hb := newRethStorageHashBuilderWithEmit(emit)
+	hb := newRethStorageHashBuilder(emit)
 	pending := make([]slotPrepared, 0, chunkSlots)
 
 	flushPending := func() error {
@@ -388,21 +390,14 @@ type rethStorageHashBuilder struct {
 	hb *iReth.HashBuilder
 }
 
-func newRethStorageHashBuilder() *rethStorageHashBuilder {
+// newRethStorageHashBuilder returns a HashBuilder configured to persist
+// storage-trie rows: every branch with tree_mask | hash_mask != 0
+// (alloy_trie's store_branch_node rule) triggers emit. state-actor's
+// spec-storage workers use this so each per-entity storage trie populates
+// StoragesTrie alongside the per-slot data rows.
+func newRethStorageHashBuilder(emit iReth.NodeEmitter) *rethStorageHashBuilder {
 	return &rethStorageHashBuilder{
-		hb: iReth.NewHashBuilder(func(_ iReth.StoredNibbles, _ iReth.BranchNodeCompact) error {
-			return nil
-		}),
-	}
-}
-
-// newRethStorageHashBuilderWithEmit returns a HashBuilder configured for
-// full-emissions mode: every branch with RLP ≥ 32 bytes triggers emit.
-// state-actor's spec-storage workers use this so each per-entity storage
-// trie populates StoragesTrie alongside the per-slot data rows.
-func newRethStorageHashBuilderWithEmit(emit iReth.NodeEmitter) *rethStorageHashBuilder {
-	return &rethStorageHashBuilder{
-		hb: iReth.NewHashBuilderFullEmissions(emit),
+		hb: iReth.NewHashBuilder(emit),
 	}
 }
 
