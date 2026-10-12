@@ -3,6 +3,14 @@
 ## Unreleased
 
 ### Changed
+- **reth: trie and storage rows are written key-ordered.** AccountsTrie rows
+  arrive from the HashBuilder in post-order, not ascending key order; they
+  are now buffered per 2-nibble prefix and Put sorted (at most 16 length-1
+  ancestor rows total go straight through — too few to need ordering).
+  StoragesTrie rows are sorted per contract before Put. HashedStorages
+  slots are now written in ascending keccak(slot) order instead of raw
+  slot-key order. Table contents and the state root are unchanged; only
+  insertion order, which governs libmdbx page-fill density.
 - **reth: HashedAccounts is written in hashed-key order.** Rows were `Put` in
   RNG draw order, so every insert landed inside the key range and libmdbx split
   pages in the middle: leaf fill ~0.50 and one level deeper than needed. They

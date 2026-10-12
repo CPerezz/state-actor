@@ -242,6 +242,14 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 				return fmt.Errorf("open AccountsTrie cursor: %w", cerr)
 			}
 			defer cur.Close()
+			gw := &trieGroupWriter{put: func(rows []trieRow) error {
+				for _, r := range rows {
+					if err := cur.Put(r.key, r.val, 0); err != nil {
+						return err
+					}
+				}
+				return nil
+			}}
 			emit := func(path iReth.StoredNibbles, node iReth.BranchNodeCompact) error {
 				if path.Length == 0 {
 					// Skip root branch — reth's writer never caches it
@@ -252,7 +260,7 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 				var keyBuf, valBuf bytes.Buffer
 				path.EncodePackedAccountKey(&keyBuf)
 				node.EncodeCompact(&valBuf)
-				return cur.Put(keyBuf.Bytes(), valBuf.Bytes(), 0)
+				return gw.add(path, keyBuf.Bytes(), valBuf.Bytes())
 			}
 
 			hashedCur, herr := txn.OpenCursor(envs.MdbxDBIs["HashedAccounts"])
@@ -292,6 +300,9 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 			r, rerr := ComputeStateRootStreaming(countingIter, emit)
 			if rerr != nil {
 				return rerr
+			}
+			if ferr := gw.flush(); ferr != nil {
+				return fmt.Errorf("RunCgo: flush AccountsTrie group: %w", ferr)
 			}
 			root = r
 			return nil
