@@ -50,6 +50,30 @@ func TestValidateForClient_BinaryTrieGethOnly(t *testing.T) {
 	}
 }
 
+func TestValidateForClient_MdbxFillRethOnly(t *testing.T) {
+	if err := ValidateForClient("reth", FlagValues{MdbxFillProfile: "migrated"}); err != nil {
+		t.Errorf("reth + --mdbx-fill-profile=migrated should be allowed: %v", err)
+	}
+	if err := ValidateForClient("reth", FlagValues{MdbxFillOverridden: true}); err != nil {
+		t.Errorf("reth + --mdbx-fill overrides should be allowed: %v", err)
+	}
+	for _, c := range []string{"geth", "nethermind", "besu", "erigon", "ethrex"} {
+		if err := ValidateForClient(c, FlagValues{MdbxFillProfile: "migrated"}); err == nil || !strings.Contains(err.Error(), "only supported with --client=reth") {
+			t.Errorf("%s + --mdbx-fill-profile=migrated should reject with reth-only reason, got %v", c, err)
+		}
+		if err := ValidateForClient(c, FlagValues{MdbxFillOverridden: true}); err == nil || !strings.Contains(err.Error(), "only supported with --client=reth") {
+			t.Errorf("%s + --mdbx-fill overrides should reject with reth-only reason, got %v", c, err)
+		}
+	}
+	// "fresh" (the flag default) must be allowed everywhere, same as leaving
+	// MdbxFillProfile unset.
+	for _, c := range []string{"geth", "nethermind", "besu", "reth", "erigon", "ethrex"} {
+		if err := ValidateForClient(c, FlagValues{MdbxFillProfile: "fresh"}); err != nil {
+			t.Errorf("%s + --mdbx-fill-profile=fresh should be allowed: %v", c, err)
+		}
+	}
+}
+
 // TestValidateForClient_TargetSizeAllowed verifies --target-size is honored
 // by every client after state-actor#54 added per-batch dirSize caps to
 // nethermind (Phase 2) and reth (per-batch). Previously reth rejected the

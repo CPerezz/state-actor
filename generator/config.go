@@ -9,6 +9,7 @@ import (
 
 	"github.com/ethereum/state-actor/genesis"
 	"github.com/ethereum/state-actor/internal/autofill"
+	"github.com/ethereum/state-actor/internal/manifest"
 	"github.com/ethereum/state-actor/internal/progress"
 	"github.com/ethereum/state-actor/internal/templates"
 )
@@ -215,4 +216,8 @@ type Stats struct {
 
 	// GenerationTime is the time spent generating data.
 	GenerationTime time.Duration
+
+	// MdbxFill records reth's realized MDBX page-fill profile for this run
+	// (see --mdbx-fill-profile / --mdbx-fill). nil for every other client.
+	MdbxFill *manifest.MdbxFillReport
 }

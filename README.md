@@ -197,6 +197,8 @@ Full schema: [`docs/SPEC.md`](docs/SPEC.md). Curated examples: [`examples/README
 | `--timestamp` | uint | 0 | Genesis block timestamp (unix seconds) |
 | `--extra-data` | string | (empty) | Genesis block extraData (hex) |
 | `--archive` | bool | false | Archive-mode metadata; geth + reth only |
+| `--mdbx-fill-profile` | string | `fresh` | MDBX page-fill profile (`fresh`/`migrated`/`aged`); reth only |
+| `--mdbx-fill` | string | (none) | Per-table page-fill overrides; reth only |
 | `--binary-trie` | bool | false | EIP-7864 binary trie; geth only |
 | `--group-depth` | int | 8 | Binary-trie group depth (1-8) |
 | `--list-forks` | bool | false | Print accepted `--fork` values and exit |

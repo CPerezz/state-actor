@@ -69,6 +69,11 @@ var (
 		"  reth: writes StoragesHistory + AccountsHistory + StorageChangeSets + AccountChangeSets at genesis.\n"+
 		"  geth: writes PathDB archive-anchor metadata for --gcmode=archive boots.\n"+
 		"Rejected for besu and nethermind (no archive code path).")
+
+	mdbxFillProfile = flag.String("mdbx-fill-profile", "fresh", "reth only: MDBX B-tree page-fill profile — 'fresh' (dense, default), 'migrated', or 'aged'. "+
+		"Sets MDBX_opt_split_reserve per table so the generated store reproduces a reference node's page fill. Rejected for clients other than reth.")
+	mdbxFill = flag.String("mdbx-fill", "", "reth only: per-table fill overrides on top of --mdbx-fill-profile, e.g. 'HashedAccounts=0.59,HashedStorages=0.70'. "+
+		"Valid tables: HashedAccounts, AccountsTrie, HashedStorages, StoragesTrie, Bytecodes. Values must be in (0.5, 1.0]. Rejected for clients other than reth.")
 )
 
 func main() {
@@ -143,10 +148,24 @@ func generate(reproducedFrom string) *generator.Stats {
 		*seed = time.Now().UnixNano()
 	}
 
+	// --mdbx-fill-profile / --mdbx-fill syntax (unknown profile name, bad
+	// Table=fill overrides) is checked here regardless of --client; the
+	// reth-only gate lives in clientpolicy.ValidateForClient.
+	mdbxFillOverrides, err := reth.ParseFillOverrides(*mdbxFill)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+	mdbxFillTargets, err := reth.ResolveFillProfile(*mdbxFillProfile, mdbxFillOverrides)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+
 	if err := clientpolicy.ValidateForClient(*client, clientpolicy.FlagValues{
-		BinaryTrie: *binaryTrie,
-		TargetSize: *targetSize,
-		Fork:       *fork,
+		BinaryTrie:         *binaryTrie,
+		TargetSize:         *targetSize,
+		Fork:               *fork,
+		MdbxFillProfile:    *mdbxFillProfile,
+		MdbxFillOverridden: len(mdbxFillOverrides) > 0,
 	}); err != nil {
 		log.Fatalf("%v", err)
 	}
@@ -366,7 +385,10 @@ func generate(reproducedFrom string) *generator.Stats {
 
 	case "reth":
 		var err error
-		stats, err = reth.RunCgo(context.Background(), config, reth.Options{})
+		stats, err = reth.RunCgo(context.Background(), config, reth.Options{
+			FillProfileName: *mdbxFillProfile,
+			FillTargets:     mdbxFillTargets,
+		})
 		if err != nil {
 			log.Fatalf("Failed to populate Reth DB: %v", err)
 		}
@@ -442,21 +464,23 @@ func generate(reproducedFrom string) *generator.Stats {
 		GeneratedAt:   start.UTC().Format(time.RFC3339),
 		Command:       os.Args,
 		Flags: manifest.Flags{
-			Client:     *client,
-			DB:         *dbPath,
-			Seed:       *seed,
-			SeedInput:  seedInput,
-			Fork:       chosenFork,
-			ForkInput:  *fork,
-			ChainID:    *chainID,
-			GasLimit:   *gasLimit,
-			Timestamp:  *timestamp,
-			ExtraData:  *extraData,
-			TargetSize: *targetSize,
-			BinaryTrie: *binaryTrie,
-			GroupDepth: *groupDepth,
-			Archive:    *archive,
-			SpecPath:   *specFile,
+			Client:          *client,
+			DB:              *dbPath,
+			Seed:            *seed,
+			SeedInput:       seedInput,
+			Fork:            chosenFork,
+			ForkInput:       *fork,
+			ChainID:         *chainID,
+			GasLimit:        *gasLimit,
+			Timestamp:       *timestamp,
+			ExtraData:       *extraData,
+			TargetSize:      *targetSize,
+			BinaryTrie:      *binaryTrie,
+			GroupDepth:      *groupDepth,
+			Archive:         *archive,
+			SpecPath:        *specFile,
+			MdbxFillProfile: *mdbxFillProfile,
+			MdbxFill:        *mdbxFill,
 		},
 		Spec: specFileEntry,
 		Result: &manifest.Result{
@@ -466,6 +490,7 @@ func generate(reproducedFrom string) *generator.Stats {
 			StorageSlots:     uint64(stats.StorageSlotsCreated),
 			ElapsedMS:        elapsed.Milliseconds(),
 			Composition:      compositionFromPlan(config.AutoFill),
+			MdbxFill:         stats.MdbxFill,
 		},
 		ReproducedFrom: reproducedFrom,
 	}
@@ -590,6 +615,13 @@ func reproduce(args []string) {
 	*binaryTrie = m.Flags.BinaryTrie
 	*groupDepth = m.Flags.GroupDepth
 	*archive = m.Flags.Archive
+	// MdbxFillProfile is empty in manifests from before --mdbx-fill-profile
+	// existed; "fresh" is that era's only behavior.
+	*mdbxFillProfile = m.Flags.MdbxFillProfile
+	if *mdbxFillProfile == "" {
+		*mdbxFillProfile = "fresh"
+	}
+	*mdbxFill = m.Flags.MdbxFill
 	*dbPath = *outDB
 
 	// Reproduce from the content-addressed spec sidecar next to the manifest —
