@@ -268,7 +268,7 @@ func drainAndEncodeEntity(
 		trieRows = append(trieRows, valBuf.Bytes())
 		return nil
 	}
-	hb := newRethStorageHashBuilderWithEmit(emit)
+	hb := newRethStorageHashBuilder(emit)
 	pending := make([]slotPrepared, 0, chunkSlots)
 
 	flushPending := func() error {
@@ -390,20 +390,12 @@ type rethStorageHashBuilder struct {
 	hb *iReth.HashBuilder
 }
 
-func newRethStorageHashBuilder() *rethStorageHashBuilder {
-	return &rethStorageHashBuilder{
-		hb: iReth.NewHashBuilder(func(_ iReth.StoredNibbles, _ iReth.BranchNodeCompact) error {
-			return nil
-		}),
-	}
-}
-
-// newRethStorageHashBuilderWithEmit returns a HashBuilder configured to
-// persist storage-trie rows: every branch with tree_mask | hash_mask != 0
+// newRethStorageHashBuilder returns a HashBuilder configured to persist
+// storage-trie rows: every branch with tree_mask | hash_mask != 0
 // (alloy_trie's store_branch_node rule) triggers emit. state-actor's
 // spec-storage workers use this so each per-entity storage trie populates
 // StoragesTrie alongside the per-slot data rows.
-func newRethStorageHashBuilderWithEmit(emit iReth.NodeEmitter) *rethStorageHashBuilder {
+func newRethStorageHashBuilder(emit iReth.NodeEmitter) *rethStorageHashBuilder {
 	return &rethStorageHashBuilder{
 		hb: iReth.NewHashBuilder(emit),
 	}

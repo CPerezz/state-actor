@@ -42,26 +42,20 @@ var ErrKeysOutOfOrder = errors.New("HashBuilder: keys must be inserted in strict
 // # Mask semantics (BNC fields)
 //
 //   - state_mask: bit i is set iff slot i has any child (leaf or sub-branch).
-//   - tree_mask: bit i is set iff slot i's child was emitted as its own
-//     BranchNodeCompact row (i.e., a sub-branch we wrote to the trie table).
-//     ONLY set via add_branch() in alloy_trie — see emission semantics below.
-//   - hash_mask: bit i is set iff slot i's child is referenced by its
-//     32-byte hash (RLP ≥ 32 bytes), as opposed to inlined RLP < 32 bytes.
-//     ALSO ONLY set via add_branch() per alloy_trie semantics.
+//   - tree_mask: bit i is set iff slot i's subtree contains a stored branch.
+//   - hash_mask: bit i is set iff slot i's child is a branch node reached
+//     directly (no extension in between).
 //   - Hashes: the popcount(hash_mask) hashes, in slot-index order.
 //   - RootHash: optional; populated only on the final emission (the trie root).
 //
 // # Emission semantics — IMPORTANT
 //
-// A BranchNodeCompact is emitted iff tree_mask | hash_mask != 0, i.e. the
-// branch has a child branch referenced directly from one of its slots
-// (hash_mask) or a stored descendant reached through an extension
-// (tree_mask). This is alloy_trie::HashBuilder's store_branch_node rule, and
-// what reth's own genesis init persists for a pure-leaf build: every branch
-// except the bottom ones (all children leaves) gets a row. Bottom branches
-// are not stored because their parent's row already carries their hash in
-// Hashes; reth's trie walker recomputes them from HashedAccounts /
-// HashedStorages when needed.
+// A BranchNodeCompact is emitted iff tree_mask | hash_mask != 0
+// (alloy_trie::HashBuilder's store_branch_node rule): the branch has a
+// direct child branch or a stored branch somewhere below it. Branches whose
+// subtrees hold only leaves and unstored branches get no row; their hashes
+// live in the nearest stored ancestor's Hashes and reth's trie walker
+// recomputes them from HashedAccounts / HashedStorages when needed.
 //
 // # Path emission order
 //
@@ -113,21 +107,16 @@ var ErrKeysOutOfOrder = errors.New("HashBuilder: keys must be inserted in strict
 //   - Spec §6.5: docs/superpowers/specs/2026-04-29-reth-direct-mdbx-design.md
 //   - Rust ref: ~/.cargo/registry/.../alloy-trie-0.9.5/src/hash_builder/
 //
-// NodeEmitter is called by HashBuilder once for each branch node that
-// completes during streaming. The path is the trie nibble path from root to
-// the branch (using StoredNibbles' 65-byte legacy form: nibbles[64] ||
-// length[1]), and node is the reth-canonical BranchNodeCompact.
-//
-// Emissions follow HashBuilder's post-order completion (see "Path emission
-// order" on HashBuilder) — not a global ascending sort — so the consumer
-// persists each row with a per-key MDBX Put rather than cursor.Append.
+// NodeEmitter receives each stored branch as HashBuilder completes it, in
+// the order described under "Path emission order" on HashBuilder. The path
+// is the branch's nibble path in StoredNibbles' 65-byte legacy form.
 //
 // A non-nil error from NodeEmitter MUST be treated as fatal by the caller —
 // HashBuilder logs it but continues, so a swallowed error results in a root
 // hash that is inconsistent with whatever was actually persisted to disk.
 type NodeEmitter func(path StoredNibbles, node BranchNodeCompact) error
 
-// HashBuilder implements the algorithm described on NodeEmitter above.
+// HashBuilder implements the algorithm described in its doc above.
 type HashBuilder struct {
 	emit NodeEmitter
 

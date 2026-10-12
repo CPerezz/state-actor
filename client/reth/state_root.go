@@ -67,10 +67,8 @@ func ComputeStateRoot(accounts []*entitygen.Account, emit iReth.NodeEmitter) (co
 //     root hash; no trie-table persistence).
 //   - non-nil → every branch node stored iff tree_mask | hash_mask != 0
 //     (alloy_trie's store_branch_node rule — same rule reth's own genesis
-//     init uses) is forwarded to emit in the builder's post-order
-//     completion order (not a global ascending sort — see HashBuilder's
-//     "Path emission order" doc). The caller persists each row with a
-//     per-key MDBX Put into reth's AccountsTrie table.
+//     init uses) is forwarded to emit; see HashBuilder's "Path emission
+//     order" doc for ordering and persistence requirements.
 //
 // Without persisted AccountsTrie rows, reth's payload-builder state-root
 // computation falls back to a linear walk of HashedAccounts (and
