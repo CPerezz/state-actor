@@ -48,10 +48,12 @@
   are unchanged. Each domain's compressor and `.kvi` build run with
   `STATE_ACTOR_ERIGON_FILE_WORKERS` workers (default min(NumCPU, 8);
   replaces `STATE_ACTOR_RECSPLIT_WORKERS`); Erigon writes the same bytes
-  at any worker count. A 50 GB store (seed 42) generates in 16m24s
-  against 16m05s before; peak disk is higher, 207 GB against 135 GB,
-  because Erigon's compressor keeps a raw copy of each domain while it
-  compresses.
+  at any worker count. Erigon's compressor holds a raw copy of a domain
+  plus two compressed ones while it compresses, so each domain's sorted
+  source is dropped as soon as the compressor has read it, and the
+  commitment domain (the largest) is written after the others instead
+  of beside them. A 50 GB store (seed 42) peaks at 133 GB of disk
+  against 135 GB before, and generates in 20m18s against 16m05s.
 - **Besu DB now created with all 17 mainnet Bonsai column families.**
   A fresh mainnet Besu init creates every `KeyValueSegmentIdentifier`
   segment with `BONSAI` in its format set, including `CHAIN_PRUNER_STATE`

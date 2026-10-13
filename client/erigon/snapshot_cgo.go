@@ -596,9 +596,9 @@ func writeSnapshots(
 	// commitment fold below. These three domains depend only on the finalized
 	// accountsStore/storageStore/codeStore + counts — NOT on the fold's result —
 	// so start them NOW and let their compression run beside the 16-way
-	// fold. Only WriteCommitment needs the
-	// fold's branches + keyStateValue, so it is queued after the fold. The
-	// Writer is immutable and every domain writes its own files, so all these
+	// fold. Only WriteCommitment needs the fold's branches + keyStateValue;
+	// it runs after the fold and after these three (see Step 5b). The
+	// Writer is immutable and every domain writes its own files, so these
 	// goroutines are race-free.
 	settings := snap.Settings{
 		Seed:              cfg.Seed,
@@ -624,7 +624,7 @@ func writeSnapshots(
 		{snap.DomainStorage, storageStore, counts.storage},
 		{snap.DomainCode, codeStore, counts.code},
 	}
-	emitErrCh := make(chan error, len(domainSpecs)+1) // +1 for commitment
+	emitErrCh := make(chan error, len(domainSpecs))
 	var emitWg sync.WaitGroup
 	sem := make(chan struct{}, runtime.NumCPU())
 	for _, ds := range domainSpecs {
@@ -633,8 +633,14 @@ func writeSnapshots(
 		go func(ds domainSpec) {
 			defer func() { <-sem; emitWg.Done() }()
 			start := time.Now()
-			if err := w.WriteDomain(ctx, ds.domain, fullRange, ds.count,
-				snap.FromStreamsort(ds.store)); err != nil {
+			// Erigon's compressor copies every entry into its own raw file before it compresses,
+			// so drop the sorted store once it has been read instead of holding both copies until
+			// every domain is done: at 50 GB the stores were a third of the peak disk.
+			entries := func(yield func(snap.DomainEntry) bool) {
+				snap.FromStreamsort(ds.store)(yield)
+				_ = ds.store.Close()
+			}
+			if err := w.WriteDomain(ctx, ds.domain, fullRange, ds.count, entries); err != nil {
 				select {
 				case emitErrCh <- fmt.Errorf("WriteDomain(%v): %w", ds.domain, err):
 				default:
@@ -659,9 +665,8 @@ func writeSnapshots(
 		fmt.Printf("client/erigon: timing fold %s\n", time.Since(foldStart).Round(time.Second))
 	}
 	// The retained branch source outlives the fold. The defer is safe on
-	// every path because its only reader — the WriteCommitment goroutine —
-	// is spawned AFTER the early error returns below and is joined by
-	// emitWg.Wait() before the success return.
+	// every path because its only reader, WriteCommitment below, runs on
+	// this goroutine.
 	defer result.CloseBranches()
 	// Close the 16 commit-input sub-stores NOW (not at function scope):
 	// their caches/memtables/spill dirs are dead weight during the
@@ -686,42 +691,35 @@ func writeSnapshots(
 		return common.Hash{}, fmt.Errorf("writeSnapshots: encode KeyCommitmentState: %w", err)
 	}
 
-	// -- Step 5b: accounts/storage/code are already being written (fan-out
-	// started above, overlapping the fold). Queue the commitment domain now
-	// that the fold has produced its branches + keyStateValue.
-	//
-	// Commitment: single [0,1) range. It is the LARGEST domain (~44 GB .kv at
-	// 100 GB, plus the only recsplit MPHF over ~nBranches keys) yet depends
-	// only on the fold's retained branch store + keyStateValue — NOT on the
-	// other domains. Run it as a 4th goroutine in the SAME fan-out (the Writer
-	// is immutable and each domain writes its own files) so its long build
-	// overlaps accounts/storage/code instead of running serially after them.
+	// -- Step 5b: write the commitment domain once accounts/storage/code are
+	// done. It is the largest domain, and Erigon's compressor holds three
+	// copies of a domain while it compresses (raw .idt, intermediate, final);
+	// overlapping it with the others stacked their copies on top of those
+	// (50 GB store: peak disk 152 GB overlapped, 130 GB after, 4.5 min more).
 	// The branch rows stream STRAIGHT from the walk's live branch store
 	// (Result.BranchIterate is already ascending; WriteCommitment splices the
 	// KeyCommitmentState row at its sort position) — no intermediate re-sort
 	// store. frozenSteps(commitment)=0 so the daemon's mem-tier
 	// KeyCommitmentState writes pass CheckDataAvailable trivially (see the
 	// fullRange doc above).
-	sem <- struct{}{}
-	emitWg.Add(1)
-	go func() {
-		defer func() { <-sem; emitWg.Done() }()
-		start := time.Now()
-		if err := snap.WriteCommitment(ctx, w, fullRange, keyStateValue, snap.BranchStream(result.BranchIterate), nBranches); err != nil {
-			select {
-			case emitErrCh <- fmt.Errorf("WriteCommitment: %w", err):
-			default:
-			}
-		}
-		if cfg.Verbose {
-			fmt.Printf("client/erigon: timing WriteCommitment %s\n", time.Since(start).Round(time.Second))
-		}
-	}()
 	emitWg.Wait()
 	select {
 	case err := <-emitErrCh:
 		return common.Hash{}, fmt.Errorf("writeSnapshots: %w", err)
 	default:
+	}
+	commitStart := time.Now()
+	// Same as the domain stores above: the branch rows are copied once, then dropped.
+	branches := func(yield func(prefix, data []byte) error) error {
+		err := result.BranchIterate(yield)
+		result.CloseBranches()
+		return err
+	}
+	if err := snap.WriteCommitment(ctx, w, fullRange, keyStateValue, branches, nBranches); err != nil {
+		return common.Hash{}, fmt.Errorf("writeSnapshots: WriteCommitment: %w", err)
+	}
+	if cfg.Verbose {
+		fmt.Printf("client/erigon: timing WriteCommitment %s\n", time.Since(commitStart).Round(time.Second))
 	}
 
 	if cfg.Verbose {
