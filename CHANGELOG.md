@@ -25,6 +25,33 @@
   `tree_mask | hash_mask != 0`, as alloy_trie and reth's own genesis init do.
   Roots are unchanged. On a 1 GB store, AccountsTrie went from 441,257 to
   96,198 rows.
+- **Erigon snapshot files now written by the pinned Erigon's own code, in
+  its current format.** state-actor wrote every domain file with pure-Go
+  ports of Erigon's v1.0 format: `.kv` words raw (no pattern dictionary),
+  `.bt` / `.kvi` / `.kvei` from ported builders, every name at `v1.0`. A
+  24,576-byte EEST test contract took 24,577 B and seven 4 KB pages per
+  uncached read instead of ~200 B and one, so distinct-contract calls
+  benchmarked at 0.64 of a mainnet-derived store; written the way Erigon
+  writes it, 0.98. The cgo build now hands each domain to
+  `internal/erigon/erigonfiles`, which follows Erigon's `buildFileRange`:
+  `seg.Compressor` at the schema's compression, `recsplit` for `.kvi`,
+  `btindex` for `.bt` + `.kvei`, names and versions from `statecfg.Schema`.
+  At the pin that is `v2.0` `.kv`/`.bt` and `v1.2` `.kvei` for accounts,
+  storage and code, and `v2.2` `.kv` + `v2.1` `.kvi` for commitment (no
+  `.kvei`), the versions the benchmark's glamsterdam-devnet-7 build
+  writes. The ports (`internal/erigon/{seg,btindex,recsplit,existence,eliasfano}`)
+  are deleted; `snap` keeps the datadir layout and takes a `FileSet`.
+  Erigon pin moves from `14273f79a6` (bal-devnet-7) to main `546790a6a7`
+  (Go 1.26 builder); the commitment engine fallback now drives Erigon's
+  `ParallelPatriciaHashed`. Generated datadirs no longer open on Erigon
+  builds that predate the v2 file versions. State root and RPC answers
+  are unchanged. Each domain's compressor and `.kvi` build run with
+  `STATE_ACTOR_ERIGON_FILE_WORKERS` workers (default min(NumCPU, 8);
+  replaces `STATE_ACTOR_RECSPLIT_WORKERS`); Erigon writes the same bytes
+  at any worker count. A 50 GB store (seed 42) generates in 16m24s
+  against 16m05s before; peak disk is higher, 207 GB against 135 GB,
+  because Erigon's compressor keeps a raw copy of each domain while it
+  compresses.
 - **Besu DB now created with all 17 mainnet Bonsai column families.**
   A fresh mainnet Besu init creates every `KeyValueSegmentIdentifier`
   segment with `BONSAI` in its format set, including `CHAIN_PRUNER_STATE`

@@ -22,6 +22,7 @@ import (
 	internalerigon "github.com/ethereum/state-actor/internal/erigon"
 	"github.com/ethereum/state-actor/internal/erigon/account"
 	internalcommitment "github.com/ethereum/state-actor/internal/erigon/commitment"
+	"github.com/ethereum/state-actor/internal/erigon/erigonfiles"
 	"github.com/ethereum/state-actor/internal/erigon/snap"
 	"github.com/ethereum/state-actor/internal/streamsort"
 )
@@ -65,10 +66,10 @@ var erigonWorkers = func() int {
 	return n
 }()
 
-// recsplitWorkers sizes the parallel .kvi Build: min(NumCPU, 8) unless
-// STATE_ACTOR_RECSPLIT_WORKERS overrides (1 = sequential).
-func recsplitWorkers() int {
-	if v := os.Getenv("STATE_ACTOR_RECSPLIT_WORKERS"); v != "" {
+// fileWorkers sizes each domain's compressor and .kvi build: min(NumCPU, 8)
+// unless STATE_ACTOR_ERIGON_FILE_WORKERS overrides (1 = sequential).
+func fileWorkers() int {
+	if v := os.Getenv("STATE_ACTOR_ERIGON_FILE_WORKERS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
 			return n
 		}
@@ -594,8 +595,8 @@ func writeSnapshots(
 	// Overlap the Phase-5b accounts/storage/code snapshot-write with the
 	// commitment fold below. These three domains depend only on the finalized
 	// accountsStore/storageStore/codeStore + counts — NOT on the fold's result —
-	// so start them NOW and let their (mostly single-core) compression run on
-	// the cores the 16-way fold leaves idle. Only WriteCommitment needs the
+	// so start them NOW and let their compression run beside the 16-way
+	// fold. Only WriteCommitment needs the
 	// fold's branches + keyStateValue, so it is queued after the fold. The
 	// Writer is immutable and every domain writes its own files, so all these
 	// goroutines are race-free.
@@ -603,11 +604,9 @@ func writeSnapshots(
 		Seed:              cfg.Seed,
 		StepSize:          internalerigon.StepSize,
 		StepsInFrozenFile: internalerigon.StepsInFrozenFile,
-		SnapshotVersion:   internalerigon.SnapshotFormatVersion,
-		// Parallel .kvi Build (byte-identical at any count). Default
-		// min(NumCPU, 8): it runs at the very tail when the value-domain
-		// writers have drained. STATE_ACTOR_RECSPLIT_WORKERS overrides.
-		RecSplitWorkers: recsplitWorkers(),
+		// Every file in Erigon's own format, at the pinned Erigon's versions; see erigonfiles.
+		// The worker count doesn't change the files, only how fast the domains compress.
+		Files: erigonfiles.Files{Workers: fileWorkers()},
 	}
 	w, err := snap.NewWriter(cfg.DBPath, settings)
 	if err != nil {
