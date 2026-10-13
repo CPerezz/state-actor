@@ -2,8 +2,7 @@ package snap
 
 import "context"
 
-// Domain identifies one of Erigon's E3 state domains. The on-disk
-// file tag for each is given by Tag().
+// Domain identifies one of Erigon's E3 state domains.
 type Domain int
 
 const (
