@@ -36,7 +36,7 @@ func fixtureCode(addr []byte) []byte {
 func TestFilesErigonReadsBack(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	w, err := snap.NewWriter(dir, snap.Settings{Seed: 42, Files: Files{RecSplitWorkers: 2}})
+	w, err := snap.NewWriter(dir, snap.Settings{Seed: 42, Files: Files{Workers: 2}})
 	if err != nil {
 		t.Fatal(err)
 	}

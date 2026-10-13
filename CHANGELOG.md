@@ -45,8 +45,13 @@
   (Go 1.26 builder); the commitment engine fallback now drives Erigon's
   `ParallelPatriciaHashed`. Generated datadirs no longer open on Erigon
   builds that predate the v2 file versions. State root and RPC answers
-  are unchanged; generation takes longer (one dictionary worker per
-  domain).
+  are unchanged. Each domain's compressor and `.kvi` build run with
+  `STATE_ACTOR_ERIGON_FILE_WORKERS` workers (default min(NumCPU, 8);
+  replaces `STATE_ACTOR_RECSPLIT_WORKERS`); Erigon writes the same bytes
+  at any worker count. A 50 GB store (seed 42) generates in 16m24s
+  against 16m05s before; peak disk is higher, 207 GB against 135 GB,
+  because Erigon's compressor keeps a raw copy of each domain while it
+  compresses.
 - **Besu DB now created with all 17 mainnet Bonsai column families.**
   A fresh mainnet Besu init creates every `KeyValueSegmentIdentifier`
   segment with `BONSAI` in its format set, including `CHAIN_PRUNER_STATE`

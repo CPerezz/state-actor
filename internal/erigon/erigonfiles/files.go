@@ -31,9 +31,10 @@ import (
 
 // Files implements snap.FileSet.
 type Files struct {
-	// RecSplitWorkers parallelizes the .kvi build. Erigon's parallel build emits buckets in
-	// order, so the file doesn't depend on it. 0 or 1 is sequential.
-	RecSplitWorkers int
+	// Workers parallelizes the compressor and the .kvi build, like Erigon's own compress-workers
+	// setting. Both write the same file at any count (byte for byte at 1, 8 and 16 workers on a
+	// 50 GB store), so it only trades CPU for time. 0 or 1 is sequential.
+	Workers int
 }
 
 var _ snap.FileSet = Files{}
@@ -100,7 +101,7 @@ func (f Files) WriteDomain(ctx context.Context, domainDir, tmpDir string, d snap
 	}()
 	logger := log.New()
 
-	if err := compress(ctx, cfg, paths["kv"], tmpDir, entries, logger); err != nil {
+	if err := compress(ctx, cfg, paths["kv"], tmpDir, entries, f.Workers, logger); err != nil {
 		return fmt.Errorf("erigonfiles: write %s: %w", paths["kv"], err)
 	}
 	dec, err := seg.NewDecompressor(paths["kv"])
@@ -113,7 +114,7 @@ func (f Files) WriteDomain(ctx context.Context, domainDir, tmpDir string, d snap
 	}
 
 	if p, ok := paths["kvi"]; ok {
-		if err := buildHashMap(ctx, dec, cfg, p, tmpDir, salt, f.RecSplitWorkers, logger); err != nil {
+		if err := buildHashMap(ctx, dec, cfg, p, tmpDir, salt, f.Workers, logger); err != nil {
 			return fmt.Errorf("erigonfiles: build %s: %w", p, err)
 		}
 	}
@@ -126,10 +127,11 @@ func (f Files) WriteDomain(ctx context.Context, domainDir, tmpDir string, d snap
 	return nil
 }
 
-// compress writes the .kv with the domain's compressor config. DomainCompressCfg's single worker
-// keeps the dictionary, and so the file, deterministic for a given input.
-func compress(ctx context.Context, cfg statecfg.DomainCfg, path, tmpDir string, entries func(yield func(snap.DomainEntry) bool), logger log.Logger) error {
-	comp, err := seg.NewCompressor(ctx, "state-actor "+cfg.Name.String(), path, tmpDir, cfg.CompressCfg, log.LvlDebug, logger)
+// compress writes the .kv with the domain's compressor config at the given worker count.
+func compress(ctx context.Context, cfg statecfg.DomainCfg, path, tmpDir string, entries func(yield func(snap.DomainEntry) bool), workers int, logger log.Logger) error {
+	cc := cfg.CompressCfg
+	cc.Workers = max(cc.Workers, workers)
+	comp, err := seg.NewCompressor(ctx, "state-actor "+cfg.Name.String(), path, tmpDir, cc, log.LvlDebug, logger)
 	if err != nil {
 		return err
 	}
