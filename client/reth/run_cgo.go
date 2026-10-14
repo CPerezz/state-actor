@@ -12,10 +12,12 @@ import (
 
 	"github.com/erigontech/mdbx-go/mdbx"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/rlp"
 
 	"github.com/ethereum/state-actor/generator"
 	"github.com/ethereum/state-actor/genesis"
+	"github.com/ethereum/state-actor/internal/autofill"
 	"github.com/ethereum/state-actor/internal/entitygen"
 	"github.com/ethereum/state-actor/internal/manifest"
 	iReth "github.com/ethereum/state-actor/internal/reth"
@@ -125,7 +127,15 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 
 	const batchSize = defaultStreamBatchSize
 
-	if err := streamSpecStorage(ctx, envs, trieSorter, &cfg, stats); err != nil {
+	// Giants, largest first (Giant(seed,k) is pure in k; see internal/autofill/giants.go).
+	var giants []*autofill.Giant
+	if cfg.AutoFill != nil {
+		for k := range cfg.AutoFill.Giants {
+			giants = append(giants, cfg.AutoFill.Giant(cfg.Seed, k))
+		}
+	}
+	giantRoots, err := streamSpecStorage(ctx, envs, trieSorter, &cfg, stats, giants)
+	if err != nil {
 		return nil, fmt.Errorf("RunCgo: streamSpecStorage: %w", err)
 	}
 
@@ -246,6 +256,34 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 				cfg.Progress.Tick(int64(plan.NumContracts-remaining), int64(plan.NumContracts), "contracts")
 			}
 		}
+	}
+
+	// Giants' storage was streamed in Phase 0; only the account (nonce,
+	// balance, code, precomputed root) goes through the normal contract
+	// path. Not added to cfg.GenesisAccounts — WriteContracts preserves
+	// the preset Root since Storage is empty.
+	for _, g := range giants {
+		root, ok := giantRoots[g.AddrHash]
+		if !ok {
+			return nil, fmt.Errorf("RunCgo: giant %s missing phase0 root", g.Address.Hex())
+		}
+		acc := &entitygen.Account{
+			Address:  g.Address,
+			AddrHash: g.AddrHash,
+			StateAccount: &types.StateAccount{
+				Nonce:   g.Nonce,
+				Balance: g.Balance,
+				Root:    root,
+			},
+			Code: g.Code,
+		}
+		if err := WriteContracts(envs, trieSorter, []*entitygen.Account{acc}, 0, cfg.Archive, stats); err != nil {
+			return nil, fmt.Errorf("RunCgo: WriteContracts(giant %s): %w", g.Address.Hex(), err)
+		}
+		if err := putAccountRLP(acc, true); err != nil {
+			return nil, fmt.Errorf("RunCgo: putAccountRLP(giant): %w", err)
+		}
+		contractsCreated++
 	}
 
 	// Drain StoragesTrie now that every contract and PreAlloc entity has

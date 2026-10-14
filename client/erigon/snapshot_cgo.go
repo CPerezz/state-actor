@@ -19,6 +19,7 @@ import (
 	"github.com/holiman/uint256"
 
 	"github.com/ethereum/state-actor/generator"
+	"github.com/ethereum/state-actor/internal/autofill"
 	internalerigon "github.com/ethereum/state-actor/internal/erigon"
 	"github.com/ethereum/state-actor/internal/erigon/account"
 	internalcommitment "github.com/ethereum/state-actor/internal/erigon/commitment"
@@ -112,11 +113,17 @@ func envCacheBytes(envVar string, defaultGB int) int64 {
 
 // entityWork is one alloc entry queued for an encode-worker. The main
 // goroutine fills these and sends them on entityCh; workers consume
-// and call encodeEntity.
+// and call encodeEntity, or, when giant is set, encode the giant's
+// storage slots [lo, hi) instead.
 type entityWork struct {
-	addr  common.Address
-	entry *allocAccount
+	addr   common.Address
+	entry  *allocAccount
+	giant  *autofill.Giant
+	lo, hi uint64
 }
+
+// giantChunkSlots is how many giant storage slots one entityWork carries.
+const giantChunkSlots = 1 << 16
 
 // domainWrite is one (key, value) tuple ready to be Put into a specific
 // streamsort. Sent from encode workers to per-domain writer goroutines.
@@ -464,6 +471,26 @@ func writeSnapshots(
 			stats.ContractsCreated++
 			cfg.Progress.Tick(int64(i+1), int64(autoFill.NumContracts), "contracts")
 		}
+		// Giants: account through the normal path, storage as slot-index
+		// chunks generated on the workers (never materialized), largest first.
+		for k := 0; k < autoFill.Giants && pipelineErr == nil; k++ {
+			g := autoFill.Giant(cfg.Seed, k)
+			if err := sendEntity(entityWork{addr: g.Address, entry: &allocAccount{Nonce: g.Nonce, Balance: g.Balance.ToBig(), Code: g.Code}}); err != nil {
+				pipelineErr = err
+				break
+			}
+			for lo := uint64(0); lo < g.Slots; lo += giantChunkSlots {
+				if err := sendEntity(entityWork{addr: g.Address, giant: g, lo: lo, hi: min(lo+giantChunkSlots, g.Slots)}); err != nil {
+					pipelineErr = err
+					break
+				}
+			}
+			stats.CodeBytes += uint64(len(g.Code))
+			stats.StorageSlotsCreated += int(g.Slots)
+			stats.StorageBytes += g.Slots * 64
+			stats.ContractsCreated++
+			cfg.Progress.Tick(int64(k+1), int64(autoFill.Giants), "giants")
+		}
 	}
 	stats.TotalBytes = stats.StorageBytes + stats.CodeBytes
 
@@ -780,7 +807,15 @@ func autofillEncodeWorker(
 				// dropping them would silently lose rows.
 				return senders.flushAll()
 			}
-			if err := encodeEntity(ctx, ew, senders, counts); err != nil {
+			if ew.giant != nil {
+				part := uint8(internalcommitment.InputPart(ew.addr[:]))
+				for j := ew.lo; j < ew.hi; j++ {
+					key, value := ew.giant.Slot(j)
+					if err := encodeStorageSlot(ctx, ew.addr, key, value, part, senders, counts); err != nil {
+						return err
+					}
+				}
+			} else if err := encodeEntity(ctx, ew, senders, counts); err != nil {
 				return err
 			}
 		}

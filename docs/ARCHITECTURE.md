@@ -301,6 +301,11 @@ The truncated-normal storage sizing above is the `normal` storage model
 (default). `--storage-model=mainnet` instead draws each contract's slot
 count and value length from calibrated mainnet distributions in
 [`internal/autofill/mainnet_storage_table.go`](../internal/autofill/mainnet_storage_table.go).
+Contracts at or above 1M slots are giants
+([`internal/autofill/giants.go`](../internal/autofill/giants.go)): their slots
+are generated on demand and streamed in keccak order (`Giant.Sorted`, fed to
+`streamingtrie.SortedRoot` in each writer's Phase 0 pool; erigon encodes them
+in chunks on its worker pool), never materialized or sorted through a temp store.
 
 Spec-loaded entities (`--spec`) are separate: their distribution comes
 from the YAML schema (per-entity `approximate_size_bytes` resolved via

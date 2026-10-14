@@ -27,6 +27,8 @@ type FlagValues struct {
 
 	MdbxFillProfile    string // --mdbx-fill-profile (non-"fresh" means active)
 	MdbxFillOverridden bool   // --mdbx-fill has at least one Table=fill override
+
+	StorageModel string // --storage-model
 }
 
 // ValidateForClient returns nil when every flag in fv is compatible with
@@ -62,6 +64,11 @@ func ValidateForClient(client string, fv FlagValues) error {
 		case "ethrex":
 			return fmt.Errorf("--binary-trie is not supported with --client=ethrex (ethrex does not implement EIP-7864)")
 		}
+	}
+
+	// The binary-trie generator writes no giants (the contracts --storage-model=mainnet streams).
+	if fv.BinaryTrie && fv.StorageModel == "mainnet" {
+		return fmt.Errorf("--storage-model=mainnet is not supported with --binary-trie")
 	}
 
 	// --mdbx-fill-profile / --mdbx-fill — reth-only: every other client

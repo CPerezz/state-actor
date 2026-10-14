@@ -39,8 +39,13 @@ func TestValidateForClient_UnknownRejected(t *testing.T) {
 }
 
 func TestValidateForClient_BinaryTrieGethOnly(t *testing.T) {
-	if err := ValidateForClient("geth", FlagValues{BinaryTrie: true}); err != nil {
-		t.Errorf("geth + --binary-trie should be allowed: %v", err)
+	for _, m := range []string{"", "normal"} {
+		if err := ValidateForClient("geth", FlagValues{BinaryTrie: true, StorageModel: m}); err != nil {
+			t.Errorf("geth + --binary-trie + --storage-model=%q should be allowed: %v", m, err)
+		}
+	}
+	if err := ValidateForClient("geth", FlagValues{BinaryTrie: true, StorageModel: "mainnet"}); err == nil {
+		t.Error("geth + --binary-trie + --storage-model=mainnet should be rejected")
 	}
 	for _, c := range []string{"nethermind", "besu", "reth", "erigon", "ethrex"} {
 		err := ValidateForClient(c, FlagValues{BinaryTrie: true})

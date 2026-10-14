@@ -15,6 +15,7 @@ import (
 	gethrlp "github.com/ethereum/go-ethereum/rlp"
 
 	"github.com/ethereum/state-actor/generator"
+	"github.com/ethereum/state-actor/internal/autofill"
 	nethrlp "github.com/ethereum/state-actor/internal/neth/rlp"
 	"github.com/ethereum/state-actor/internal/streamsort"
 )
@@ -81,7 +82,14 @@ func writeSyntheticAccounts(
 	// slots each. FIFO would put one bloat on a worker mid-run, making it
 	// the wall-clock floor. Sort indices descending by len(pe.Storage) to
 	// launch the largest entities at t=0 across the first workers.
-	if err := runPhase0(ctx, cfg, dbs, genesisAccounts, stats); err != nil {
+	var giants []*autofill.Giant
+	if cfg.AutoFill != nil {
+		for k := range cfg.AutoFill.Giants {
+			giants = append(giants, cfg.AutoFill.Giant(cfg.Seed, k))
+		}
+	}
+	giantRoots, err := runPhase0(ctx, cfg, dbs, genesisAccounts, giants, stats)
+	if err != nil {
 		return common.Hash{}, fmt.Errorf("nethermind: phase 0: %w", err)
 	}
 
@@ -271,9 +279,33 @@ func writeSyntheticAccounts(
 		cfg.Progress.Tick(int64(i+1), int64(plannedContracts), "contracts")
 	}
 
+	// Giants' storage was written in Phase 0; only the account and code remain.
+	for _, g := range giants {
+		if err := codeSink.put(g.CodeHash[:], g.Code); err != nil {
+			return common.Hash{}, fmt.Errorf("write giant code: %w", err)
+		}
+		acc := &types.StateAccount{Nonce: g.Nonce, Balance: g.Balance, Root: giantRoots[g.AddrHash], CodeHash: g.CodeHash[:]}
+		data, err := gethrlp.EncodeToBytes(acc)
+		if err != nil {
+			return common.Hash{}, fmt.Errorf("encode giant %s: %w", g.Address.Hex(), err)
+		}
+		if err := sorter.Put(g.AddrHash[:], data); err != nil {
+			return common.Hash{}, fmt.Errorf("queue giant: %w", err)
+		}
+		if err := builder.writeFlatAccountRow([32]byte(g.AddrHash), acc); err != nil {
+			return common.Hash{}, fmt.Errorf("write giant flat account: %w", err)
+		}
+		if stats != nil {
+			stats.CodeBytes += uint64(len(g.Code))
+			stats.AccountBytes += uint64(len(data))
+			stats.ContractsCreated++
+			stats.StorageSlotsCreated += int(g.Slots)
+		}
+	}
+
 	// entitiesQueued is the exact count Put into the sorter above (genesis
 	// allocs + synthetic EOAs/contracts) — the Phase-2 progress total.
-	entitiesQueued := int64(len(genesisAccounts) + plannedContracts)
+	entitiesQueued := int64(len(genesisAccounts) + plannedContracts + len(giants))
 	if plan != nil {
 		entitiesQueued += int64(plan.NumEOAs)
 	}

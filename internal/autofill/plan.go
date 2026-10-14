@@ -24,6 +24,10 @@ type Plan struct {
 	DistinctBytecodes int
 	// StorageModel selects how DrawContract sizes and fills a contract's storage.
 	StorageModel StorageModel
+	// Giants is the StorageMainnet contract count at or above GiantMinSlots (see Giant), not
+	// counted in NumContracts; GiantSlots is their slot total.
+	Giants     int
+	GiantSlots uint64
 
 	// SkipDerivedHashes elides the RNG-neutral derived-hash work on the
 	// single-threaded draw goroutine (the AddrHash keccak and the
@@ -93,9 +97,9 @@ func PlanForBudget(topUp uint64) (*Plan, error) {
 // EOA (175 B). A non-nil Plan is safe to consume even when NumContracts is
 // zero (e.g. when bytecode budget is below the minimum code size).
 //
-// StorageMainnet instead derives the contract count from the storage budget and the mainnet mean
-// slot count. Contracts are drawn out of the account budget, so the total account count is the
-// same under both models.
+// StorageMainnet instead derives the contract count from the storage budget: drawn contracts at the
+// table's mean slot count plus Giants at or above GiantMinSlots (solveMainnetContracts). Contracts
+// are drawn out of the account budget, so the total account count is the same under both models.
 func PlanForBudgetProfile(topUp uint64, profile Profile, model StorageModel) (*Plan, error) {
 	bytesPerAccount := sizecal.BytesPerAccount("")
 	if topUp < bytesPerAccount {
@@ -108,7 +112,7 @@ func PlanForBudgetProfile(topUp uint64, profile Profile, model StorageModel) (*P
 	bCode := uint64(budgetF * rCode)
 	bStorage := uint64(budgetF * rStorage)
 
-	var numContracts int
+	var numContracts, giants int
 	storageSampler := Sampler{
 		Min: sizecal.MinContractStorage,
 		Max: sizecal.MaxContractStorage,
@@ -117,7 +121,7 @@ func PlanForBudgetProfile(topUp uint64, profile Profile, model StorageModel) (*P
 	bytesPerSlot := sizecal.BytesPerSlot("")
 	switch {
 	case model == StorageMainnet && bStorage >= bytesPerSlot:
-		numContracts = int(bStorage / bytesPerSlot * 1000 / mainnetMeanSlotsMilli)
+		numContracts, giants = solveMainnetContracts(bStorage / bytesPerSlot)
 	case bCode >= sizecal.MinContractCode && bStorage >= bytesPerSlot:
 		// Round bCode / MeanContractCode → contract count.
 		numContracts = int((bCode + sizecal.MeanContractCode/2) / sizecal.MeanContractCode)
@@ -130,13 +134,14 @@ func PlanForBudgetProfile(topUp uint64, profile Profile, model StorageModel) (*P
 		}
 	}
 
-	accountUsed := uint64(numContracts) * bytesPerAccount
+	totalContracts := numContracts + giants
+	accountUsed := uint64(totalContracts) * bytesPerAccount
 	var numEOAs int
 	if bAcct > accountUsed {
 		numEOAs = int((bAcct - accountUsed) / bytesPerAccount)
 	}
 
-	if numEOAs == 0 && numContracts == 0 {
+	if numEOAs == 0 && totalContracts == 0 {
 		return nil, fmt.Errorf("autofill: budget %d B too small for any entity", topUp)
 	}
 
@@ -154,8 +159,10 @@ func PlanForBudgetProfile(topUp uint64, profile Profile, model StorageModel) (*P
 		EOAFlavors:        DefaultEOAFlavors(),
 		CodeSampler:       codeSampler,
 		StorageSampler:    storageSampler,
-		DistinctBytecodes: max(numContracts/sizecal.MainnetAccountsPerDistinctBytecode, 1),
+		DistinctBytecodes: max(totalContracts/sizecal.MainnetAccountsPerDistinctBytecode, 1),
 		StorageModel:      model,
+		Giants:            giants,
+		GiantSlots:        giantSlotSum(giants),
 	}, nil
 }
 
