@@ -21,6 +21,7 @@ import (
 	"github.com/holiman/uint256"
 
 	"github.com/ethereum/state-actor/generator"
+	"github.com/ethereum/state-actor/internal/autofill"
 	"github.com/ethereum/state-actor/internal/entitygen"
 	ethrexinternal "github.com/ethereum/state-actor/internal/ethrex"
 	"github.com/ethereum/state-actor/internal/streamsort"
@@ -148,7 +149,13 @@ func writeState(
 	// so concurrent RocksDB writes are safe — each entity's addrHash prefix
 	// gives it a disjoint keyspace. Roots are content-addressed so worker
 	// completion order does not affect the final state root.
-	if err := runPhase0Storage(ctx, cfg, db, preAllocStorageRoots, stats); err != nil {
+	var giants []*autofill.Giant
+	if cfg.AutoFill != nil {
+		for k := range cfg.AutoFill.Giants {
+			giants = append(giants, cfg.AutoFill.Giant(cfg.Seed, k))
+		}
+	}
+	if err := runPhase0Storage(ctx, cfg, db, giants, preAllocStorageRoots, stats); err != nil {
 		return common.Hash{}, nil, err
 	}
 
@@ -239,6 +246,13 @@ func writeState(
 		})
 		if err != nil {
 			return common.Hash{}, nil, err
+		}
+	}
+
+	// Giants' storage was written in Phase 0; only the account goes through the sorter.
+	for _, g := range giants {
+		if err := sorter.Put(g.AddrHash[:], encodeEntity(g.Nonce, g.Balance, g.Code, nil)); err != nil {
+			return common.Hash{}, nil, fmt.Errorf("phase1 giant %s: %w", g.Address.Hex(), err)
 		}
 	}
 

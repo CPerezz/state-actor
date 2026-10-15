@@ -113,15 +113,17 @@
   `mainnet` draws each contract's slot count and each value's length from a
   full walk of a mainnet-derived reth store (25.2M storage accounts, 1.49B
   slots, the bloated test contract excluded): 55 % of contracts hold one slot,
-  97 % hold at most 28, a few hold millions (capped at 2^24), and values are
-  stored at their significant length (20 bytes for half of them). The contract
-  count follows from the storage budget and the mean slot count; contracts come
-  out of the account budget, so the total account count is unchanged. On a 1 GB
-  store: 99,751 contracts (normal: 20,972), slots per contract p50/p90/p99
-  1/10/152 (reference 1/10/154). The heavy tail means realized storage tracks
-  the budget only at large targets (100 GB: 1.28x seed-to-seed spread); small
-  targets (1 GB) vary up to ~9x by seed. Changes the state root; recorded in
-  the manifest and restored by `reproduce`.
+  97 % hold at most 28, and values are stored at their significant length (20
+  bytes for half of them). Contracts with 1M+ slots ("giants") follow
+  mainnet's alpha≈1 power law with no cap; their number grows with the store.
+  A giant's slots are generated on demand in keccak order: no client holds
+  them in memory or sorts them through a temp store. The contract count
+  follows from the storage budget; contracts come out of the account budget,
+  so the total account count is unchanged. On a 1 GB store: 117,038
+  contracts plus one 1M-slot giant (normal: 20,972 contracts). Realized
+  storage over 20 seeds spans 1.55x of the budget at 1 GB and 1.04x at
+  100 GB. Not supported with `--binary-trie`. Changes the state root;
+  recorded in the manifest and restored by `reproduce`.
 
 - **reth: `--mdbx-fill-profile` and `--mdbx-fill` control MDBX B-tree page
   fill.** `migrated` and `aged` target a reference node's measured leaf fill

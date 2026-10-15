@@ -142,6 +142,10 @@ type Composition struct {
 	DelegationRate float64 `json:"delegation_rate"`
 	// DistinctBytecodes is the code-pool size shared by NumContracts contracts.
 	DistinctBytecodes int `json:"distinct_bytecodes"`
+	// Giants and GiantSlots are --storage-model=mainnet's contracts at or above
+	// autofill.GiantMinSlots and their planned slot total; not counted in NumContracts.
+	Giants     int    `json:"giants,omitempty"`
+	GiantSlots uint64 `json:"giant_slots,omitempty"`
 }
 
 // NewBuild assembles the Build record from the linked-in version and the

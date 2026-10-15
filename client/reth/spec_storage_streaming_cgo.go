@@ -15,6 +15,7 @@ import (
 	"github.com/holiman/uint256"
 
 	"github.com/ethereum/state-actor/generator"
+	"github.com/ethereum/state-actor/internal/autofill"
 	"github.com/ethereum/state-actor/internal/progress"
 	iReth "github.com/ethereum/state-actor/internal/reth"
 	"github.com/ethereum/state-actor/internal/streamingtrie"
@@ -53,7 +54,6 @@ type slotPrepared struct {
 // (see storagesTrieEmitter) as the worker's HashBuilder emits them, not
 // buffered here; drainStoragesTrie writes them after RunCgo's last writer.
 type preparedEntity struct {
-	idx      int
 	addr     common.Address
 	addrHash common.Hash
 	blockKey []byte // BlockNumberAddress-encoded
@@ -62,14 +62,22 @@ type preparedEntity struct {
 	errCh    chan error
 }
 
-// streamSpecStorage writes each PreAlloc entity's Storage into reth's
-// four storage tables, computes the storage MPT root, and splices it
-// into cfg.GenesisAccounts[addr].Root for the alloc handler. StoragesTrie
+// streamedEntity is one Phase-0 account: cfg.PreAlloc[idx], or auto-fill giant g when non-nil.
+type streamedEntity struct {
+	idx int
+	g   *autofill.Giant
+}
+
+// streamSpecStorage writes each PreAlloc entity's Storage and each auto-fill
+// giant's slots into reth's four storage tables, computes the storage MPT
+// root, and splices it into cfg.GenesisAccounts[addr].Root for the alloc
+// handler; giants' roots are returned keyed by addrHash instead. StoragesTrie
 // rows are spilled into trieRows (shared with WriteContracts); the caller
 // drains it after every writer, including this one, has finished.
 //
-// Architecture: N parallel workers each (a) drain their entity's iter
-// into a per-call streamsort.Store, (b) walk the sorted store driving
+// Architecture: N parallel workers each (a) drain their spec entity's iter
+// into a per-call streamsort.Store (giants are already keccak-sorted, no
+// drain), (b) walk the sorted slots driving
 // the HashBuilder and pre-encoding all 4 per-slot byte buffers into
 // chunks. The single consumer goroutine opens one Mdbx.Update per
 // entity and does just the 4 txn.Put calls per slot — the encoding,
@@ -80,25 +88,25 @@ type preparedEntity struct {
 // linearly. MDBX enforces single-writer-per-env so the commits run
 // serially anyway; the win is offloading every cycle of CPU work to
 // the workers so the consumer is pure I/O.
-func streamSpecStorage(ctx context.Context, envs *Envs, trieRows *streamsort.Store, cfg *generator.Config, stats *generator.Stats) error {
-	if len(cfg.PreAlloc) == 0 {
-		return nil
-	}
-	indices := make([]int, 0, len(cfg.PreAlloc))
+func streamSpecStorage(ctx context.Context, envs *Envs, trieRows *streamsort.Store, cfg *generator.Config, stats *generator.Stats, giants []*autofill.Giant) (map[common.Hash]common.Hash, error) {
+	items := make([]streamedEntity, 0, len(cfg.PreAlloc)+len(giants))
 	for i := range cfg.PreAlloc {
 		if cfg.PreAlloc[i].Storage != nil {
-			indices = append(indices, i)
+			items = append(items, streamedEntity{idx: i})
 		}
 	}
-	if len(indices) == 0 {
-		return nil
+	for _, g := range giants {
+		items = append(items, streamedEntity{g: g})
+	}
+	if len(items) == 0 {
+		return nil, nil
 	}
 
 	// Phase 0 streams each spec entity's storage slots and is otherwise silent
 	// for hours on bloat specs. The count-only slot heartbeat funnels every
 	// worker's per-slot count through one SlotMeter; each worker holds its own
 	// SlotWorker so the hot per-slot path stays cheap (one non-atomic add + mask).
-	cfg.Progress.Stage("reth: phase 0 — spec storage")
+	cfg.Progress.Stage("reth: phase 0 — streamed storage")
 	slotMeter := cfg.Progress.SlotMeter()
 
 	workers := runtime.NumCPU()
@@ -108,14 +116,14 @@ func streamSpecStorage(ctx context.Context, envs *Envs, trieRows *streamsort.Sto
 	if workers > maxStreamSpecStorageWorkers {
 		workers = maxStreamSpecStorageWorkers
 	}
-	if workers > len(indices) {
-		workers = len(indices)
+	if workers > len(items) {
+		workers = len(items)
 	}
 
 	drainCtx, cancelDrain := context.WithCancelCause(ctx)
 	defer cancelDrain(nil)
 
-	entityCh := make(chan int, workers*2)
+	entityCh := make(chan streamedEntity, workers*2)
 	// preparedCh buffer of workers*2 absorbs small latency spikes; the
 	// consumer applies back-pressure via the per-entity chunkCh inside
 	// each preparedEntity.
@@ -127,11 +135,11 @@ func streamSpecStorage(ctx context.Context, envs *Envs, trieRows *streamsort.Sto
 		go func() {
 			defer wg.Done()
 			slotW := slotMeter.Worker()
-			for i := range entityCh {
+			for it := range entityCh {
 				if drainCtx.Err() != nil {
 					return
 				}
-				if err := drainAndEncodeEntity(drainCtx, cfg, trieRows, i, preparedCh, slotW); err != nil {
+				if err := drainAndEncodeEntity(drainCtx, cfg, trieRows, it, preparedCh, slotW); err != nil {
 					cancelDrain(err)
 					return
 				}
@@ -141,9 +149,9 @@ func streamSpecStorage(ctx context.Context, envs *Envs, trieRows *streamsort.Sto
 
 	go func() {
 		defer close(entityCh)
-		for _, i := range indices {
+		for _, it := range items {
 			select {
-			case entityCh <- i:
+			case entityCh <- it:
 			case <-drainCtx.Done():
 				return
 			}
@@ -155,6 +163,7 @@ func streamSpecStorage(ctx context.Context, envs *Envs, trieRows *streamsort.Sto
 		close(preparedCh)
 	}()
 
+	giantRoots := make(map[common.Hash]common.Hash, len(giants))
 	var totalStorageBytes uint64
 	var writeErr error
 	for ent := range preparedCh {
@@ -170,66 +179,72 @@ func streamSpecStorage(ctx context.Context, envs *Envs, trieRows *streamsort.Sto
 			cancelDrain(err)
 			continue
 		}
-		if acc, ok := cfg.GenesisAccounts[ent.addr]; ok && acc != nil {
-			// Wait for the worker's computed root. By the time chunkCh
-			// closed (consumeEntity returns), exactly one of {rootCh,
-			// errCh} has a value.
-			select {
-			case root := <-ent.rootCh:
+		// Wait for the worker's computed root. By the time chunkCh
+		// closed (consumeEntity returns), exactly one of {rootCh,
+		// errCh} has a value.
+		select {
+		case root := <-ent.rootCh:
+			if acc, ok := cfg.GenesisAccounts[ent.addr]; ok && acc != nil {
 				acc.Root = root
-			case err := <-ent.errCh:
-				writeErr = err
-				cancelDrain(err)
-				continue
-			case <-ctx.Done():
-				return ctx.Err()
+			} else {
+				giantRoots[ent.addrHash] = root
 			}
+		case err := <-ent.errCh:
+			writeErr = err
+			cancelDrain(err)
+			continue
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		}
 		totalStorageBytes += bytesWritten
 	}
 
 	if writeErr != nil {
-		return writeErr
+		return nil, writeErr
 	}
 	if cause := context.Cause(drainCtx); cause != nil {
-		return cause
+		return nil, cause
 	}
 
 	if stats != nil {
 		stats.StorageBytes += totalStorageBytes
 	}
-	return nil
+	return giantRoots, nil
 }
 
-// drainAndEncodeEntity runs on a worker goroutine. It drains the
-// entity's storage iter into a streamsort, then walks the sorted store
-// driving the HashBuilder AND pre-encoding the per-slot byte buffers
-// into chunks sent to the consumer via ent.chunkCh. HashBuilder's
-// StoragesTrie emissions go straight into trieRows (shared across workers,
-// serialized under its own putMu — see storagesTrieEmitter).
+// drainAndEncodeEntity runs on a worker goroutine. It drains a spec
+// entity's storage iter into a streamsort (giants stream pre-sorted), then
+// walks the sorted slots driving the HashBuilder AND pre-encoding the
+// per-slot byte buffers into chunks sent to the consumer via ent.chunkCh.
+// HashBuilder's StoragesTrie emissions go straight into trieRows (shared
+// across workers, serialized under its own putMu — see storagesTrieEmitter).
 func drainAndEncodeEntity(
 	drainCtx context.Context,
 	cfg *generator.Config,
 	trieRows *streamsort.Store,
-	idx int,
+	it streamedEntity,
 	preparedCh chan<- *preparedEntity,
 	slotW *progress.SlotWorker,
 ) error {
-	pe := &cfg.PreAlloc[idx]
-	addr := pe.Address
-	addrHash := crypto.Keccak256Hash(addr[:])
-
-	d, err := streamingtrie.Drain(cfg.DBPath, pe.Storage)
-	if err != nil {
-		return fmt.Errorf("reth: drain spec storage[%d] %s: %w", idx, addr.Hex(), err)
+	var d *streamingtrie.Drained // nil for giants; Close is nil-safe
+	var addr common.Address
+	if it.g != nil {
+		addr = it.g.Address
+	} else {
+		pe := &cfg.PreAlloc[it.idx]
+		addr = pe.Address
+		var err error
+		if d, err = streamingtrie.Drain(cfg.DBPath, pe.Storage); err != nil {
+			return fmt.Errorf("reth: drain spec storage[%d] %s: %w", it.idx, addr.Hex(), err)
+		}
 	}
+	addrHash := crypto.Keccak256Hash(addr[:])
 
 	blockKey := iReth.BlockNumberAddress{BlockNumber: 0, Address: addr}
 	var blockKeyBuf bytes.Buffer
 	blockKey.EncodeKey(&blockKeyBuf)
 
 	ent := &preparedEntity{
-		idx:      idx,
 		addr:     addr,
 		addrHash: addrHash,
 		blockKey: blockKeyBuf.Bytes(),
@@ -292,10 +307,16 @@ func drainAndEncodeEntity(
 		return nil
 	}
 
-	root, err := d.IterateRoot(hb, sink)
+	var root common.Hash
+	var err error
+	if it.g != nil {
+		root, err = streamingtrie.SortedRoot(it.g.Sorted, hb, sink)
+	} else {
+		root, err = d.IterateRoot(hb, sink)
+	}
 	d.Close()
 	if err != nil {
-		ent.errCh <- fmt.Errorf("reth: iterate spec storage[%d] %s: %w", idx, addr.Hex(), err)
+		ent.errCh <- fmt.Errorf("reth: iterate storage %s: %w", addr.Hex(), err)
 		close(ent.chunkCh)
 		return nil
 	}

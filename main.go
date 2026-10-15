@@ -51,7 +51,7 @@ var (
 	targetSize = flag.String("target-size", "", "Advisory budget (e.g. '5GB', '500MB') that sizes the auto-fill of 20/10/70 mainnet-shaped synthetic state. Required unless --spec is set. With --spec, fills the headroom after the spec's projected cost; if the spec already meets the target, no auto-fill runs. Not a hard on-disk cap — actual size may vary per client. Honored by geth, besu, nethermind, reth, ethrex, and erigon.")
 
 	autofillProfile = flag.String("autofill-profile", "mainnet", "Auto-fill byte-split profile: 'mainnet' (20/10/70 account/code/storage, default) or 'accounts' (account-trie only — all EOAs, no contracts/storage). 'accounts' generates account-dominated tries for low-memory big-trie validation; it stays on the streaming DrawEOA path, so all clients must use the same value + --seed for cross-client state-root invariance.")
-	storageModel    = flag.String("storage-model", "normal", "Auto-fill contract storage: 'normal' (default: every contract ~35 KiB of 32-byte random values) or 'mainnet' (slot counts and value lengths calibrated on a mainnet-derived reth store: most contracts hold 1-3 slots, a few hold millions, values are compact; the contract count follows from the storage budget). Changes the state root; all clients must use the same value + --seed for cross-client state-root invariance.")
+	storageModel    = flag.String("storage-model", "normal", "Auto-fill contract storage: 'normal' (default: every contract ~35 KiB of 32-byte random values) or 'mainnet' (slot counts and value lengths calibrated on a mainnet-derived reth store: most contracts hold 1-3 slots, values are compact, and contracts above 1M slots follow a power law with no cap; the contract count follows from the storage budget). Changes the state root; all clients must use the same value + --seed for cross-client state-root invariance. Not supported with --binary-trie.")
 
 	fork      = flag.String("fork", "", "Hard fork active at genesis. Empty (default) resolves to the latest fork the chosen --client can write. Use --list-forks to see all values.")
 	listForks = flag.Bool("list-forks", false, "Print the list of accepted --fork values and exit.")
@@ -167,6 +167,7 @@ func generate(reproducedFrom string) *generator.Stats {
 		Fork:               *fork,
 		MdbxFillProfile:    *mdbxFillProfile,
 		MdbxFillOverridden: len(mdbxFillOverrides) > 0,
+		StorageModel:       *storageModel,
 	}); err != nil {
 		log.Fatalf("%v", err)
 	}
@@ -322,8 +323,8 @@ func generate(reproducedFrom string) *generator.Stats {
 			log.Printf("  Target Size:  %s", formatBytes(config.TargetSize))
 		}
 		if config.AutoFill != nil {
-			log.Printf("  Auto-fill:    %d EOAs / %d contracts (mainnet 20/10/70)",
-				config.AutoFill.NumEOAs, config.AutoFill.NumContracts)
+			log.Printf("  Auto-fill:    %d EOAs / %d contracts / %d giants (mainnet 20/10/70)",
+				config.AutoFill.NumEOAs, config.AutoFill.NumContracts, config.AutoFill.Giants)
 		}
 		log.Printf("  Fork:         %s", chosenFork)
 		log.Printf("  Chain ID:     %d", *chainID)
@@ -552,6 +553,8 @@ func compositionFromPlan(plan *autofill.Plan) *manifest.Composition {
 		NumContracts:      plan.NumContracts,
 		DelegationRate:    plan.EOAFlavors.HasDelegation,
 		DistinctBytecodes: plan.DistinctBytecodes,
+		Giants:            plan.Giants,
+		GiantSlots:        plan.GiantSlots,
 	}
 }
 

@@ -23,7 +23,7 @@ func TestParseStorageModel(t *testing.T) {
 }
 
 // The account budget alone sets the total account count, so switching the storage model may move
-// accounts between EOAs and contracts but never change their sum.
+// accounts between EOAs, contracts and giants but never change their sum.
 func TestMainnetPlanKeepsAccountTotal(t *testing.T) {
 	const budget = 10 << 30
 	normal, err := PlanForBudgetProfile(budget, ProfileMainnet, StorageNormal)
@@ -34,7 +34,7 @@ func TestMainnetPlanKeepsAccountTotal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a, b := normal.NumEOAs+normal.NumContracts, mainnet.NumEOAs+mainnet.NumContracts; a-b > 1 || b-a > 1 {
+	if a, b := normal.NumEOAs+normal.NumContracts, mainnet.NumEOAs+mainnet.NumContracts+mainnet.Giants; a-b > 1 || b-a > 1 {
 		t.Errorf("account total moved: normal %d, mainnet %d", a, b)
 	}
 	if mainnet.NumContracts <= normal.NumContracts {
@@ -44,7 +44,7 @@ func TestMainnetPlanKeepsAccountTotal(t *testing.T) {
 }
 
 // Draws must reproduce the calibrated shape: over half the contracts hold one slot, about 97% hold
-// at most 28, none exceeds the cap; values carry exactly their drawn significant bytes, about half
+// at most 28, none reaches a giant; values carry exactly their drawn significant bytes, about half
 // of them 20 (addresses).
 func TestMainnetDrawsMatchCalibration(t *testing.T) {
 	rng := mrand.New(mrand.NewSource(1))
@@ -52,8 +52,8 @@ func TestMainnetDrawsMatchCalibration(t *testing.T) {
 	var one, small int
 	for range n {
 		s := drawMainnetSlots(rng)
-		if s < 1 || s > mainnetMaxSlots {
-			t.Fatalf("slot count %d outside [1, %d]", s, mainnetMaxSlots)
+		if s < 1 || s >= GiantMinSlots {
+			t.Fatalf("slot count %d outside [1, %d)", s, GiantMinSlots)
 		}
 		if s == 1 {
 			one++
@@ -96,9 +96,9 @@ func TestMainnetDrawsMatchCalibration(t *testing.T) {
 // seed: sha256 over each contract's address, slot count and every slot's key+value, in draw order.
 // Catches any accidental drift in the mainnet draw stream (table edits, RNG reordering).
 //
-// To update (when intentional): change t.Logf to t.Fatalf below, run the test, copy the printed
+// To update (when intentional): change t.Errorf to t.Logf below, run the test, copy the printed
 // digest here.
-const storageMainnetDrawDigest = "aca919efa9f0ba36256b79eaf1955887dba3c187961af272ccd0bba16ce40089"
+const storageMainnetDrawDigest = "bbb7a861ba168ae576cbab68587196e302dde24e4fa519affb92ae4f7f9c87d1"
 
 func TestMainnetDrawStreamGolden(t *testing.T) {
 	plan, err := PlanForBudgetProfile(1<<30, ProfileMainnet, StorageMainnet)
